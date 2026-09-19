@@ -3,8 +3,19 @@ import sys, struct, json
 
 FIXED_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
 
+# Model files come from the internet, so every length read from one is checked
+# against what is actually left in the file: a corrupt or hostile header must
+# not make the probe allocate terabytes or spin at end-of-file forever.
+def remaining(f):
+    here = f.tell()
+    end = f.seek(0, 2)
+    f.seek(here)
+    return end - here
+
 def read_str(f):
     (n,) = struct.unpack('<Q', f.read(8))
+    if n > remaining(f):
+        raise ValueError('string length %d runs past end of file' % n)
     return f.read(n).decode('utf-8', errors='replace')
 
 def skip_value(f, vtype):
@@ -13,6 +24,8 @@ def skip_value(f, vtype):
     elif vtype == 9:
         (elem_type,) = struct.unpack('<I', f.read(4))
         (count,) = struct.unpack('<Q', f.read(8))
+        if count > remaining(f):
+            raise ValueError('array of %d runs past end of file' % count)
         for _ in range(count):
             skip_value(f, elem_type)
     elif vtype in FIXED_SIZES:

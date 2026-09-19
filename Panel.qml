@@ -1647,6 +1647,7 @@ Panel {
     id: capabilityProbe
     command: ["bash", "-lc",
       "command -v systemd-run >/dev/null 2>&1 && echo 'systemd=1' || echo 'systemd=0'; " +
+      "[ -d \"$HOME/.pi/agent\" ] && echo 'pi=1'; " +
       "for b in " + Backends.llamaBinaryCandidates(Quickshell.env("HOME")).map(root.shellQuote).join(" ") + "; do " +
       "  [ -x \"$b\" ] && { echo \"llama=$b\"; break; }; done; " +
       "command -v llama-server >/dev/null 2>&1 && echo \"llamapath=$(command -v llama-server)\"; " +
@@ -1667,6 +1668,7 @@ Panel {
           var key = line.slice(0, eq)
           var value = line.slice(eq + 1)
           if (key === "systemd") root.hasSystemdRun = value === "1"
+          else if (key === "pi") root.piInstalled = value === "1"
           else if (key === "llama" && root.detectedLlamaBinary === "") root.detectedLlamaBinary = value
           else if (key === "llamapath" && root.detectedLlamaBinary === "") root.detectedLlamaBinary = value
           else if (key === "ollama" && root.detectedOllamaBinary === "") root.detectedOllamaBinary = value
@@ -2662,6 +2664,9 @@ Panel {
 
   readonly property string piCataloguePath: expandPath("~/.pi/agent/models.json")
   property bool syncPiCatalogue: true
+  // Only for people who use pi: without ~/.pi/agent the plugin writes nothing
+  // there, rather than creating another program's config uninvited.
+  property bool piInstalled: false
   // Set while a sync is in flight, so the file's own reload does not re-enter.
   property bool piWriting: false
   // False empties the provider's model list instead of deleting the provider,
@@ -2722,7 +2727,7 @@ Panel {
   }
 
   function writePiCatalogue(serving) {
-    if (!root.syncPiCatalogue) return
+    if (!root.syncPiCatalogue || !root.piInstalled) return
     root.piServing = serving
     root.piWriting = true
     piCatalogueFile.reload()
@@ -3564,6 +3569,20 @@ Panel {
                 validator: IntValidator { bottom: 1; top: 65535 }
                 onEditingFinished: root.setPort(text)
               }
+            }
+
+            // llama-server runs without an API key here, so an endpoint off
+            // loopback serves the model -- and its slot save/restore API -- to
+            // anyone who can reach the port.
+            Text {
+              Layout.fillWidth: true
+              visible: !/^(127\.|localhost$|::1$)/.test(String(root.host).trim())
+              text: "⚠ " + root.host + " is reachable from other machines, and the server has no API key. " +
+                    "Use 127.0.0.1 unless you mean to share it."
+              color: root.bar.urgent
+              wrapMode: Text.WordWrap
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
             }
 
             Text {

@@ -215,7 +215,10 @@ function ollamaLaunch(cfg) {
 // quoting function so values with spaces survive.
 function envPrefix(env, quote) {
   var out = []
-  for (var key in env) out.push(key + "=" + quote(String(env[key])))
+  // Names go into the script unquoted, so anything that is not a plain
+  // variable name is dropped rather than trusted.
+  for (var key in env)
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) out.push(key + "=" + quote(String(env[key])))
   return out.join(" ")
 }
 

@@ -59,14 +59,36 @@ GPU_LIBS = [("cuda", "CUDA"), ("hip", "ROCm"), ("vulkan", "Vulkan"),
             ("sycl", "SYCL"), ("metal", "Metal"), ("opencl", "OpenCL")]
 
 
+def trusted(path):
+    # Found builds are run (--version, --help) to identify them, so one is only
+    # picked up automatically if nobody else could have put it there: owned by
+    # this user or root, and not writable by group or others.
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return st.st_uid in (os.getuid(), 0) and not (st.st_mode & 0o022)
+
+
+def llama_checkout(path):
+    # Globbed builds must also live in a llama-named checkout ("llama.cpp",
+    # "ik_llama.cpp", "llama-cpp-turboquant-cuda"): a stray repo that happens
+    # to ship a build/bin/llama-server is not run just for existing.
+    parts = os.path.realpath(path).split(os.sep)
+    root = parts[parts.index("build") - 1] if "build" in parts[1:] else ""
+    return "llama" in root.lower()
+
+
 def candidates(extra):
     seen, out = set(), []
 
-    def add(p):
+    def add(p, check=None):
         if not p:
             return
         p = os.path.expanduser(p)
         if not (os.path.isfile(p) and os.access(p, os.X_OK)):
+            return
+        if check and not check(p):
             return
         real = os.path.realpath(p)
         if real in seen:
@@ -74,14 +96,15 @@ def candidates(extra):
         seen.add(real)
         out.append(p)
 
+    # Configured paths were named by the user, so they are taken as given.
     for p in extra:
         add(p)
     for p in FIXED:
-        add(p)
-    add(shutil.which("llama-server"))
+        add(p, trusted)
+    add(shutil.which("llama-server"), trusted)
     for pattern in GLOBS:
         for p in sorted(glob.glob(pattern)):
-            add(p)
+            add(p, lambda q: trusted(q) and (q.startswith("/opt/") or llama_checkout(q)))
     return out
 
 
