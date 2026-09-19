@@ -57,16 +57,48 @@ Nothing is assumed from anyone else's machine. Choices are saved to the
 widget's settings in `shell.json`; run it again any time with **Setup…** at the
 bottom of the panel.
 
-Upgrading from an earlier id (`user.local-ai-server` or `user.llama-server`)?
-Run `./migrate.sh` first — it rewrites the id in your bar layout (keeping the widget's
-position) and copies your saved settings across. It backs up `shell.json`
-and is safe to run twice.
 
-## Requirements
+## Remove
 
-At least one backend, plus `curl`, `python3`, `bash` and GNU `find`.
-`systemd-run` is optional but recommended (see below). A Nerd Font is
-assumed by the Omarchy bar itself.
+```bash
+omarchy plugin remove sxy.local-ai-server
+```
+
+A server left running (see *Surviving `omarchy restart shell`*) is not stopped
+by removing the widget — stop it first from the panel, or afterwards with
+`systemctl --user stop sxy-local-ai-server-llamacpp` (or `-ollama`). Settings
+and saved prompt caches stay in `~/.local/state/omarchy/sxy.local-ai-server/`;
+the caches can be several GB, so delete that folder too if you are done with
+it.
+
+## Dependencies and privileges
+
+**Needs:** at least one backend (`llama-server` from llama.cpp or a fork, or
+`ollama`), plus `bash`, `curl`, `python3` and GNU `find`. Optional: `git`
+(names each llama.cpp build after its checkout), `systemd-run` (strongly
+recommended, see below), `nvidia-smi` or `rocm-smi` (VRAM-aware suggestions).
+
+**Runs:** the backend server, as a transient **systemd user unit**
+(`sxy-local-ai-server-<backend>`) so it survives shell restarts — or detached
+with `setsid` without systemd. Short-lived helpers: `llama_builds.py` runs each
+detected `llama-server` with `--version`/`--help` to identify it (only builds
+owned by you or root, not writable by others, and — for ones found by scanning
+`~` — inside a llama-named checkout), `gguf_probe.py` reads model headers,
+`slot_kv.py` saves/restores the prompt cache, `hw_probe.sh` reads GPU/CPU/RAM.
+
+**Network:** only the server's own endpoint (default `127.0.0.1`). No
+downloads, no telemetry. The panel warns if you set a non-loopback host,
+because llama-server runs without an API key.
+
+**Writes:** its own state in `~/.local/state/omarchy/sxy.local-ai-server/`
+(settings, per-model tuning, prompt caches). The first-run setup saves your
+binary and models-folder choices to this widget's entry in `shell.json`
+through `omarchy bar set`, and creates a models folder only if you type one in.
+Nothing else in your configuration is touched.
+
+**Privileges:** never uses `sudo`. The only privileged action is **Take over**
+on a system `ollama.service`, which runs `systemctl stop ollama` and so asks
+for authentication through polkit — only when you press it.
 
 ## Settings
 
@@ -306,10 +338,10 @@ CUDA-specific workarounds (`GGML_CUDA_REGISTER_HOST`,
 
 ## ollama as a system service
 
-A root-owned `ollama.service` cannot be stopped by this widget (that needs
-privileges it does not have). It is detected, adopted and monitored, and the
-Stop button is disabled with an explanatory note. Manage it with
-`systemctl`. A server the widget started itself is fully controllable.
+A root-owned `ollama.service` is detected and monitored, but this widget
+cannot stop it on its own: the header marks it **external** and Stop is
+disabled. **Take over** stops the system service (asking for authentication)
+and starts an instance the widget controls, serving the same model store.
 
 ## Development
 
@@ -330,26 +362,3 @@ Saving any file under `~/.config/omarchy/plugins/` triggers a plugin reload,
 but a widget already on the bar is not always rebuilt by it — run
 `omarchy restart shell` to be sure you are looking at the new code (a running
 server survives it).
-
-## Idées non implémentées
-
-### Liens symboliques vers les blobs ollama
-
-Les modèles ollama sont déjà exposés à llama.cpp en pointant directement sur le
-blob (voir « Partage de modèles »). Une amélioration possible : créer des liens
-symboliques lisibles — `~/models/shared/qwen3-8b.gguf` → le blob — pour que
-LM Studio, jan ou n'importe quel outil acceptant un chemin GGUF les utilise
-sans dupliquer les fichiers.
-
-Limite connue à documenter au passage : ollama empaquette les GGUF de modèles
-récents plus vite que llama.cpp ne les prend en charge. Mesuré sur ce système :
-
-- `qwen3:8b` se charge sans problème depuis le blob ;
-- `gemma4:e4b` échoue avec `wrong number of tensors; expected 2131, got 720`.
-
-Ce n'est pas un défaut de la méthode — llama.cpp reconnaît les GGUF par leurs
-octets magiques, pointer sur le blob est la technique recommandée. C'est un
-décalage de version. Pour gemma4 en particulier, mieux vaut s'abstenir : les
-Per-Layer Embeddings des variantes E2B/E4B ne sont pas implémentés dans le
-graphe de calcul de llama.cpp (ggml-org/llama.cpp#22243), donc le modèle
-tournerait avec une qualité dégradée sans rien signaler.

@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "sxy.local-ai-server",
   "name": "Local AI Server",
-  "version": "2.5.0",
+  "version": "3.0.0",
   "author": "sxy",
   "license": "MIT",
-  "description": "Start, stop and monitor a local AI server (llama.cpp or ollama) with live pp/tg throughput",
+  "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Local AI Server",
-    "description": "Start, stop and monitor a local AI server (llama.cpp or ollama) with live pp/tg throughput",
+    "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts.",
     "category": "Dev",
     "allowMultiple": false,
     "defaultSection": "right",

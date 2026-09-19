@@ -11,7 +11,6 @@ import "Backends.js" as Backends
 import "Hardware.js" as Hardware
 import "Params.js" as Params
 import "Profiles.js" as Profiles
-import "PiConfig.js" as PiConfig
 
 // Local AI server manager.
 //
@@ -118,9 +117,6 @@ Panel {
   // token of KV cache costs depends on it, so the context suggestion is only
   // a real calculation once a model is picked.
   property var modelGeometry: ({})
-  // path -> {tools, thinking, mtp} from gguf_probe, kept so the pi catalogue
-  // can describe each model's capabilities.
-  property var modelCaps: ({})
   readonly property var selectedGeometry: root.modelGeometry[root.selectedModel] || null
 
   // Recomputed as the inputs change, so the suggestion tracks the settings
@@ -1685,7 +1681,6 @@ Panel {
     id: capabilityProbe
     command: ["bash", "-lc",
       "command -v systemd-run >/dev/null 2>&1 && echo 'systemd=1' || echo 'systemd=0'; " +
-      "[ -d \"$HOME/.pi/agent\" ] && echo 'pi=1'; " +
       "for b in " + Backends.llamaBinaryCandidates(Quickshell.env("HOME")).map(root.shellQuote).join(" ") + "; do " +
       "  [ -x \"$b\" ] && { echo \"llama=$b\"; break; }; done; " +
       "command -v llama-server >/dev/null 2>&1 && echo \"llamapath=$(command -v llama-server)\"; " +
@@ -1706,7 +1701,6 @@ Panel {
           var key = line.slice(0, eq)
           var value = line.slice(eq + 1)
           if (key === "systemd") root.hasSystemdRun = value === "1"
-          else if (key === "pi") root.piInstalled = value === "1"
           else if (key === "llama" && root.detectedLlamaBinary === "") root.detectedLlamaBinary = value
           else if (key === "llamapath" && root.detectedLlamaBinary === "") root.detectedLlamaBinary = value
           else if (key === "ollama" && root.detectedOllamaBinary === "") root.detectedOllamaBinary = value
@@ -1870,7 +1864,6 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         var caps = Model.parseProbeCapabilities(text)
-        root.modelCaps = caps
         root.modelGeometry = Model.parseProbeGeometry(text)
         root.modelOptions = root.buildModelOptions(root.pendingModelFiles, caps)
         root.scanning = false
@@ -2062,7 +2055,6 @@ Panel {
         root.running = true
         root.adopted = true
         root.healthUrl = Backends.healthUrl(root.backend, root.host, root.port)
-        root.writePiCatalogue(true)
         // Determine whether this is our own transient unit (stoppable) or an
         // externally managed server such as a root-owned ollama.service.
         //
@@ -2466,7 +2458,6 @@ Panel {
     unitWatchTimer.stop()
     root.stopMetrics()
     var detail = root.lastErrorLine()
-    root.writePiCatalogue(false)
     root.lastError = (root.starting ? "Server failed to start" : "Server stopped") +
       (state === "failed" ? " (crashed)" : "") + (detail ? ": " + detail : "")
     root.starting = false
@@ -2605,7 +2596,6 @@ Panel {
     serverProc.running = false
     root.killOrphans()
     root.clearRestartState()
-    root.writePiCatalogue(false)
     root.running = false
     root.stopping = false
     root.adopted = false
@@ -2686,116 +2676,10 @@ Panel {
           root.readRunningArgs()
           root.lastDecodeSample = null
           root.startMetrics()
-          // Now that the endpoint answers, publish it to pi with the context
-          // the server was actually launched with.
-          root.writePiCatalogue(true)
         }
       }
     }
   }
-
-  // ---- pi catalogue sync ----
-  //
-  // Keeps ~/.pi/agent/models.json describing what is actually serving: the
-  // live endpoint, the context the server was launched with, and each model's
-  // detected capabilities. Only this plugin's own providers are rewritten.
-
-  readonly property string piCataloguePath: expandPath("~/.pi/agent/models.json")
-  property bool syncPiCatalogue: true
-  // Only for people who use pi: without ~/.pi/agent the plugin writes nothing
-  // there, rather than creating another program's config uninvited.
-  property bool piInstalled: false
-  // Set while a sync is in flight, so the file's own reload does not re-enter.
-  property bool piWriting: false
-  // False empties the provider's model list instead of deleting the provider,
-  // so a hand-written compat block survives until the next start.
-  property bool piServing: false
-
-  FileView {
-    id: piCatalogueFile
-    path: root.piCataloguePath
-    watchChanges: false
-    atomicWrites: true
-    printErrors: false
-    onLoaded: root.applyPiCatalogue(text())
-    // No catalogue yet: start from an empty one rather than giving up, so a
-    // first run still produces a usable provider.
-    onLoadFailed: root.applyPiCatalogue("")
-  }
-
-  // Models to advertise.
-  //
-  // llama-server holds exactly one model, so any other id would be rejected;
-  // ollama loads per request, so everything pulled is fair game.
-  function piModels() {
-    var out = []
-    if (root.backend === "ollama") {
-      for (var i = 0; i < root.modelOptions.length; i++) {
-        var opt = root.modelOptions[i]
-        var blob = root.ollamaBlobs[opt.value]
-        var blobPath = blob ? blob.path : ""
-        var geom = blobPath ? root.modelGeometry[blobPath] : null
-        out.push(PiConfig.buildModel({
-          id: opt.value,
-          name: opt.label,
-          caps: (blobPath && root.modelCaps[blobPath]) || {},
-          launchCtxSize: root.contextSize,
-          trainedContext: geom ? geom.context_length : 0
-        }))
-      }
-      return out
-    }
-
-    var loaded = root.runningModel !== "" ? root.runningModel : root.selectedModel
-    if (loaded === "") return out
-    var geometry = root.modelGeometry[loaded] || null
-    var probed = root.modelCaps[loaded] || {}
-    out.push(PiConfig.buildModel({
-      id: loaded,
-      name: Model.baseName(loaded).replace(/\.gguf$/i, ""),
-      caps: {
-        thinking: !!probed.thinking,
-        tools: !!probed.tools,
-        vision: !!root.visionDirs[Model.dirName(loaded)]
-      },
-      launchCtxSize: root.contextSize,
-      trainedContext: geometry ? geometry.context_length : 0
-    }))
-    return out
-  }
-
-  function writePiCatalogue(serving) {
-    if (!root.syncPiCatalogue || !root.piInstalled) return
-    root.piServing = serving
-    root.piWriting = true
-    piCatalogueFile.reload()
-  }
-
-  function applyPiCatalogue(text) {
-    if (!root.piWriting) return
-    root.piWriting = false
-
-    var catalogue = PiConfig.parseCatalogue(text)
-    // Unparseable: leave it alone. Overwriting would discard whatever other
-    // providers the user has configured.
-    if (catalogue === null) {
-      root.handleServerLine("[pi] models.json is not valid JSON -- left untouched")
-      return
-    }
-
-    var provider = PiConfig.buildProvider({
-      backend: root.backend,
-      host: root.host,
-      port: root.port,
-      models: root.piServing ? root.piModels() : []
-    }, PiConfig.existingProvider(catalogue, root.backend))
-
-    piCatalogueFile.setText(PiConfig.serialize(
-      PiConfig.mergeCatalogue(catalogue, root.backend, provider)))
-    root.handleServerLine("[pi] " + PiConfig.providerKey(root.backend) + ": " +
-                          provider.models.length + " model(s) @ " + provider.baseUrl)
-  }
-
 
   // ---- Metrics ----
 
