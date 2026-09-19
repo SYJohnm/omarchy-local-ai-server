@@ -33,11 +33,15 @@ at default verbosity.
 ## Install
 
 ```bash
-git clone <this-repo> ~/.config/omarchy/plugins/sxy.local-ai-server
-omarchy-shell shell rescanPlugins
-omarchy plugin enable sxy.local-ai-server
-omarchy bar move sxy.local-ai-server right
+omarchy plugin add https://github.com/SYJohnm/omarchy-local-ai-server.git --enable
 ```
+
+That clones it into `~/.config/omarchy/plugins/sxy.local-ai-server/`, checks
+the manifest and puts the widget on the bar (right side by default; move it
+with `omarchy bar move sxy.local-ai-server --section left`). Plugins run
+unsandboxed inside the shell, so `plugin add` asks first — the code is all
+here to read. Update with `omarchy plugin update sxy.local-ai-server`, which
+shows the diff before applying it.
 
 On first open the panel runs a short **setup**: pick a backend (with install
 hints if none is found), choose which models folder to use (or create one), and
