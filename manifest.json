@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "sxy.local-ai-server",
+  "id": "io.github.syjohnm.local-ai-server",
   "name": "Local AI Server",
   "version": "3.0.0",
-  "author": "sxy",
+  "author": "SYJohnm",
   "license": "MIT",
   "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts.",
   "kinds": [

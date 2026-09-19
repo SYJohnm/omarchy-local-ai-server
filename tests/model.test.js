@@ -75,8 +75,8 @@ const CRASH_LOG = [
   "#2  0x00007f6f57425685 abort (libc.so.6 + 0x25685)",
   "#7  0x00007f6f6b903792 in common_init_result::common_init_result() [clone .cold] ()",
   "ELF object binary architecture: AMD x86-64",
-  "sxy-local-ai-server-llamacpp.service: Main process exited, code=dumped, status=6/ABRT",
-  "sxy-local-ai-server-llamacpp.service: Failed with result 'core-dump'."
+  "io-github-syjohnm-local-ai-server-llamacpp.service: Main process exited, code=dumped, status=6/ABRT",
+  "io-github-syjohnm-local-ai-server-llamacpp.service: Failed with result 'core-dump'."
 ]
 
 test("crash triage reports the application's error, not the noise around it", () => {
@@ -225,10 +225,10 @@ test("unit and marker names are namespaced per backend", () => {
   // The original plugin used one global "Tray-llama-server" marker, so a
   // second widget's pkill would kill the first widget's server.
   assert.notStrictEqual(
-    Backends.unitName("sxy.local-ai-server", "ollama"),
-    Backends.unitName("sxy.local-ai-server", "llamacpp")
+    Backends.unitName("io.github.syjohnm.local-ai-server", "ollama"),
+    Backends.unitName("io.github.syjohnm.local-ai-server", "llamacpp")
   )
-  assert.ok(!Backends.unitName("sxy.local-ai-server", "ollama").includes("."),
+  assert.ok(!Backends.unitName("io.github.syjohnm.local-ai-server", "ollama").includes("."),
     "dots are not valid in a systemd unit name segment")
 })
 

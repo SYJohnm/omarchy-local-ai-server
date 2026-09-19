@@ -43,11 +43,11 @@ at default verbosity.
 omarchy plugin add https://github.com/SYJohnm/omarchy-local-ai-server.git --enable
 ```
 
-That clones it into `~/.config/omarchy/plugins/sxy.local-ai-server/`, checks
+That clones it into `~/.config/omarchy/plugins/io.github.syjohnm.local-ai-server/`, checks
 the manifest and puts the widget on the bar (right side by default; move it
-with `omarchy bar move sxy.local-ai-server --section left`). Plugins run
+with `omarchy bar move io.github.syjohnm.local-ai-server --section left`). Plugins run
 unsandboxed inside the shell, so `plugin add` asks first — the code is all
-here to read. Update with `omarchy plugin update sxy.local-ai-server`, which
+here to read. Update with `omarchy plugin update io.github.syjohnm.local-ai-server`, which
 shows the diff before applying it.
 
 On first open the panel runs a short **setup**: pick a backend (with install
@@ -61,13 +61,13 @@ bottom of the panel.
 ## Remove
 
 ```bash
-omarchy plugin remove sxy.local-ai-server
+omarchy plugin remove io.github.syjohnm.local-ai-server
 ```
 
 A server left running (see *Surviving `omarchy restart shell`*) is not stopped
 by removing the widget — stop it first from the panel, or afterwards with
-`systemctl --user stop sxy-local-ai-server-llamacpp` (or `-ollama`). Settings
-and saved prompt caches stay in `~/.local/state/omarchy/sxy.local-ai-server/`;
+`systemctl --user stop io-github-syjohnm-local-ai-server-llamacpp` (or `-ollama`). Settings
+and saved prompt caches stay in `~/.local/state/omarchy/io.github.syjohnm.local-ai-server/`;
 the caches can be several GB, so delete that folder too if you are done with
 it.
 
@@ -79,7 +79,7 @@ it.
 recommended, see below), `nvidia-smi` or `rocm-smi` (VRAM-aware suggestions).
 
 **Runs:** the backend server, as a transient **systemd user unit**
-(`sxy-local-ai-server-<backend>`) so it survives shell restarts — or detached
+(`io-github-syjohnm-local-ai-server-<backend>`) so it survives shell restarts — or detached
 with `setsid` without systemd. Short-lived helpers: `llama_builds.py` runs each
 detected `llama-server` with `--version`/`--help` to identify it (only builds
 owned by you or root, not writable by others, and — for ones found by scanning
@@ -90,7 +90,7 @@ owned by you or root, not writable by others, and — for ones found by scanning
 downloads, no telemetry. The panel warns if you set a non-loopback host,
 because llama-server runs without an API key.
 
-**Writes:** its own state in `~/.local/state/omarchy/sxy.local-ai-server/`
+**Writes:** its own state in `~/.local/state/omarchy/io.github.syjohnm.local-ai-server/`
 (settings, per-model tuning, prompt caches). The first-run setup saves your
 binary and models-folder choices to this widget's entry in `shell.json`
 through `omarchy bar set`, and creates a models folder only if you type one in.
@@ -113,7 +113,7 @@ Everything auto-detects; the settings exist to override.
 | `modelsDir` | auto | Probes `~/models`, `~/.cache/llama.cpp`, `~/.local/share/models`, LM Studio and jan directories. |
 
 Runtime state (selected model, tuning values, host/port) lives in
-`~/.local/state/omarchy/sxy.local-ai-server/settings.json`.
+`~/.local/state/omarchy/io.github.syjohnm.local-ai-server/settings.json`.
 
 ## Surviving `omarchy restart shell`
 
@@ -225,7 +225,7 @@ weights is not.
 
 `slot_kv.py` does the saving and restoring through llama-server's own
 `/slots` API, then exits. Files live in
-`~/.local/state/omarchy/sxy.local-ai-server/slots/` as
+`~/.local/state/omarchy/io.github.syjohnm.local-ai-server/slots/` as
 `<model>.slot<N>.bin`; a save that wrote nothing never replaces a good file,
 and a cache saved under different tuning is rejected by the server and the
 start is simply cold.

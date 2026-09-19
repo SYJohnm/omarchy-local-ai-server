@@ -273,7 +273,7 @@ function stopCommand(hasSystemdRun, unitName, procMarker) {
 // backend so two widgets, or two backends, never collide on one unit.
 // Dots are legal in systemd unit names, but they also delimit the unit-type
 // suffix, so a dotted plugin id produces names that read as though they carry
-// a type ("sxy.local-ai-server-ollama.service"). Normalising them to dashes
+// a type ("io.github.syjohnm.local-ai-server-ollama.service"). Normalising them to dashes
 // keeps the generated unit unambiguous.
 function unitName(pluginId, backendId) {
   return String(pluginId || "local-ai-server").replace(/[^A-Za-z0-9_-]/g, "-") +

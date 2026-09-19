@@ -24,8 +24,8 @@ import "Profiles.js" as Profiles
 // pp% sweep, while ollama only reports totals once a request completes.
 Panel {
   id: root
-  moduleName: "sxy.local-ai-server"
-  ipcTarget: "sxy.local-ai-server"
+  moduleName: "io.github.syjohnm.local-ai-server"
+  ipcTarget: "io.github.syjohnm.local-ai-server"
 
   // ---- Configuration (manifest settings) ----
 
@@ -79,7 +79,7 @@ Panel {
   // relocating the plugin never breaks the probe path.
   readonly property string pluginDir: {
     var dir = String(root.settings && root.settings.sourceDir ? root.settings.sourceDir : "")
-    if (dir === "") dir = expandPath("~/.config/omarchy/plugins/sxy.local-ai-server")
+    if (dir === "") dir = expandPath("~/.config/omarchy/plugins/io.github.syjohnm.local-ai-server")
     return dir.replace(/^file:\/\//, "").replace(/\/$/, "")
   }
   readonly property string probeScript: pluginDir + "/gguf_probe.py"
@@ -1207,7 +1207,7 @@ Panel {
   // ---- Settings persistence ----
   // Plain properties survive a hot-reload (Quickshell patches this object in
   // place) but not a real restart, so config is mirrored to disk.
-  readonly property string settingsDir: expandPath("~/.local/state/omarchy/sxy.local-ai-server/")
+  readonly property string settingsDir: expandPath("~/.local/state/omarchy/io.github.syjohnm.local-ai-server/")
   readonly property string settingsPath: settingsDir + "settings.json"
   property bool settingsLoaded: false
 
@@ -1639,7 +1639,7 @@ Panel {
   // ---- Scripting ----
   //
   // The panel's own open/close/toggle live on the base Panel's handler (target
-  // "sxy.local-ai-server"); server control gets its own target so keybindings
+  // "io.github.syjohnm.local-ai-server"); server control gets its own target so keybindings
   // and scripts can drive it without the panel open:
   //   qs -p /usr/share/omarchy/shell ipc call local-ai-server status
   IpcHandler {
