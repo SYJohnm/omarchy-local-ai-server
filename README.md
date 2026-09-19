@@ -4,7 +4,14 @@ An Omarchy bar widget that starts, stops and monitors a local inference
 server — **llama.cpp** (`llama-server`) or **ollama** — and shows live
 prompt-processing (pp) and token-generation (tg) throughput while it works.
 
-![tabs: Server · Model · Tuning · Stats](#)
+<p>
+  <img src="docs/screenshots/server.png" width="270" alt="Server tab: backend, endpoint, survive-restart and prompt-cache toggles">
+  <img src="docs/screenshots/stats.png" width="270" alt="Stats tab: live prompt-processing and generation throughput">
+  <img src="docs/screenshots/setup.png" width="270" alt="First-run setup: backend step listing the detected llama.cpp builds">
+</p>
+
+In the bar it shows the generation rate — <img src="docs/screenshots/bar.png" height="20" alt="7.8 t/s"> —
+or, while a prompt is being read, how far along it is and how fast (`52% - 63 t/s`).
 
 ## Why both backends look the same
 
@@ -109,6 +116,21 @@ fork-only cache type is enough to land on that fork. The KV cache dropdown
 offers exactly what the chosen build supports, and flag suggestions come from
 that build's own `--help`. Changing the build of a running model turns Stop
 into Restart like any other change.
+
+## Scripting
+
+Server control is exposed over Quickshell IPC, so it can be bound to keys or
+used from scripts without opening the panel:
+
+```bash
+qs -p /usr/share/omarchy/shell ipc call local-ai-server status    # JSON: running, model, build, pp/tg…
+qs -p /usr/share/omarchy/shell ipc call local-ai-server start
+qs -p /usr/share/omarchy/shell ipc call local-ai-server stop
+qs -p /usr/share/omarchy/shell ipc call local-ai-server model /path/to/model.gguf
+qs -p /usr/share/omarchy/shell ipc call local-ai-server restart   # apply changes; again to force
+qs -p /usr/share/omarchy/shell ipc call local-ai-server page stats # open the panel on a tab
+qs -p /usr/share/omarchy/shell ipc call local-ai-server setup     # run the first-run setup again
+```
 
 ## Changing model or tuning
 

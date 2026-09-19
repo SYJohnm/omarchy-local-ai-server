@@ -1637,6 +1637,44 @@ Panel {
   // settings, not through a call here, so the list follows it.
   onConfiguredModelsDirChanged: if (root.capabilitiesProbed) root.refreshModels()
 
+  // ---- Scripting ----
+  //
+  // The panel's own open/close/toggle live on the base Panel's handler (target
+  // "sxy.local-ai-server"); server control gets its own target so keybindings
+  // and scripts can drive it without the panel open:
+  //   qs -p /usr/share/omarchy/shell ipc call local-ai-server status
+  IpcHandler {
+    target: "local-ai-server"
+
+    function start(): void { if (!root.running && !root.starting && !root.stopping) root.startServer() }
+    function stop(): void { if ((root.running || root.starting) && !root.stopping) root.stopServer() }
+    // Applies a changed model or tuning the same way the Restart button does;
+    // called again while it waits for running requests, it forces (Force).
+    function restart(): void {
+      if (root.switching) root.forceSwitch()
+      else if (root.configChanged) root.switchServer()
+    }
+    function model(path: string): void { root.selectModel(path) }
+    function page(name: string): void {
+      var i = root.pageNames.map(function(n) { return n.toLowerCase() }).indexOf(String(name).toLowerCase())
+      if (i === -1) return
+      root.currentPage = i
+      root.showingLogs = false
+      root.open()
+    }
+    function setup(): void { root.startSetup(); root.open() }
+    function status(): string {
+      return JSON.stringify({
+        running: root.running, starting: root.starting, stopping: root.stopping,
+        restarting: root.switching, changesPending: root.configChanged,
+        backend: root.backend, model: root.runningModel, selected: root.selectedModel,
+        build: root.backend === "llamacpp" ? Backends.buildLabel(root.resolvedBuild) : "",
+        endpoint: root.host + ":" + root.port,
+        pp: root.ppTokensPerSec, tg: root.tokensPerSec
+      })
+    }
+  }
+
   // ---- Environment detection ----
 
   // One shell round-trip resolving everything environment-dependent: whether
@@ -3122,7 +3160,7 @@ Panel {
                                       root.switchPhase,
                                       root.slotsProcessing) +
                     " · " + root.backendSpec.label +
-                    (root.adopted ? " · adopted" : "")
+                    (root.adopted && !root.ownsUnit ? " · external" : "")
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.subtitle
