@@ -94,7 +94,7 @@ because llama-server runs without an API key.
 (settings, per-model tuning, prompt caches). The first-run setup saves your
 binary and models-folder choices to this widget's entry in `shell.json`
 through `omarchy bar set`, and creates a models folder only if you type one in.
-Nothing else in your configuration is touched.
+Nothing else in your configuration is touched — see *Hooks* for wiring other tools to it.
 
 **Privileges:** never uses `sudo`. The only privileged action is **Take over**
 on a system `ollama.service`, which runs `systemctl stop ollama` and so asks
@@ -163,6 +163,39 @@ qs -p /usr/share/omarchy/shell ipc call local-ai-server restart   # apply change
 qs -p /usr/share/omarchy/shell ipc call local-ai-server page stats # open the panel on a tab
 qs -p /usr/share/omarchy/shell ipc call local-ai-server setup     # run the first-run setup again
 ```
+
+## Hooks
+
+The plugin writes no one else's configuration. To point a coding agent (or
+anything else) at the live endpoint, add an Omarchy hook:
+when a server comes up — launched, restarted, or found already running — and
+when it goes away, the widget runs
+
+```bash
+omarchy hook local-ai-server <started|stopped> '<json>'
+```
+
+which executes every script in `~/.config/omarchy/hooks/local-ai-server.d/`
+(with `bash`, like all Omarchy hooks). The JSON describes what is served:
+
+```json
+{
+  "event": "started",
+  "backend": "llamacpp",
+  "endpoint": "http://127.0.0.1:8080",
+  "openaiBaseUrl": "http://127.0.0.1:8080/v1",
+  "contextSize": 32768,
+  "model": "/home/you/models/qwen3-8b-q4_k_m.gguf",
+  "build": "llama.cpp · 662a0b0 · 2026-08-31 · CUDA",
+  "models": [
+    { "id": "/home/you/models/qwen3-8b-q4_k_m.gguf", "name": "qwen3-8b-q4_k_m",
+      "thinking": true, "tools": true, "vision": false, "contextLength": 40960 }
+  ]
+}
+```
+
+`contextSize` is what the server was launched with (0: the model's own,
+`contextLength`). On `stopped`, `model` is empty and `models` is `[]`.
 
 ## Changing model or tuning
 

@@ -117,6 +117,9 @@ Panel {
   // token of KV cache costs depends on it, so the context suggestion is only
   // a real calculation once a model is picked.
   property var modelGeometry: ({})
+  // path -> {tools, thinking, mtp} from gguf_probe; reported to hooks so an
+  // agent config can describe each served model.
+  property var modelCaps: ({})
   readonly property var selectedGeometry: root.modelGeometry[root.selectedModel] || null
 
   // Recomputed as the inputs change, so the suggestion tracks the settings
@@ -1864,6 +1867,7 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         var caps = Model.parseProbeCapabilities(text)
+        root.modelCaps = caps
         root.modelGeometry = Model.parseProbeGeometry(text)
         root.modelOptions = root.buildModelOptions(root.pendingModelFiles, caps)
         root.scanning = false
@@ -2055,6 +2059,7 @@ Panel {
         root.running = true
         root.adopted = true
         root.healthUrl = Backends.healthUrl(root.backend, root.host, root.port)
+        root.runHook("started")
         // Determine whether this is our own transient unit (stoppable) or an
         // externally managed server such as a root-owned ollama.service.
         //
@@ -2460,6 +2465,7 @@ Panel {
     var detail = root.lastErrorLine()
     root.lastError = (root.starting ? "Server failed to start" : "Server stopped") +
       (state === "failed" ? " (crashed)" : "") + (detail ? ": " + detail : "")
+    root.runHook("stopped")
     root.starting = false
     root.running = false
     root.clearRestartState()
@@ -2596,6 +2602,7 @@ Panel {
     serverProc.running = false
     root.killOrphans()
     root.clearRestartState()
+    root.runHook("stopped")
     root.running = false
     root.stopping = false
     root.adopted = false
@@ -2674,11 +2681,62 @@ Panel {
           root.restoreSlots()
           // What Restart compares the page against.
           root.readRunningArgs()
+          root.runHook("started")
           root.lastDecodeSample = null
           root.startMetrics()
         }
       }
     }
+  }
+
+  // ---- Hooks ----
+  //
+  // Runs `omarchy hook local-ai-server <started|stopped> <json>` -- every
+  // script in ~/.config/omarchy/hooks/local-ai-server.d/ -- whenever a server
+  // comes up (launched or found running) and when it goes away. The plugin
+  // itself writes no one else's configuration; pointing a coding agent at
+  // the live endpoint is what a hook is for. The JSON describes what is being
+  // served; see README "Hooks".
+  function servedModels() {
+    var out = []
+    if (root.backend === "ollama") {
+      for (var i = 0; i < root.modelOptions.length; i++) {
+        var opt = root.modelOptions[i]
+        var blob = root.ollamaBlobs[opt.value]
+        var blobPath = blob ? blob.path : ""
+        var caps = (blobPath && root.modelCaps[blobPath]) || {}
+        var geom = blobPath ? root.modelGeometry[blobPath] : null
+        out.push({ id: opt.value, name: opt.label,
+                   thinking: !!caps.thinking, tools: !!caps.tools, vision: false,
+                   contextLength: geom ? (geom.context_length || 0) : 0 })
+      }
+      return out
+    }
+    var loaded = root.runningModel !== "" ? root.runningModel : root.selectedModel
+    if (loaded === "") return out
+    var probed = root.modelCaps[loaded] || {}
+    var geometry = root.modelGeometry[loaded] || null
+    out.push({ id: loaded, name: Model.baseName(loaded).replace(/\.gguf$/i, ""),
+               thinking: !!probed.thinking, tools: !!probed.tools,
+               vision: !!root.visionDirs[Model.dirName(loaded)],
+               contextLength: geometry ? (geometry.context_length || 0) : 0 })
+    return out
+  }
+
+  function runHook(event) {
+    var serving = event === "started"
+    var payload = {
+      event: event,
+      backend: root.backend,
+      endpoint: Backends.baseUrl(root.host, root.port),
+      openaiBaseUrl: Backends.baseUrl(root.host, root.port) + "/v1",
+      // The context the server was launched with; 0 means the model's own.
+      contextSize: parseInt(root.contextSize, 10) || 0,
+      model: serving ? (root.runningModel !== "" ? root.runningModel : root.selectedModel) : "",
+      build: serving && root.backend === "llamacpp" ? Backends.buildLabel(root.resolvedBuild) : "",
+      models: serving ? root.servedModels() : []
+    }
+    Quickshell.execDetached(["omarchy-hook", "local-ai-server", event, JSON.stringify(payload)])
   }
 
   // ---- Metrics ----
