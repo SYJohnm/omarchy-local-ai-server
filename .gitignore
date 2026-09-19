@@ -1,0 +1,11 @@
+# Editor / hand-made backups
+*.bak
+*.bak.*
+*.bak[0-9]*
+*~
+*.swp
+
+# Python / Node caches
+__pycache__/
+*.pyc
+node_modules/

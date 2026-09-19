@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "id": "sxy.local-ai-server",
+  "name": "Local AI Server",
+  "version": "2.5.0",
+  "author": "sxy",
+  "license": "MIT",
+  "description": "Start, stop and monitor a local AI server (llama.cpp or ollama) with live pp/tg throughput",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Local AI Server",
+    "description": "Start, stop and monitor a local AI server (llama.cpp or ollama) with live pp/tg throughput",
+    "category": "Dev",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "backend": "llamacpp",
+      "binary": "",
+      "ollamaBinary": "",
+      "altBinary": "",
+      "modelsDir": ""
+    },
+    "schema": [
+      {
+        "key": "backend",
+        "type": "enum",
+        "label": "Backend",
+        "description": "Which local server to manage. Can also be switched from the panel.",
+        "defaultValue": "llamacpp",
+        "options": [
+          {
+            "value": "llamacpp",
+            "label": "llama.cpp",
+            "description": "llama-server; live prompt-processing sweep"
+          },
+          {
+            "value": "ollama",
+            "label": "ollama",
+            "description": "ollama serve; throughput per completed request"
+          }
+        ]
+      },
+      {
+        "key": "binary",
+        "type": "path",
+        "label": "Preferred llama-server binary",
+        "description": "Optional. Every llama.cpp build on the machine is detected (upstream, distro package, forks under ~); this one is preferred when a model is on Auto.",
+        "defaultValue": ""
+      },
+      {
+        "key": "ollamaBinary",
+        "type": "path",
+        "label": "ollama binary",
+        "description": "Leave blank to auto-detect.",
+        "defaultValue": ""
+      },
+      {
+        "key": "altBinary",
+        "type": "path",
+        "label": "Extra llama-server binary",
+        "description": "Optional. A build the scan does not find on its own (installed somewhere unusual). It joins the Build list on the Model tab.",
+        "defaultValue": ""
+      },
+      {
+        "key": "modelsDir",
+        "type": "path",
+        "label": "Models directory",
+        "description": "Leave blank to auto-detect (~/models, ~/.cache/llama.cpp, LM Studio, jan).",
+        "defaultValue": ""
+      }
+    ]
+  }
+}
