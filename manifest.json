@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.syjohnm.local-ai-server",
   "name": "Local AI Server",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "author": "SYJohnm",
   "license": "MIT",
   "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts.",
@@ -24,7 +24,21 @@
       "ollamaBinary": "",
       "altBinary": "",
       "modelsDir": ""
-    },
+      },
+      {
+        "key": "systemoneBinary",
+        "type": "path",
+        "label": "System One binary",
+        "description": "llama.cpp build for System One decision models. Can share the same binary as Preferred llama-server or use a fork-specific build.",
+        "defaultValue": ""
+      },
+      {
+        "key": "systemoneModelsDir",
+        "type": "path",
+        "label": "System One models directory",
+        "description": "Leave blank to auto-detect. Separate from chat models.",
+        "defaultValue": ""
+      }
     "schema": [
       {
         "key": "backend",
@@ -42,6 +56,11 @@
             "value": "ollama",
             "label": "ollama",
             "description": "ollama serve; throughput per completed request"
+          },
+          {
+            "value": "systemone",
+            "label": "System One",
+            "description": "System One decision models (Laya, Julia-1, lev); minimal resources, no context/speculative/vision"
           }
         ]
       },
