@@ -42,7 +42,11 @@ Panel {
   // then rejected at launch by a binary that does not understand them.
   readonly property string altBinary: setting("altBinary", "")
   readonly property string configuredModelsDir: setting("modelsDir", "")
-
+  readonly property string configuredSystemoneBinary: setting("systemoneBinary", "")
+  readonly property string configuredSystemoneModelsDir: setting("systemoneModelsDir", "")
+  readonly property string detectedSystemoneBinary: ""
+  readonly property string activeSystemoneBinary: root.configuredSystemoneBinary !== "" ? expandPath(root.configuredSystemoneBinary) : root.detectedSystemoneBinary
+  property string systemoneModel: ""
   property string detectedLlamaBinary: ""
   property string detectedOllamaBinary: ""
   property var detectedModelDirs: []
@@ -103,10 +107,10 @@ Panel {
     return ""
   }
 
-  // Whether a launched server outlives this widget. `omarchy restart shell`
-  // runs `quickshell kill`, which tears this panel down; with this on, the
+  // A launched server outlives this widget: `omarchy restart shell` runs
+  // `quickshell kill`, which tears this panel down; with this on, the
   // server is left running and re-adopted by the next instance.
-  property bool surviveRestart: true
+  // Survive restart is always on — no toggle, no setting key.
 
   // ---- Hardware ----
 
@@ -882,7 +886,7 @@ Panel {
   property bool showingLogs: false
 
   property int currentPage: 0
-  readonly property var pageNames: ["Server", "Model", "Tuning", "Stats"]
+  readonly property var pageNames: ["Server", "Model", "Tuning"]
 
   // ---- First-run setup ----
   //
@@ -1266,7 +1270,6 @@ Panel {
       if (typeof parsed.extraEnv === "string") root.extraEnv = parsed.extraEnv
       if (typeof parsed.llamaBuild === "string") root.llamaBuild = parsed.llamaBuild
       if (typeof parsed.keepAlive === "string") root.keepAlive = parsed.keepAlive
-      if (typeof parsed.surviveRestart === "boolean") root.surviveRestart = parsed.surviveRestart
       if (typeof parsed.kvPersistence === "boolean") root.kvPersistence = parsed.kvPersistence
       // Removed built-in rows, and what they held when removed. Filtered to
       // ids this build knows: a row renamed or dropped between versions would
@@ -1374,7 +1377,7 @@ Panel {
       selectedModel: root.selectedModel, showMetric: root.showMetric,
       extraArgs: root.extraArgs, keepAlive: root.keepAlive, extraEnv: root.extraEnv,
       llamaBuild: root.llamaBuild,
-      surviveRestart: root.surviveRestart,
+      kvPersistence: root.kvPersistence,
       kvPersistence: root.kvPersistence,
       hiddenBuiltins: root.hiddenBuiltins, shownOptionals: root.shownOptionals,
       builtinStash: root.builtinStash,
@@ -2621,6 +2624,7 @@ Panel {
   // surviveRestart on, it is deliberately left running to be re-adopted.
   Component.onDestruction: {
     if (!root.surviveRestart && (serverProc.running || root.running)) root.killOrphans()
+    if (serverProc.running || root.running) root.killOrphans()
     journalProc.running = false
   }
 
@@ -3534,20 +3538,6 @@ Panel {
               font.pixelSize: Style.font.caption
             }
 
-            Toggle {
-              Layout.fillWidth: true
-              label: "Survive restart"
-              checked: root.surviveRestart
-              onClicked: root.surviveRestart = !root.surviveRestart
-              HoverHandler { id: surviveHover }
-              PanelToolTip {
-                visible: surviveHover.hovered
-                fontSize: Style.font.caption
-                text: root.hasSystemdRun
-                  ? "Keep serving through `omarchy restart shell`"
-                  : "Keep serving through a shell restart (setsid; no systemd)"
-              }
-            }
 
             Toggle {
               Layout.fillWidth: true
@@ -4569,111 +4559,6 @@ Panel {
 
           }
 
-          // Stats -------------------------------------------------------
-          ColumnLayout {
-            anchors.fill: parent
-            spacing: Style.space(6)
-            visible: root.currentPage === 3
-
-            GridLayout {
-              Layout.fillWidth: true
-              columns: 2
-              columnSpacing: Style.space(8)
-              rowSpacing: Style.space(4)
-
-              Text {
-                text: "Prompt (pp)"
-                color: root.bar.foreground
-                opacity: 0.65
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-              Text {
-                Layout.fillWidth: true
-                text: root.ppTokensPerSec > 0
-                  ? root.ppTokensPerSec.toFixed(1) + " t/s" + (root.ppActive ? "  (" + root.ppPercent.toFixed(0) + "%)" : "")
-                  : "—"
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.body
-              }
-
-              Text {
-                text: "Generation (tg)"
-                color: root.bar.foreground
-                opacity: 0.65
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-              Text {
-                Layout.fillWidth: true
-                text: root.tokensPerSec > 0 ? root.tokensPerSec.toFixed(1) + " t/s" : "—"
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.body
-              }
-
-              Text {
-                text: "Endpoint"
-                color: root.bar.foreground
-                opacity: 0.65
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-              Text {
-                Layout.fillWidth: true
-                text: root.host + ":" + root.port
-                color: root.bar.foreground
-                elide: Text.ElideRight
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-
-              Text {
-                text: "Loaded"
-                visible: root.loadedModelInfo !== ""
-                color: root.bar.foreground
-                opacity: 0.65
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-              Text {
-                Layout.fillWidth: true
-                visible: root.loadedModelInfo !== ""
-                text: root.loadedModelInfo
-                color: root.bar.foreground
-                elide: Text.ElideRight
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-            }
-
-            PanelSeparator { Layout.fillWidth: true }
-
-            Text {
-              Layout.fillWidth: true
-              text: root.hardwareSummary !== "" ? root.hardwareSummary : "Detecting hardware…"
-              color: root.bar.foreground
-              opacity: 0.6
-              wrapMode: Text.WordWrap
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-
-            Text {
-              Layout.fillWidth: true
-              visible: root.backendSpec.metricsMode === "log"
-              text: "ollama reports throughput per completed request; llama.cpp adds a live prompt sweep."
-              color: root.bar.foreground
-              opacity: 0.5
-              wrapMode: Text.WordWrap
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-
-            Item { Layout.fillHeight: true }
-          }
-        }
 
         // ---- Log overlay ----
         // Not one of the category pages: a log is inherently longer than any
