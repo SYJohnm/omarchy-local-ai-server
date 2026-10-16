@@ -23,22 +23,10 @@
       "binary": "",
       "ollamaBinary": "",
       "altBinary": "",
-      "modelsDir": ""
-      },
-      {
-        "key": "systemoneBinary",
-        "type": "path",
-        "label": "System One binary",
-        "description": "llama.cpp build for System One decision models. Can share the same binary as Preferred llama-server or use a fork-specific build.",
-        "defaultValue": ""
-      },
-      {
-        "key": "systemoneModelsDir",
-        "type": "path",
-        "label": "System One models directory",
-        "description": "Leave blank to auto-detect. Separate from chat models.",
-        "defaultValue": ""
-      }
+      "modelsDir": "",
+      "systemoneBinary": "",
+      "systemoneModelsDir": ""
+    },
     "schema": [
       {
         "key": "backend",
@@ -76,6 +64,20 @@
         "type": "path",
         "label": "ollama binary",
         "description": "Leave blank to auto-detect.",
+        "defaultValue": ""
+      },
+      {
+        "key": "systemoneBinary",
+        "type": "path",
+        "label": "System One binary",
+        "description": "llama.cpp build for System One decision models. Can share the same binary as Preferred llama-server or use a fork-specific build.",
+        "defaultValue": ""
+      },
+      {
+        "key": "systemoneModelsDir",
+        "type": "path",
+        "label": "System One models directory",
+        "description": "Leave blank to auto-detect. Separate from chat models.",
         "defaultValue": ""
       },
       {
