@@ -129,7 +129,39 @@ var OLLAMA = {
   systemUnit: "ollama"
 }
 
-var BACKENDS = [LLAMA_CPP, OLLAMA]
+// System One decision models backend.
+//
+// Runs llama.cpp's /v1/systemone endpoint for typed-decision models (Laya,
+// Julia-1, lev, OpenJev, Kev, etc.). These are classification/scoring models
+// that take a state + question and return option probabilities in one forward
+// pass. They need far fewer resources than chat LLMs: Julia-1 is 144M params,
+// Laya is 421M, and even the biggest (OpenJev 27B) uses a fixed classification
+// head so context length is irrelevant.
+//
+// Shares the same llama-server binary family as llamacpp (same --help flags,
+// same slot-based KV persistence), but exposes a different API endpoint.
+var SYSTEONE = {
+  id: "systemone",
+  label: "System One",
+  // Default port separate from llamacpp so both can run simultaneously.
+  defaultPort: 8081,
+  // llama.cpp's systemone endpoint.
+  healthPath: "/v1/systemone",
+  // Slot-based metrics: same /slots endpoint, same pp% sweep.
+  metricsMode: "slots",
+  // Model selection is a file path chosen from the gguf tree.
+  modelKind: "file",
+  // Features shared with llamacpp (same binary underneath) minus the ones
+  // irrelevant for decision models: no context length (fixed context),
+  // no speculative decoding, no thinking, no vision, no multi-token prediction.
+  features: ["ngl", "threads", "cacheType", "cpuMoe", "loadMode", "slotKv",
+             "extraArgs", "parallel", "envVars", "systemoneCtx"],
+  binaryCandidates: llamaBinaryCandidates,
+  // Minimal system unit support: the same transient unit naming convention.
+  systemUnit: undefined
+}
+
+var BACKENDS = [LLAMA_CPP, OLLAMA, SYSTEONE]
 
 function all() {
   return BACKENDS
@@ -144,6 +176,10 @@ function get(id) {
 
 function ids() {
   return BACKENDS.map(function(b) { return b.id })
+}
+
+function isSystemOne(backendId) {
+  return String(backendId || "") === "systemone"
 }
 
 function labels() {
@@ -169,6 +205,11 @@ function healthUrl(backendId, host, port) {
 // VRAM/RAM split.
 function loadedModelsUrl(backendId, host, port) {
   return baseUrl(host, port) + (backendId === "ollama" ? "/api/ps" : "/slots")
+}
+
+// Endpoint for System One decision requests.
+function systemoneUrl(host, port) {
+  return baseUrl(host, port) + "/v1/systemone"
 }
 
 // ollama-only: the catalogue of pulled models.
@@ -276,8 +317,11 @@ function stopCommand(hasSystemdRun, unitName, procMarker) {
 // a type ("io.github.syjohnm.local-ai-server-ollama.service"). Normalising them to dashes
 // keeps the generated unit unambiguous.
 function unitName(pluginId, backendId) {
-  return String(pluginId || "local-ai-server").replace(/[^A-Za-z0-9_-]/g, "-") +
-         "-" + String(backendId || "server")
+  var name = String(pluginId || "local-ai-server").replace(/[^A-Za-z0-9_-]/g, "-")
+  // "systemone" -> "sys1" for shorter unit names (io.github.syjohnm.local-ai-server-sys1.service)
+  var id = String(backendId || "server")
+  if (id === "systemone") id = "sys1"
+  return name + "-" + id
 }
 
 // Where a running server's output can be read from, as a journalctl argv, or
@@ -306,6 +350,49 @@ function journalCommand(backendId, unitName, ownsUnit, tailLines) {
   if (systemUnit)
     return ["journalctl", "-u", String(systemUnit), "-f", "-n", tail, "-o", "cat"]
   return null
+}
+
+// System One launch args: shares the same llama-server binary but with
+// minimal flags -- decision models don't need context length, speculative
+// decoding, vision, or thinking support.
+function systemoneLaunchArgs(binary, selectedModel, host, port, slotSaveDir, cfg) {
+  cfg = cfg || {}
+  var args = [
+    binary,
+    "--model", selectedModel,
+    "--host", host,
+    "--port", String(port),
+    "--slot-save-path", slotSaveDir,
+    "--metrics"
+  ]
+
+  if (!cfg.propOverridden("ngl") && cfg.ngl !== undefined) {
+    var ngl = parseInt(cfg.ngl, 10)
+    if (!isFinite(ngl)) ngl = 0
+    if (ngl !== -1) ngl = Math.max(0, Math.min(999, ngl))
+    args.push("--gpu-layers", String(ngl))
+  }
+  if (!cfg.propOverridden("cacheTypeK") && cfg.cacheTypeK)
+    args.push("--cache-type-k", cfg.cacheTypeK)
+  if (!cfg.propOverridden("cacheTypeV") && cfg.cacheTypeV)
+    args.push("--cache-type-v", cfg.cacheTypeV)
+  if (!cfg.propOverridden("loadMode") && cfg.loadMode)
+    args.push("--load-mode", cfg.loadMode)
+  if (!cfg.propOverridden("threads") && isFinite(cfg.threads) && cfg.threads > 0)
+    args.push("--threads", String(cfg.threads))
+  if (!cfg.propOverridden("cpuMoe") && cfg.cpuMoe) args.push("--cpu-moe")
+  if (!cfg.propOverridden("nCpuMoe") && cfg.nCpuMoe) args.push("--n-cpu-moe", cfg.nCpuMoe)
+  if (!cfg.propOverridden("parallel") && cfg.parallel) args.push("--parallel", cfg.parallel)
+  if (!cfg.propOverridden("systemoneCtx") && cfg.systemoneCtx && parseInt(cfg.systemoneCtx, 10) > 0)
+    args.push("--ctx-size", cfg.systemoneCtx)
+
+  // Extra args and env
+  if (cfg.extraPieces) {
+    for (var p = 0; p < cfg.extraPieces.length; p++) args = args.concat(cfg.extraPieces)
+  }
+  if (cfg.envPrefix) args = [cfg.envPrefix].concat(args)
+
+  return args
 }
 
 // ---- Prompt cache ----
@@ -400,13 +487,16 @@ if (typeof module !== "undefined") {
   module.exports = {
     LLAMA_CPP: LLAMA_CPP,
     OLLAMA: OLLAMA,
+    SYSTEONE: SYSTEONE,
     all: all,
     get: get,
     ids: ids,
     labels: labels,
     supports: supports,
+    isSystemOne: isSystemOne,
     baseUrl: baseUrl,
     healthUrl: healthUrl,
+    systemoneUrl: systemoneUrl,
     loadedModelsUrl: loadedModelsUrl,
     tagsUrl: tagsUrl,
     llamaBinaryCandidates: llamaBinaryCandidates,
@@ -415,6 +505,7 @@ if (typeof module !== "undefined") {
     ollamaStoreCandidates: ollamaStoreCandidates,
     OLLAMA_KV_CACHE_TYPES: OLLAMA_KV_CACHE_TYPES,
     ollamaLaunch: ollamaLaunch,
+    systemoneLaunchArgs: systemoneLaunchArgs,
     envPrefix: envPrefix,
     detachedCommand: detachedCommand,
     stopCommand: stopCommand,

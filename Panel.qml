@@ -47,9 +47,18 @@ Panel {
   readonly property string detectedSystemoneBinary: ""
   readonly property string activeSystemoneBinary: root.configuredSystemoneBinary !== "" ? expandPath(root.configuredSystemoneBinary) : root.detectedSystemoneBinary
   property string systemoneModel: ""
+  readonly property var systemoneModelOptions:
+    root.configuredSystemoneModelsDir !== "" ? Model.scanModelsDir(root.configuredSystemoneModelsDir, "") : []
+  function setSystemoneBinary(v) { root.saveSetting("systemoneBinary", v) }
+  function setSystemoneModelsDir(v) { root.saveSetting("systemoneModelsDir", v) }
+  function refreshSystemoneModels() {
+    root.systemoneModelOptions = Model.scanModelsDir(root.configuredSystemoneModelsDir, "")
+  }
+
   property string detectedLlamaBinary: ""
   property string detectedOllamaBinary: ""
-  property var detectedModelDirs: []
+
+
 
   readonly property string llamaBinary: configuredLlamaBinary !== "" ? expandPath(configuredLlamaBinary) : detectedLlamaBinary
   readonly property string ollamaBinary: configuredOllamaBinary !== "" ? expandPath(configuredOllamaBinary) : detectedOllamaBinary
@@ -200,6 +209,7 @@ Panel {
   property string cacheTypeV: "f16"
   property string cacheRam: ""
   property string temperature: ""
+  property string systemoneCtx: "0"
 
   property bool cpuMoe: false
   property string nCpuMoe: ""
@@ -463,7 +473,9 @@ Panel {
     { id: "vision",    label: "Vision projector", feature: "vision",   props: ["mmprojMode", "mmprojPath", "mmprojOffload"], optional: true },
     { id: "extraArgs", label: "Paste args",      feature: "extraArgs", props: ["extraArgs"], optional: true },
     { id: "envVars",   label: "Environment",     feature: "envVars",   props: ["extraEnv"],  optional: true }
-  ]
+    // System One specific rows — visible only when the backend is systemone
+    { id: "systemoneCtx",   label: "System One context", feature: "systemoneCtx", props: ["systemoneCtx"], optional: true }
+
 
   // The value each built-in property carries when nothing has set it. Also
   // what a restored row falls back to when it was never given one.
@@ -481,8 +493,9 @@ Panel {
     noRepack: false, keepAlive: "",
     parallel: "", reasoningPreserve: "default",
     mmprojMode: "auto", mmprojPath: "", mmprojOffload: "off",
-    extraEnv: ""
-  })
+    extraEnv: "",
+    systemoneCtx: "0"
+
 
   // Row ids the user has removed from the page. Persisted.
   property var hiddenBuiltins: []
@@ -1271,7 +1284,8 @@ Panel {
       if (typeof parsed.llamaBuild === "string") root.llamaBuild = parsed.llamaBuild
       if (typeof parsed.keepAlive === "string") root.keepAlive = parsed.keepAlive
       if (typeof parsed.kvPersistence === "boolean") root.kvPersistence = parsed.kvPersistence
-      // Removed built-in rows, and what they held when removed. Filtered to
+      if (typeof parsed.systemoneCtx === "string") root.systemoneCtx = parsed.systemoneCtx
+
       // ids this build knows: a row renamed or dropped between versions would
       // otherwise stay hidden with nothing able to bring it back.
       if (Array.isArray(parsed.hiddenBuiltins)) {
@@ -1378,10 +1392,10 @@ Panel {
       extraArgs: root.extraArgs, keepAlive: root.keepAlive, extraEnv: root.extraEnv,
       llamaBuild: root.llamaBuild,
       kvPersistence: root.kvPersistence,
-      kvPersistence: root.kvPersistence,
+      systemoneCtx: root.systemoneCtx,
       hiddenBuiltins: root.hiddenBuiltins, shownOptionals: root.shownOptionals,
-      builtinStash: root.builtinStash,
       customParams: root.customParams,
+
       // The tuning above is also what the selected model's profile holds; it
       // is written flat as well so a build without profiles still reads the
       // values the user last had live.
@@ -3442,6 +3456,32 @@ Panel {
             spacing: Style.space(8)
             visible: root.currentPage === 0
 
+            // Model selection (Server page) ------------------------------
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: Style.space(4)
+
+              SearchableDropdown {
+                Layout.fillWidth: true
+                label: "Model"
+                showLabel: false
+                options: root.modelOptionsWithProfile
+                value: root.selectedModel
+                placeholderText: "Search models…"
+                emptyText: root.scanning ? "Scanning…" : "No models found"
+                triggerLabel: root.selectedModel === "" ? "Select a model" : ""
+                onChanged: function(v) { root.selectModel(v) }
+              }
+
+              Button {
+                text: "⟳"
+                tooltipText: root.scanning ? "Scanning…" : "Rescan for models"
+                enabled: !root.scanning
+                onClicked: root.refreshModels()
+              }
+            }
+
+            // Backend section -----------------------------------------------
             GridLayout {
               Layout.fillWidth: true
               columns: 2
@@ -3459,8 +3499,6 @@ Panel {
                 showLabel: false
                 options: root.installedBackends.map(function(b) { return { value: b.id, label: b.label } })
                 value: root.backend
-                // Switching backend would retarget the health and metrics
-                // polling away from the server currently being watched.
                 enabled: !root.running && !root.starting
                 opacity: enabled ? 1.0 : 0.45
                 onChanged: function(v) { root.backend = v }
@@ -3475,9 +3513,6 @@ Panel {
               TextField {
                 Layout.fillWidth: true
                 text: root.host
-                // Typing severs the declarative `text` binding, so the field
-                // would keep showing a stale value after the source changes
-                // elsewhere. Restored whenever it is not being edited.
                 Binding on text {
                   value: root.host
                   when: !activeFocus
@@ -3497,10 +3532,6 @@ Panel {
               NumField {
                 Layout.fillWidth: true
                 text: root.port
-                // Typing severs the declarative `text` binding, so the field
-                // would keep showing a stale value after the source changes
-                // elsewhere (a backend switch, applying detected defaults).
-                // Restored whenever the field is not being edited.
                 Binding on text {
                   value: root.port
                   when: !activeFocus
@@ -3512,6 +3543,7 @@ Panel {
                 onEditingFinished: root.setPort(text)
               }
             }
+
 
             // llama-server runs without an API key here, so an endpoint off
             // loopback serves the model -- and its slot save/restore API -- to
@@ -3577,10 +3609,74 @@ Panel {
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
             }
+            // System One section ------------------------------------------
+            Item { Layout.fillWidth: true; Layout.preferredHeight: Style.space(4) }
+
+            Text {
+              Layout.fillWidth: true
+              visible: root.backend === "systemone"
+              text: "System One"
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+
+            RowLayout {
+              Layout.fillWidth: true
+              visible: root.backend === "systemone"
+              spacing: Style.space(4)
+
+              TextField {
+                Layout.fillWidth: true
+                text: root.configuredSystemoneBinary
+                placeholderText: "systemone binary path"
+                enabled: !root.running && !root.starting
+                opacity: enabled ? 1.0 : 0.45
+                onEditingFinished: root.setSystemoneBinary(text)
+              }
+            }
+
+            RowLayout {
+              Layout.fillWidth: true
+              visible: root.backend === "systemone"
+              spacing: Style.space(4)
+
+              SearchableDropdown {
+                Layout.fillWidth: true
+                label: "System One Model"
+                showLabel: false
+                options: root.systemoneModelOptions
+                value: root.systemoneModel
+                placeholderText: "Select a System One model…"
+                emptyText: root.scanning ? "Scanning…" : "No models found"
+                triggerLabel: root.systemoneModel === "" ? "Select a System One model" : ""
+                onChanged: function(v) { root.systemoneModel = v }
+              }
+
+              Button {
+                text: "⟳"
+                tooltipText: root.scanning ? "Scanning…" : "Rescan for System One models"
+                enabled: !root.scanning
+                onClicked: root.refreshSystemoneModels()
+              }
+            }
+
+            TextField {
+              Layout.fillWidth: true
+              visible: root.backend === "systemone"
+              text: root.configuredSystemoneModelsDir
+              placeholderText: "System One models directory"
+              enabled: !root.running && !root.starting
+              opacity: enabled ? 1.0 : 0.45
+              onEditingFinished: root.setSystemoneModelsDir(text)
+            }
 
             Item { Layout.fillHeight: true }
 
             Text {
+              Layout.fillWidth: true
+
               Layout.fillWidth: true
               text: root.hardwareSummary !== "" ? root.hardwareSummary : "Detecting hardware…"
               color: root.bar.foreground
@@ -3609,33 +3705,9 @@ Panel {
             spacing: Style.space(8)
             visible: root.currentPage === 1
 
-            // Always selectable, even while a server is up: for llama.cpp the
-            // model is a launch flag, so a new pick simply applies to the next
-            // start (runningModel keeps KV saves pointed at what is actually
-            // loaded); ollama loads models per request, so it is never a
-            // restart at all.
-            RowLayout {
-              Layout.fillWidth: true
-              spacing: Style.space(4)
+            // Build selection (llamacpp only) ----------------------------
+            // Model selection moved to Server page.
 
-              SearchableDropdown {
-                Layout.fillWidth: true
-                label: "Model"
-                showLabel: false
-                options: root.modelOptionsWithProfile
-                value: root.selectedModel
-                placeholderText: "Search models…"
-                emptyText: root.scanning ? "Scanning…" : "No models found"
-                triggerLabel: root.selectedModel === "" ? "Select a model" : ""
-                onChanged: function(v) { root.selectModel(v) }
-              }
-
-              Button {
-                text: "⟳"
-                tooltipText: root.scanning ? "Scanning…" : "Rescan for models"
-                enabled: !root.scanning
-                onClicked: root.refreshModels()
-              }
             }
 
             // The build this model runs on. Only a choice when there is more
