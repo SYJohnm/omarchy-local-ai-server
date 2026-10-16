@@ -117,13 +117,12 @@ function barSwitchTooltip(switchState, inflight) {
 // assignment; values are shell-quoted by the caller.
 function parseEnvAssignments(text) {
   var env = [], invalid = []
-  var re = /\s*([^\s=]*)=("([^"]*)"|'([^']*)'|(\S*))|\s*(\S+)/g
+  var re = /\s*([^\s=]+)=(?:"([^"]*)"|'([^']*)'|([^\s]+)|)/g
   var src = String(text || ""), m
   while ((m = re.exec(src)) !== null) {
     if (m[0].trim() === "") break
-    if (m[6] !== undefined) { invalid.push(m[6]); continue }
     var name = m[1]
-    var value = m[3] !== undefined ? m[3] : (m[4] !== undefined ? m[4] : m[5])
+    var value = m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : (m[4] !== undefined ? m[4] : ""))
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) { invalid.push(m[0].trim()); continue }
     var replaced = false
     for (var i = 0; i < env.length; i++)

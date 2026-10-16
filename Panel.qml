@@ -765,6 +765,12 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         root.paramCatalogue = Params.parse(root.backend, text)
+        // Register flag aliases for supportsFlag (étape 7)
+        Backends.registerFlagAliases("--gpu-layers", ["--gpu-layers", "-ngl"])
+        Backends.registerFlagAliases("--cache-type-k", ["--cache-type-k", "--ctx-k"])
+        Backends.registerFlagAliases("--cache-type-v", ["--cache-type-v", "--ctx-v"])
+        Backends.registerFlagAliases("--load-mode", ["--load-mode", "-m"])
+        Backends.registerFlagAliases("--mmproj-offload", ["--mmproj-offload"])
         root.catalogueLoading = false
       }
     }
@@ -1008,6 +1014,28 @@ Panel {
     var page = root.tuningPages[root.effectiveTuningPage] || []
     for (var i = 0; i < page.length; i++)
       if (page[i].kind === "builtin" && page[i].id === id) return true
+    return false
+  }
+  // Check if any of a row's flags were ignored this build
+  function rowHasIgnoredFlag(id) {
+    var row = null
+    for (var i = 0; i < root.builtinRows.length; i++) {
+      if (root.builtinRows[i].id === id) { row = root.builtinRows[i]; break }
+    }
+    if (!row) return false
+    var rowFlags = []
+    for (var j = 0; j < row.props.length; j++) {
+      var spec = Params.find(root.paramCatalogue, row.props[j])
+      if (spec) rowFlags.push(spec.flag)
+      // Check all params in catalogue that map to this row's props
+      for (var k = 0; k < root.paramCatalogue.length; k += 3) {
+        var flag = root.paramCatalogue[k]
+        if (row.props.indexOf(root.paramCatalogue[k + 1]) !== -1)
+          rowFlags.push(flag)
+      }
+    }
+    for (var f = 0; f < rowFlags.length; f++)
+      if (ignoredFlags.indexOf(rowFlags[f]) !== -1) return true
     return false
   }
 
@@ -2201,10 +2229,31 @@ Panel {
     onExited: root.launchServerProcess()
   }
 
+// ---- Étape 7: emit helper avec tolérance aux paramètres non supportés ----
+//
+// emitFlag(build, flag, value) → ajoute [flag, value] à args seulement si
+// ce build le supporte. Sinon le flag reste dans le profile mais est ignoré.
+var ignoredFlags = []  // flags qui ont été ignorés ce build
+
+function emitFlag(build, flag, value, args) {
+  if (Backends.supportsFlag(build, flag)) {
+    args.push(flag, String(value))
+    return true
+  }
+  if (ignoredFlags.indexOf(flag) === -1) ignoredFlags.push(flag)
+  return false
+}
+
+
+
   // Builds the llama-server argv. Kept as a function returning the array so
   // the composition is testable by eye and the launch path stays one line.
   function buildLlamaArgs() {
     var ngl = parseInt(root.gpuLayers, 10)
+    ignoredFlags = []
+    var currentBuild = root.resolvedBuild
+
+
     if (!isFinite(ngl)) ngl = 0
     // -1 is llama.cpp's "fit as many layers as VRAM allows" sentinel, not a
     // layer count, so it is passed through unclamped.
@@ -2226,11 +2275,13 @@ Panel {
     // carrying two "--load-mode mmap": llama.cpp keeps the last occurrence, so
     // the duplicate is silent -- the control still shows its own value while
     // the server runs on the other one.
-    if (!root.propOverridden("gpuLayers")) args.push("--gpu-layers", String(ngl))
-    if (!root.propOverridden("cacheTypeK")) args.push("--cache-type-k", root.cacheTypeK)
-    if (!root.propOverridden("cacheTypeV")) args.push("--cache-type-v", root.cacheTypeV)
-    if (!root.propOverridden("flashAttn")) args.push("--flash-attn", root.flashAttn)
-    if (!root.propOverridden("loadMode")) args.push("--load-mode", root.loadMode)
+    if (root.resolvedBuild && root.backend === "llamacpp") {
+      if (!root.propOverridden("gpuLayers")) emitFlag(root.resolvedBuild, "--gpu-layers", ngl, args)
+      if (!root.propOverridden("cacheTypeK")) emitFlag(root.resolvedBuild, "--cache-type-k", root.cacheTypeK, args)
+      if (!root.propOverridden("cacheTypeV")) emitFlag(root.resolvedBuild, "--cache-type-v", root.cacheTypeV, args)
+      if (!root.propOverridden("flashAttn")) emitFlag(root.resolvedBuild, "--flash-attn", root.flashAttn, args)
+      if (!root.propOverridden("loadMode")) emitFlag(root.resolvedBuild, "--load-mode", root.loadMode, args)
+    }
 
     // Vision projector. "auto" reproduces what the plugin always did -- use
     // the projector sitting next to the model -- but says so in a row instead
@@ -2253,50 +2304,57 @@ Panel {
         // GPU offload is llama.cpp's default but rarely fits alongside the
         // main model's layers, and the failure mode is an allocation abort
         // rather than a clean error -- so the plugin default stays "off".
-        if (root.mmprojOffload === "on") args.push("--mmproj-offload")
-        else if (root.mmprojOffload === "off") args.push("--no-mmproj-offload")
+        if (root.mmprojOffload === "on") {
+          if (!root.resolvedBuild || root.backend !== "llamacpp" ||
+            Backends.supportsFlag(root.resolvedBuild, "--mmproj-offload"))
+            args.push("--mmproj-offload")
+          else if (!root.resolvedBuild || root.backend !== "llamacpp" ||
+            Backends.supportsFlag(root.resolvedBuild, "--no-mmproj-offload"))
+            args.push("--no-mmproj-offload")
+        }
       }
     }
 
-    if (!root.propOverridden("parallel") && String(root.parallel).trim() !== "")
-      args.push("--parallel", String(root.parallel).trim())
+    if (root.resolvedBuild && root.backend === "llamacpp") {
+      // Parallel, reasoning, threads, MoE, context, batch, cache, temp
+      if (!root.propOverridden("parallel") && String(root.parallel).trim() !== "")
+        emitFlag(root.resolvedBuild, "--parallel", String(root.parallel).trim(), args)
 
-    if (!root.propOverridden("reasoningPreserve")) {
-      if (root.reasoningPreserve === "on") args.push("--reasoning-preserve")
-      else if (root.reasoningPreserve === "off") args.push("--no-reasoning-preserve")
+      if (!root.propOverridden("reasoningPreserve")) {
+        if (root.reasoningPreserve === "on") emitFlag(root.resolvedBuild, "--reasoning-preserve", "", args)
+        else if (root.reasoningPreserve === "off") emitFlag(root.resolvedBuild, "--no-reasoning-preserve", "", args)
+      }
+
+      var threadCount = parseInt(root.threads, 10)
+      if (!root.propOverridden("threads") && isFinite(threadCount) && threadCount > 0)
+        emitFlag(root.resolvedBuild, "--threads", String(threadCount), args)
+
+      // MoE flags are mutually exclusive in llama.cpp
+      if (!root.propOverridden("nCpuMoe") && !root.propOverridden("cpuMoe")) {
+        var nCpuMoeTrimmed = String(root.nCpuMoe).trim()
+        if (nCpuMoeTrimmed !== "") emitFlag(root.resolvedBuild, "--n-cpu-moe", nCpuMoeTrimmed, args)
+        else if (root.cpuMoe) emitFlag(root.resolvedBuild, "--cpu-moe", "", args)
+      }
+
+      if (!root.propOverridden("noRepack") && root.noRepack)
+        emitFlag(root.resolvedBuild, "--no-repack", "", args)
+      if (!root.propOverridden("specType") && root.specType !== "none")
+        emitFlag(root.resolvedBuild, "--spec-type", root.specType, args)
+
+      var ctxSize = parseInt(root.contextSize, 10)
+      if (!root.propOverridden("contextSize") && isFinite(ctxSize) && ctxSize > 0)
+        emitFlag(root.resolvedBuild, "--ctx-size", String(ctxSize), args)
+      var batch = parseInt(root.batchSize, 10)
+      if (!root.propOverridden("batchSize") && isFinite(batch) && batch > 0)
+        emitFlag(root.resolvedBuild, "--batch-size", String(batch), args)
+      var ubatch = parseInt(root.ubatchSize, 10)
+      if (!root.propOverridden("ubatchSize") && isFinite(ubatch) && ubatch > 0)
+        emitFlag(root.resolvedBuild, "--ubatch-size", String(ubatch), args)
+      if (!root.propOverridden("cacheRam") && String(root.cacheRam).trim() !== "")
+        emitFlag(root.resolvedBuild, "--cache-ram", String(root.cacheRam).trim(), args)
+      if (!root.propOverridden("temperature") && String(root.temperature).trim() !== "")
+        emitFlag(root.resolvedBuild, "--temp", String(root.temperature).trim(), args)
     }
-
-    var threadCount = parseInt(root.threads, 10)
-    if (!root.propOverridden("threads") && isFinite(threadCount) && threadCount > 0)
-      args.push("--threads", String(threadCount))
-
-    // The two MoE flags are mutually exclusive in llama.cpp and the explicit
-    // count wins, so an added parameter for either one takes the whole pair:
-    // leaving the other in place would put the exclusion back.
-    if (!root.propOverridden("nCpuMoe") && !root.propOverridden("cpuMoe")) {
-      var nCpuMoeTrimmed = String(root.nCpuMoe).trim()
-      if (nCpuMoeTrimmed !== "") args.push("--n-cpu-moe", nCpuMoeTrimmed)
-      else if (root.cpuMoe) args.push("--cpu-moe")
-    }
-
-    if (!root.propOverridden("noRepack") && root.noRepack) args.push("--no-repack")
-    if (!root.propOverridden("specType") && root.specType !== "none")
-      args.push("--spec-type", root.specType)
-
-    var ctxSize = parseInt(root.contextSize, 10)
-    if (!root.propOverridden("contextSize") && isFinite(ctxSize) && ctxSize > 0)
-      args.push("--ctx-size", String(ctxSize))
-    var batch = parseInt(root.batchSize, 10)
-    if (!root.propOverridden("batchSize") && isFinite(batch) && batch > 0)
-      args.push("--batch-size", String(batch))
-    var ubatch = parseInt(root.ubatchSize, 10)
-    if (!root.propOverridden("ubatchSize") && isFinite(ubatch) && ubatch > 0)
-      args.push("--ubatch-size", String(ubatch))
-    if (!root.propOverridden("cacheRam") && String(root.cacheRam).trim() !== "")
-      args.push("--cache-ram", String(root.cacheRam).trim())
-    if (!root.propOverridden("temperature") && String(root.temperature).trim() !== "")
-      args.push("--temp", String(root.temperature).trim())
-
     // User-added parameters. Appended before the free-form extra args so a
     // hand-written flag still gets the last word on any duplicate.
     //
@@ -2673,6 +2731,9 @@ Panel {
   // minutes, so this is generous -- it exists to end an indefinite "Starting…"
   // when nothing is ever going to answer, not to bound normal startup.
   readonly property int startupTimeoutSec: 600
+  // List of flags ignored this build (étape 7)
+  readonly property var ignoredFlags: ignoredFlags
+
 
   Timer {
     id: startingTimer
@@ -3990,6 +4051,13 @@ Panel {
                   visible: cacheTypeHover.hovered
                   text: "--cache-type-k / --cache-type-v — quantization of the K and V caches. Lower than f16 trades some accuracy for less VRAM per token of context."
                 }
+                Text {
+                  visible: root.builtinOnPage("cacheType") && root.rowHasIgnoredFlag("cacheType")
+                  text: "⚠ not in this build"
+                  font.pixelSize: Style.font.small
+                  font.italic: true
+                  color: Style.warn
+                }
               }
               RowLayout {
                 Layout.fillWidth: true
@@ -4026,6 +4094,13 @@ Panel {
                 PanelToolTip {
                   visible: flashAttnHover.hovered
                   text: "--flash-attn — fused attention kernel. Faster and lighter on VRAM; auto leaves the backend to decide, off falls back to the unfused path."
+                }
+                Text {
+                  visible: root.builtinOnPage("flashAttn") && root.rowHasIgnoredFlag("flashAttn")
+                  text: "⚠ not in this build"
+                  font.pixelSize: Style.font.small
+                  font.italic: true
+                  color: Style.warn
                 }
               }
               RowLayout {
@@ -4142,6 +4217,13 @@ Panel {
                   tooltipText: "Remove this row — \"Add parameter\" brings it back with this value"
                   onClicked: root.removeBuiltin("cpuMoe")
                 }
+                Text {
+                  visible: root.builtinOnPage("cpuMoe") && root.rowHasIgnoredFlag("cpuMoe")
+                  text: "⚠ not in this build"
+                  font.pixelSize: Style.font.small
+                  font.italic: true
+                  color: Style.warn
+                }
               }
 
               Text {
@@ -4179,6 +4261,13 @@ Panel {
                   text: "\u00d7"
                   tooltipText: "Remove this row — \"Add parameter\" brings it back with this value"
                   onClicked: root.removeBuiltin("ctxSize")
+                }
+                Text {
+                  visible: root.builtinOnPage("ctxSize") && root.rowHasIgnoredFlag("ctxSize")
+                  text: "⚠ not in this build"
+                  font.pixelSize: Style.font.small
+                  font.italic: true
+                  color: Style.warn
                 }
               }
 
@@ -4220,7 +4309,21 @@ Panel {
                   tooltipText: "Remove this row — \"Add parameter\" brings it back with this value"
                   onClicked: root.removeBuiltin("threads")
                 }
+                Text {
+                  visible: root.builtinOnPage("threads") && root.rowHasIgnoredFlag("threads")
+                  text: "⚠ not in this build"
+                  font.pixelSize: Style.font.small
+                  font.italic: true
+                  color: Style.warn
+                }
               }
+                Text {
+                  visible: root.builtinOnPage("batchSize") && root.rowHasIgnoredFlag("batchSize")
+                  text: "⚠ not in this build"
+                  font.pixelSize: Style.font.small
+                  font.italic: true
+                  color: Style.warn
+                }
 
               Text {
                 text: "Batch / ubatch"
@@ -4316,6 +4419,13 @@ Panel {
                   onClicked: root.removeBuiltin("parallel")
                 }
               }
+                Text {
+                  visible: root.builtinOnPage("parallel") && root.rowHasIgnoredFlag("parallel")
+                  text: "⚠ not in this build"
+                  font.pixelSize: Style.font.small
+                  font.italic: true
+                  color: Style.warn
+                }
 
               Text {
                 text: "Reasoning trace"
@@ -4347,6 +4457,13 @@ Panel {
                   onClicked: root.removeBuiltin("reasoning")
                 }
               }
+                Text {
+                  visible: root.builtinOnPage("reasoning") && root.rowHasIgnoredFlag("reasoning")
+                  text: "⚠ not in this build"
+                  font.pixelSize: Style.font.small
+                  font.italic: true
+                  color: Style.warn
+                }
 
               Text {
                 text: "Speculative"
@@ -4439,6 +4556,13 @@ Panel {
                   onClicked: root.removeBuiltin("vision")
                 }
               }
+                Text {
+                  visible: root.builtinOnPage("vision") && root.rowHasIgnoredFlag("vision")
+                  text: "⚠ not in this build"
+                  font.pixelSize: Style.font.small
+                  font.italic: true
+                  color: Style.warn
+                }
 
               Text {
                 text: "Paste args"
@@ -4474,6 +4598,13 @@ Panel {
                   onClicked: root.removeBuiltin("extraArgs")
                 }
               }
+                Text {
+                  visible: root.builtinOnPage("envVars") && root.rowHasIgnoredFlag("envVars")
+                  text: "⚠ not in this build"
+                  font.pixelSize: Style.font.small
+                  font.italic: true
+                  color: Style.warn
+                }
 
               Text {
                 text: "Environment"
