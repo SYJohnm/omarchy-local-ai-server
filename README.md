@@ -4,6 +4,9 @@ An Omarchy bar widget that starts, stops and monitors a local inference
 server — **llama.cpp** (`llama-server`) or **ollama** — and shows live
 prompt-processing (pp) and token-generation (tg) throughput while it works.
 
+It also manages a second **System One** instance for decision models (port 8081
+by default), so two servers can run side by side on one machine.
+
 <p>
   <img src="docs/screenshots/server.png" width="270" alt="Server tab: backend, endpoint, survive-restart and prompt-cache toggles">
   <img src="docs/screenshots/stats.png" width="270" alt="Stats tab: live prompt-processing and generation throughput">
@@ -66,7 +69,8 @@ omarchy plugin remove io.github.syjohnm.local-ai-server
 
 A server left running (see *Surviving `omarchy restart shell`*) is not stopped
 by removing the widget — stop it first from the panel, or afterwards with
-`systemctl --user stop io-github-syjohnm-local-ai-server-llamacpp` (or `-ollama`). Settings
+`systemctl --user stop io-github-syjohnm-local-ai-server-llamacpp` (or `-ollama`
+or `-sys1` for the System One instance). Settings
 and saved prompt caches stay in `~/.local/state/omarchy/io.github.syjohnm.local-ai-server/`;
 the caches can be several GB, so delete that folder too if you are done with
 it.
@@ -109,6 +113,8 @@ Everything auto-detects; the settings exist to override.
 | `backend` | `llamacpp` | Which server to manage. Also switchable from the panel. |
 | `binary` | auto | Preferred `llama-server`. Optional — every build is detected (see below); this one wins when a model is on Auto. |
 | `ollamaBinary` | auto | `ollama` path. |
+| `systemoneBinary` | auto | `llama-server` path for the System One decision-model instance. |
+| `systemoneModelsDir` | auto | Models folder for the System One instance. |
 | `altBinary` | — | An extra `llama-server` build the scan would not find on its own. It joins the Build list. |
 | `modelsDir` | auto | Probes `~/models`, `~/.cache/llama.cpp`, `~/.local/share/models`, LM Studio and jan directories. |
 
@@ -120,16 +126,15 @@ Runtime state (selected model, tuning values, host/port) lives in
 `omarchy restart shell` runs `quickshell kill`, which tears the widget down.
 A server spawned as a plain child dies with it.
 
-With **Survive restart** on (the default) the server is launched detached and
-left running; the next widget instance re-adopts it after confirming it still
-answers its health endpoint. Where `systemd-run` is available the server runs
-as a transient user unit, which also routes its output to journald — that is
-what lets throughput keep being read after the widget has been rebuilt.
-Without systemd it falls back to `setsid`, which detaches but leaves no way to
-read output back.
+The server is always launched detached and left running; the next widget
+instance re-adopts it after confirming it still answers its health endpoint.
+Where `systemd-run` is available the server runs as a transient user unit,
+which also routes its output to journald — that is what lets throughput keep
+being read after the widget has been rebuilt. Without systemd it falls back
+to `setsid`, which detaches but leaves no way to read output back.
 
-Turn the toggle off to get the old behaviour: the server is killed when the
-widget goes away.
+Survive-restart is always on — no toggle, no setting key. If you need the
+server killed when the widget goes away, stop it from the panel first.
 
 ## llama.cpp builds
 
@@ -149,6 +154,14 @@ offers exactly what the chosen build supports, and flag suggestions come from
 that build's own `--help`. Changing the build of a running model turns Stop
 into Restart like any other change.
 
+## Flags the plugin does not support on this build
+
+When a flag is set on the page but the installed `llama-server` build does not
+understand it, the row label shows a small ⚠ **not in this build** indicator.
+The flag is silently dropped from the launch line — the server starts with the
+same tuning minus that one parameter. The indicator disappears if you point the
+backend setting at a build that does understand the flag.
+
 ## Scripting
 
 Server control is exposed over Quickshell IPC, so it can be bound to keys or
@@ -160,7 +173,7 @@ qs -p /usr/share/omarchy/shell ipc call local-ai-server start
 qs -p /usr/share/omarchy/shell ipc call local-ai-server stop
 qs -p /usr/share/omarchy/shell ipc call local-ai-server model /path/to/model.gguf
 qs -p /usr/share/omarchy/shell ipc call local-ai-server restart   # apply changes; again to force
-qs -p /usr/share/omarchy/shell ipc call local-ai-server page stats # open the panel on a tab
+qs -p /usr/share/omarchy/shell ipc call local-ai-server page logs  # open the panel on the logs tab
 qs -p /usr/share/omarchy/shell ipc call local-ai-server setup     # run the first-run setup again
 ```
 
@@ -196,6 +209,10 @@ which executes every script in `~/.config/omarchy/hooks/local-ai-server.d/`
 
 `contextSize` is what the server was launched with (0: the model's own,
 `contextLength`). On `stopped`, `model` is empty and `models` is `[]`.
+
+For the System One instance the `event` is `"systemone-started"` /
+`"systemone-stopped"`; `backend` is `"systemone"` and `openaiBaseUrl`
+points at port 8081.
 
 ## Changing model or tuning
 
@@ -234,8 +251,9 @@ start is simply cold.
 
 The Backend dropdown lists only the backends found on this machine — a
 `llama-server` (or the alternate binary) for llama.cpp, an `ollama` binary for
-ollama. A saved backend that is not installed moves to one that is. If neither
-is found both stay listed, so the binary settings still make sense.
+ollama, and a `systemoneBinary` for the System One instance. A saved backend
+that is not installed moves to one that is. If neither is found both stay
+listed, so the binary settings still make sense.
 
 ## Tuning sub-pages
 
