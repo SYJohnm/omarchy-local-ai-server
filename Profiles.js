@@ -6,9 +6,9 @@
 // once for the machine.
 //
 // A profile appears the first time a model's tuning is edited -- there is no
-// switch to arm first. Until then the model runs on `defaultTuning`, the set a
-// new profile is seeded from, which is what makes a profile optional: pick a
-// model, start it, never open Tuning, and nothing is ever written for it.
+// switch to arm first. Until then the model runs on the backend's neutral
+// defaults, which is what makes a profile optional: pick a model, start it,
+// never open Tuning, and nothing is ever written for it.
 //
 // Pure logic: plain objects in, plain objects out. Panel.qml owns the live
 // properties and the file.
@@ -129,22 +129,7 @@ function remove(profiles, backend, model) {
   return out
 }
 
-// The seed a model with no profile of its own runs on, kept per backend: a
-// llama.cpp default set is argv flags and an ollama one is environment
-// variables, so one shared set would hand each backend the other's.
-function defaultsFor(defaults, backend) {
-  var store = defaults || {}
-  var found = store[String(backend || "")]
-  return (found && typeof found === "object") ? found : null
-}
 
-function setDefaults(defaults, backend, values) {
-  var out = {}
-  var store = defaults || {}
-  for (var existing in store) out[existing] = store[existing]
-  out[String(backend || "")] = snapshot(values)
-  return out
-}
 
 // Reads the profile store out of a settings file.
 //
@@ -166,23 +151,13 @@ function fromSettings(parsed, flatValues) {
       var entry = p.profiles[k]
       if (entry && typeof entry === "object") store[k] = snapshot(entry)
     }
-    var defaults = {}
-    if (p.defaultTuning && typeof p.defaultTuning === "object") {
-      for (var b in p.defaultTuning) {
-        var d = p.defaultTuning[b]
-        if (d && typeof d === "object") defaults[b] = snapshot(d)
-      }
-    }
-    if (!defaultsFor(defaults, backend)) defaults[backend] = fallback
-    return { profiles: store, defaultTuning: defaults }
+      return { profiles: store }
   }
 
   var migrated = {}
   var seeded = key(backend, p.selectedModel)
   if (seeded !== "") migrated[seeded] = clone(fallback)
-  var migratedDefaults = {}
-  migratedDefaults[backend] = fallback
-  return { profiles: migrated, defaultTuning: migratedDefaults }
+  return { profiles: migrated }
 }
 
 if (typeof module !== "undefined") {
@@ -197,8 +172,6 @@ if (typeof module !== "undefined") {
     has: has,
     set: set,
     remove: remove,
-    defaultsFor: defaultsFor,
-    setDefaults: setDefaults,
     fromSettings: fromSettings
   }
 }

@@ -16,9 +16,9 @@ test("installedBackends offers only backends with a binary", () => {
   assert.deepStrictEqual(ids(Backends.installedBackends({ llamacpp: true, ollama: false }, true)), ["llamacpp"])
   assert.deepStrictEqual(ids(Backends.installedBackends({ llamacpp: false, ollama: true }, true)), ["ollama"])
   // Not probed yet: nothing is known, so nothing is hidden.
-  assert.deepStrictEqual(ids(Backends.installedBackends({}, false)), ["llamacpp", "ollama"])
-  // Nothing installed: keep both, so the binary settings still make sense.
-  assert.deepStrictEqual(ids(Backends.installedBackends({}, true)), ["llamacpp", "ollama"])
+  assert.deepStrictEqual(ids(Backends.installedBackends({}, false)), ["llamacpp", "ollama", "systemone"])
+  // Nothing installed: keep all, so the binary settings still make sense.
+  assert.deepStrictEqual(ids(Backends.installedBackends({}, true)), ["llamacpp", "ollama", "systemone"])
 })
 
 test("statusLabel names the restart wait", () => {

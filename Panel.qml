@@ -125,7 +125,10 @@ Panel {
   // Recomputed as the inputs change, so the suggestion tracks the settings
   // that actually determine what fits -- cache type and MoE offload move it
   // by an order of magnitude on a small card.
-  readonly property var suggestions: {
+  // Suggestion object, recomputed from hardware + geometry + tuning.
+  // Used by the Model page and by the Tuning page footer; no longer the
+  // seed for "detected defaults" (that mechanism was removed).
+  readonly property var suggestion: {
     if (!root.hardware) return null
     return Hardware.suggestAll(root.hardware, {
       geometry: root.selectedGeometry,
@@ -892,8 +895,7 @@ Panel {
   // setup never becomes a second, competing source of configuration.
   property bool setupDone: false
   property int setupStep: 0
-  readonly property var setupSteps: ["Backend", "Models", "Tuning"]
-  property string setupTuning: "recommended"
+  readonly property var setupSteps: ["Backend", "Models"]
   // .gguf count per candidate directory, filled when the Models step opens.
   property var modelDirCounts: ({})
   // Waits for detection so the first step never flashes "not installed" for
@@ -1100,16 +1102,14 @@ Panel {
   // ---- Per-model tuning profiles ----
   //
   // Everything on the Tuning page is stored per model. A profile is created
-  // the first time that model's tuning is edited, so a model that is only ever
-  // picked and started never gets one and runs on defaultTuning -- the set a
-  // new profile is seeded from.
+  // the first time that model's tuning is edited; without one the model runs
+  // on the backend's neutral defaults (what llama.cpp starts with).
   //
   // The live properties above stay the single source of truth for a launch:
   // selecting a model writes its profile onto them, and editing them writes
   // back. Nothing reads a profile at launch time, so there is no second path
   // the launch line could come from.
   property var profiles: ({})
-  property var defaultTuning: ({})
 
   // Set while a profile is being written onto the live properties. Every
   // change handler fires during that, and without the guard the apply would be
@@ -1141,15 +1141,11 @@ Panel {
   // A user edit to any tuning value: stores it against the selected model,
   // creating that model's profile if this is its first.
   //
-  // With no model selected there is nothing to key on, so the edit lands in
-  // defaultTuning and becomes the seed for the next model that gets one.
+  // With no model selected there is nothing to key on — edits are ignored
+  // until a model is picked.
   function touchTuning() {
-    if (!root.settingsLoaded || root.applyingTuning) return
-    var values = Profiles.snapshot(root)
-    if (root.selectedModel !== "")
-      root.profiles = Profiles.set(root.profiles, root.backend, root.selectedModel, values)
-    else
-      root.defaultTuning = Profiles.setDefaults(root.defaultTuning, root.backend, values)
+    if (!root.settingsLoaded || root.applyingTuning || root.selectedModel === "") return
+    root.profiles = Profiles.set(root.profiles, root.backend, root.selectedModel, Profiles.snapshot(root))
     root.scheduleSettingsSave()
   }
 
@@ -1183,26 +1179,21 @@ Panel {
   function applyTuningForSelection() {
     if (!root.settingsLoaded || root.applyingTuning) return
     var profile = Profiles.get(root.profiles, root.backend, root.selectedModel)
-    root.applyTuning(profile !== null ? profile : Profiles.defaultsFor(root.defaultTuning, root.backend))
+    root.applyTuning(profile !== null ? profile : Profiles.resolve(null))
     // A profile written before arguments were split still carries a line.
     root.splitPastedArgs()
   }
 
-  // Drops this model's profile and puts it back on the shared defaults. The
-  // next edit starts a fresh profile from them.
+  // Drops this model's profile and goes back to the neutral defaults.
+  // The next edit starts a fresh profile from them.
   function clearProfile() {
     if (!root.hasProfile) return
     root.profiles = Profiles.remove(root.profiles, root.backend, root.selectedModel)
-    root.applyTuning(Profiles.defaultsFor(root.defaultTuning, root.backend))
+    root.applyTuning(Profiles.resolve(null))
     root.scheduleSettingsSave()
   }
 
-  // Makes the values on screen the seed for models that have no profile yet.
-  // Leaves existing profiles alone -- they were tuned deliberately.
-  function saveAsDefaultTuning() {
-    root.defaultTuning = Profiles.setDefaults(root.defaultTuning, root.backend, Profiles.snapshot(root))
-    root.scheduleSettingsSave()
-  }
+
 
   // ---- Settings persistence ----
   // Plain properties survive a hot-reload (Quickshell patches this object in
@@ -1324,7 +1315,6 @@ Panel {
     // tuning set, and it belongs to the model that file names.
     var restoredProfiles = Profiles.fromSettings(parsed, Profiles.snapshot(root))
     root.profiles = restoredProfiles.profiles
-    root.defaultTuning = restoredProfiles.defaultTuning
 
     root.sanitizeSettings()
     root.settingsLoaded = true
@@ -1392,7 +1382,7 @@ Panel {
       // The tuning above is also what the selected model's profile holds; it
       // is written flat as well so a build without profiles still reads the
       // values the user last had live.
-      profiles: root.profiles, defaultTuning: root.defaultTuning
+      profiles: root.profiles
     }, null, 2) + "\n")
   }
 
@@ -1400,7 +1390,7 @@ Panel {
   // whatever was tuned for another one. Leaves host/port/model alone -- those
   // are environment choices, not tuning.
   function resetToDetectedDefaults() {
-    var s = root.suggestions || Hardware.suggestAll(root.hardware || {})
+    var s = root.suggestion || Hardware.suggestAll(root.hardware || {})
     root.gpuLayers = String(s.gpuLayers)
     root.threads = String(s.threads)
     root.contextSize = String(s.contextSize)
@@ -1447,9 +1437,9 @@ Panel {
     root.modelOptions = []
     // Parameters are backend-specific: llama.cpp flags mean nothing to ollama
     // and vice versa, so both the catalogue and the user's additions reset --
-    // as does the rest of the tuning, which comes back from this backend's own
-    // defaults rather than carrying the other backend's numbers across.
-    root.applyTuning(Profiles.defaultsFor(root.defaultTuning, root.backend))
+    // as does the rest of the tuning, which comes back from the backend's
+    // neutral defaults rather than carrying the other backend's numbers across.
+    root.applyTuning(Profiles.resolve(null))
     root.paramCatalogue = []
     // An open picker would sit there listing the previous backend's flags
     // until the new catalogue arrived.
@@ -1573,14 +1563,14 @@ Panel {
   }
 
   function finishSetup() {
-    if (root.setupTuning === "recommended") root.resetToDetectedDefaults()
     root.setupDone = true
-    root.currentPage = 1
+    root.currentPage = 0
     root.scheduleSettingsSave()
   }
 
   function skipSetup() {
     root.setupDone = true
+    root.currentPage = 0
     root.scheduleSettingsSave()
   }
 
@@ -3388,41 +3378,9 @@ Panel {
               font.pixelSize: Style.font.caption
             }
 
-            Button {
-              Layout.fillWidth: true
-              leftAlign: true
-              bordered: true
-              selected: root.setupTuning === "recommended"
-              text: "Recommended for this machine"
-              onClicked: root.setupTuning = "recommended"
-            }
-
             Text {
               Layout.fillWidth: true
-              visible: root.suggestions !== null
-              text: root.suggestions
-                ? "ngl " + root.suggestions.gpuLayers + " · ctx " + root.suggestions.contextSize +
-                  " · " + root.suggestions.threads + " threads · batch " + root.suggestions.batchSize
-                : ""
-              color: root.bar.foreground
-              opacity: 0.5
-              elide: Text.ElideRight
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-
-            Button {
-              Layout.fillWidth: true
-              leftAlign: true
-              bordered: true
-              selected: root.setupTuning === "defaults"
-              text: root.backendSpec.label + " built-in defaults"
-              onClicked: root.setupTuning = "defaults"
-            }
-
-            Text {
-              Layout.fillWidth: true
-              text: "Everything stays editable on the Tuning tab, per model."
+              text: "New models start on " + root.backendSpec.label + " built-in defaults. Edit on the Tuning tab."
               color: root.bar.foreground
               opacity: 0.5
               wrapMode: Text.WordWrap
@@ -3439,7 +3397,7 @@ Panel {
 
             Button {
               text: "Skip"
-              tooltipText: "Keep auto-detection and defaults; run setup later from the Server tab"
+              tooltipText: "Keep auto-detection; run setup later from the Server tab"
               onClicked: root.skipSetup()
             }
             Item { Layout.fillWidth: true }
@@ -3789,10 +3747,10 @@ Panel {
             Text {
               Layout.fillWidth: true
               text: {
-                if (!root.suggestions) return "Detecting hardware…"
-                var s = "Suggested: ngl " + root.suggestions.gpuLayers +
-                        " · ctx " + root.suggestions.contextSize +
-                        " · " + root.suggestions.threads + " threads"
+                if (!root.suggestion) return "Detecting hardware…"
+                var s = "Suggested: ngl " + root.suggestion.gpuLayers +
+                        " · ctx " + root.suggestion.contextSize +
+                        " · " + root.suggestion.threads + " threads"
                 if (root.selectedModel === "" || !root.selectedGeometry)
                   s += "  (estimated — pick a model to size it exactly)"
                 else if (root.running || root.starting)
@@ -3806,13 +3764,6 @@ Panel {
               font.pixelSize: Style.font.caption
             }
 
-            Button {
-              Layout.fillWidth: true
-              text: "Apply detected defaults"
-              tooltipText: "Replace the tuning values with the ones suggested above"
-              enabled: root.suggestions !== null
-              onClicked: resetConfirm.opened = true
-            }
           }
 
           // Tuning ------------------------------------------------------
@@ -3832,41 +3783,22 @@ Panel {
                 Layout.fillWidth: true
                 text: {
                   if (root.selectedModel === "")
-                    return "Shared defaults — no model selected"
+                    return "Select a model first"
                   var name = Model.baseName(root.selectedModel).replace(/\.gguf$/i, "")
-                  if (root.hasProfile) return "Profile · " + name
-                  return "Defaults · " + name + " (edit to give it its own)"
+                  return root.hasProfile ? "Profile · " + name : "Tuning · " + name
                 }
                 color: root.bar.foreground
-                opacity: root.hasProfile ? 0.85 : 0.55
+                opacity: root.selectedModel === "" ? 0.45 : 0.7
                 elide: Text.ElideMiddle
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
-                HoverHandler { id: profileHover }
-                PanelToolTip {
-                  visible: profileHover.hovered
-                  text: root.selectedModel === ""
-                    ? "These values seed the next model that gets a profile."
-                    : (root.hasProfile
-                       ? "This model has its own tuning. Changes here apply to it alone."
-                       : "This model is running on the shared defaults. The first change you make here starts a profile for it, leaving other models untouched.")
-                }
               }
 
-              // Only where there is a profile to drop: an always-present button
-              // that does nothing most of the time reads as broken.
               Button {
                 visible: root.hasProfile
                 text: "Reset"
-                tooltipText: "Drop this model's profile and go back to the shared defaults"
+                tooltipText: "Drop this model's profile and go back to defaults"
                 onClicked: clearProfileConfirm.opened = true
-              }
-
-              Button {
-                visible: root.selectedModel !== ""
-                text: "Set default"
-                tooltipText: "Make these values the seed for models that have no profile yet. Existing profiles are left alone."
-                onClicked: root.saveAsDefaultTuning()
               }
             }
 
@@ -4879,15 +4811,8 @@ Panel {
       }
 
       ConfirmDialog {
-        id: resetConfirm
-        message: "Replace tuning values with ones detected for this machine?"
-        confirmText: "Apply"
-        onConfirmed: root.resetToDetectedDefaults()
-      }
-
-      ConfirmDialog {
         id: clearProfileConfirm
-        message: "Drop this model's tuning and go back to the shared defaults?"
+        message: "Drop this model's tuning and go back to defaults?"
         confirmText: "Drop"
         onConfirmed: root.clearProfile()
       }

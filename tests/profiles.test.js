@@ -72,47 +72,33 @@ test("one model's tuning does not reach another", () => {
 test("a model with no profile reports none rather than an empty one", () => {
   assert.strictEqual(Profiles.get({}, "llamacpp", "/models/unknown.gguf"), null)
   assert.strictEqual(Profiles.has({}, "llamacpp", "/models/unknown.gguf"), false)
-  // Which is what lets the panel fall back to the defaults.
-  assert.strictEqual(Profiles.defaultsFor({}, "llamacpp"), null)
+  // Which is what lets the panel fall back to resolve(null).
 })
 
-test("defaults are held per backend", () => {
-  let defaults = Profiles.setDefaults({}, "llamacpp", live({ contextSize: "80000" }))
-  defaults = Profiles.setDefaults(defaults, "ollama", live({ contextSize: "8192" }))
-  assert.strictEqual(Profiles.defaultsFor(defaults, "llamacpp").contextSize, "80000")
-  assert.strictEqual(Profiles.defaultsFor(defaults, "ollama").contextSize, "8192")
-})
+
 
 test("migrating a pre-profile settings file keeps the tuned model tuned", () => {
   // The one flat tuning set in an older file was tuned for the model it names,
-  // so it becomes that model's profile as well as the seed for the rest.
+  // so it becomes that model's profile.
   const parsed = { version: 2, backend: "llamacpp", selectedModel: "/models/minicpm.gguf" }
-  const { profiles, defaultTuning } = Profiles.fromSettings(parsed, Profiles.snapshot(live()))
+  const { profiles } = Profiles.fromSettings(parsed, Profiles.snapshot(live()))
   assert.strictEqual(Profiles.get(profiles, "llamacpp", "/models/minicpm.gguf").cacheTypeK, "turbo4")
-  assert.strictEqual(Profiles.defaultsFor(defaultTuning, "llamacpp").cacheTypeK, "turbo4")
-  // And they are separate objects, so editing one model does not move the seed.
-  assert.notStrictEqual(
-    Profiles.get(profiles, "llamacpp", "/models/minicpm.gguf"),
-    Profiles.defaultsFor(defaultTuning, "llamacpp"))
+  // The profile is seeded from the live values, not a separate defaults store.
+  assert.strictEqual(Profiles.get(profiles, "llamacpp", "/models/minicpm.gguf").contextSize, "80000")
 })
 
 test("migrating a file with no selected model writes no profile", () => {
-  const { profiles, defaultTuning } = Profiles.fromSettings(
+  const { profiles } = Profiles.fromSettings(
     { version: 2, backend: "llamacpp" }, Profiles.snapshot(live()))
   assert.deepStrictEqual(profiles, {})
-  assert.strictEqual(Profiles.defaultsFor(defaultTuning, "llamacpp").threads, "7")
 })
 
-test("a v3 file round-trips, and gains defaults for a backend it lacks", () => {
+test("a v3 file round-trips", () => {
   const parsed = {
     version: 3,
     backend: "ollama",
-    profiles: { "llamacpp::/models/qwen.gguf": { contextSize: "80000" } },
-    defaultTuning: { llamacpp: { contextSize: "4096" } }
+    profiles: { "llamacpp::/models/qwen.gguf": { contextSize: "80000" } }
   }
-  const { profiles, defaultTuning } = Profiles.fromSettings(parsed, Profiles.snapshot(live({ contextSize: "8192" })))
+  const { profiles } = Profiles.fromSettings(parsed, Profiles.snapshot(live({ contextSize: "8192" })))
   assert.strictEqual(Profiles.get(profiles, "llamacpp", "/models/qwen.gguf").contextSize, "80000")
-  assert.strictEqual(Profiles.defaultsFor(defaultTuning, "llamacpp").contextSize, "4096")
-  // The active backend had none stored; the live values seed it.
-  assert.strictEqual(Profiles.defaultsFor(defaultTuning, "ollama").contextSize, "8192")
 })
