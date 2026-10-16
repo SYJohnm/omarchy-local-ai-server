@@ -1708,6 +1708,87 @@ Panel {
         pp: root.ppTokensPerSec, tg: root.tokensPerSec
       })
     }
+    function export(): string { return root.exportAll() }
+    function import(json: string): string { return root.importAll(json) }
+  }
+  // ---- Import / Export ----
+  //
+  // Export: serialise the live settings plus all per-model tuning profiles
+  // into a single JSON blob. Import reads that blob back and restores everything.
+  //
+  // The exported format is versioned so future additions can be skipped safely:
+  //   { version: 1, settings: { ... }, profiles: { "llamacpp::model": { ... }, ... } }
+
+  function exportAll(): string {
+    var exportData = {
+      version: 1,
+      settings: {
+        backend: root.backend,
+        binary: root.settings.binary || "",
+        ollamaBinary: root.settings.ollamaBinary || "",
+        systemoneBinary: root.settings.systemoneBinary || "",
+        systemoneModelsDir: root.settings.systemoneModelsDir || "",
+        altBinary: root.settings.altBinary || "",
+        modelsDir: root.settings.modelsDir || "",
+        host: root.host || "",
+        port: root.port || "",
+        selectedModel: root.selectedModel || "",
+        systemoneModel: root.systemoneModel || "",
+        keepAlive: root.keepAlive || false
+      },
+      profiles: {}
+    }
+    // Copy each model's tuning profile into the export
+    var keys = Object.keys(root.profiles)
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i]
+      var profile = root.profiles[key]
+      if (profile && profile.gpuLayers !== undefined) {
+        exportData.profiles[key] = JSON.parse(JSON.stringify(profile))
+      }
+    }
+    return JSON.stringify(exportData, null, 2)
+  }
+
+  function importAll(json: string): string {
+    try {
+      var data = JSON.parse(json)
+      if (data.version !== 1) return "Unsupported format version " + (data.version || "?")
+
+      // Restore settings
+      if (data.settings) {
+        if (data.settings.backend) root.backend = data.settings.backend
+        if (data.settings.binary) root.settings.binary = data.settings.binary
+        if (data.settings.ollamaBinary) root.settings.ollamaBinary = data.settings.ollamaBinary
+        if (data.settings.systemoneBinary) root.settings.systemoneBinary = data.settings.systemoneBinary
+        if (data.settings.systemoneModelsDir) root.settings.systemoneModelsDir = data.settings.systemoneModelsDir
+        if (data.settings.altBinary) root.settings.altBinary = data.settings.altBinary
+        if (data.settings.modelsDir) root.settings.modelsDir = data.settings.modelsDir
+        if (data.settings.host) root.host = data.settings.host
+        if (data.settings.port) root.port = data.settings.port
+        if (data.settings.selectedModel) root.selectedModel = data.settings.selectedModel
+        if (data.settings.systemoneModel) root.systemoneModel = data.settings.systemoneModel
+        if (data.settings.keepAlive !== undefined) root.keepAlive = data.settings.keepAlive
+      }
+
+      // Restore profiles
+      if (data.profiles) {
+        var keys = Object.keys(data.profiles)
+        for (var i = 0; i < keys.length; i++) {
+          var key = keys[i]
+          var profile = data.profiles[key]
+          if (profile && profile.gpuLayers !== undefined) {
+            root.profiles[key] = JSON.parse(JSON.stringify(profile))
+          }
+        }
+      }
+
+      // Flush to disk
+      saveSettings()
+      return "Imported: " + (data.settings ? "settings" : "") + (data.profiles ? " + " + Object.keys(data.profiles).length + " profiles" : "")
+    } catch (e) {
+      return "Import failed: " + e.message
+    }
   }
 
   // ---- Environment detection ----
