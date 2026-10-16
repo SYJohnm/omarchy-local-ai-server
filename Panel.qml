@@ -62,7 +62,8 @@ Panel {
 
   readonly property string llamaBinary: configuredLlamaBinary !== "" ? expandPath(configuredLlamaBinary) : detectedLlamaBinary
   readonly property string ollamaBinary: configuredOllamaBinary !== "" ? expandPath(configuredOllamaBinary) : detectedOllamaBinary
-  readonly property string activeBinary: root.backend === "ollama" ? root.ollamaBinary : root.launchLlamaBinary
+  readonly property string activeBinary: root.backend === "ollama" ? root.ollamaBinary : (root.backend === "systemone" ? root.systemoneBinary : root.launchLlamaBinary)
+
 
   // ---- llama.cpp builds ----
   //
@@ -2366,8 +2367,34 @@ Panel {
         launch.env[root.parsedEnv.env[ev].name] = root.parsedEnv.env[ev].value
       script = Backends.envPrefix(launch.env, root.shellQuote) + " " +
         "exec -a " + root.procMarker + " " + launch.argv.map(root.shellQuote).join(" ")
+      script = Backends.envPrefix(launch.env, root.shellQuote) + " " +
+        "exec -a " + root.procMarker + " " + launch.argv.map(root.shellQuote).join(" ")
+    } else if (root.backend === "systemone") {
+      var soArgs = Backends.systemoneLaunchArgs(
+        root.systemoneBinary,
+        root.selectedModel,
+        root.host,
+        root.port,
+        root.slotSaveDir,
+        {
+          ngl: root.gpuLayers,
+          cacheTypeK: root.cacheTypeK,
+          cacheTypeV: root.cacheTypeV,
+          loadMode: root.loadMode,
+          threads: root.threads,
+          cpuMoe: root.cpuMoe,
+          nCpuMoe: root.nCpuMoe,
+          parallel: root.parallel,
+          systemoneCtx: root.systemoneCtx,
+          extraPieces: Model.splitExtraArgs(root.extraArgs),
+          envPrefix: root.envScriptPrefix()
+        }
+      )
+      var cudaEnv = Hardware.isCuda(root.hardware)
+        ? "GGML_CUDA_REGISTER_HOST=1 GGML_CUDA_DISABLE_GRAPHS=1 " : ""
+      script = cudaEnv + "exec -a " + root.procMarker + " " + soArgs.map(root.shellQuote).join(" ")
     } else {
-      var args = root.buildLlamaArgs()
+
       // These two work around NVIDIA-specific faults and mean nothing on
       // other backends, so they are applied only when an NVIDIA GPU was
       // actually detected rather than injected unconditionally:
