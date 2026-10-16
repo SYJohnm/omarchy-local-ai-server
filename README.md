@@ -175,6 +175,8 @@ qs -p /usr/share/omarchy/shell ipc call local-ai-server model /path/to/model.ggu
 qs -p /usr/share/omarchy/shell ipc call local-ai-server restart   # apply changes; again to force
 qs -p /usr/share/omarchy/shell ipc call local-ai-server page logs  # open the panel on the logs tab
 qs -p /usr/share/omarchy/shell ipc call local-ai-server setup     # run the first-run setup again
+qs -p /usr/share/omarchy/shell ipc call local-ai-server export  # JSON blob of settings + profiles
+qs -p /usr/share/omarchy/shell ipc call local-ai-server import '<json>'  # restore from that blob
 ```
 
 ## Hooks
