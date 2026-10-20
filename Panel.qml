@@ -6,6 +6,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "Model.js" as Model
 import "Backends.js" as Backends
 import "Hardware.js" as Hardware
@@ -57,6 +58,9 @@ Panel {
 
   property string detectedLlamaBinary: ""
   property string detectedOllamaBinary: ""
+  // Model directories found by the capability probe. Read by the Model page
+  // and by model discovery; persisted rather than re-derived every load.
+  property var detectedModelDirs: []
 
 
 
@@ -473,10 +477,10 @@ Panel {
     { id: "specType",  label: "Speculative",     feature: "specType",  props: ["specType"],  optional: true },
     { id: "vision",    label: "Vision projector", feature: "vision",   props: ["mmprojMode", "mmprojPath", "mmprojOffload"], optional: true },
     { id: "extraArgs", label: "Paste args",      feature: "extraArgs", props: ["extraArgs"], optional: true },
-    { id: "envVars",   label: "Environment",     feature: "envVars",   props: ["extraEnv"],  optional: true }
+    { id: "envVars",   label: "Environment",     feature: "envVars",   props: ["extraEnv"],  optional: true },
     // System One specific rows — visible only when the backend is systemone
     { id: "systemoneCtx",   label: "System One context", feature: "systemoneCtx", props: ["systemoneCtx"], optional: true }
-
+  ]
 
   // The value each built-in property carries when nothing has set it. Also
   // what a restored row falls back to when it was never given one.
@@ -496,6 +500,7 @@ Panel {
     mmprojMode: "auto", mmprojPath: "", mmprojOffload: "off",
     extraEnv: "",
     systemoneCtx: "0"
+  })
 
 
   // Row ids the user has removed from the page. Persisted.
@@ -848,6 +853,10 @@ Panel {
   // answers /health: re-reading a long prompt is what makes a restart cost
   // minutes, not loading the weights. llama.cpp only.
   property bool kvPersistence: true
+  // The server outlives the shell on purpose: it is started detached, and the
+  // next panel re-adopts it through /proc. Not a setting any more -- a shell
+  // restart that took the model down with it was never what anyone wanted.
+  readonly property bool surviveRestart: true
   readonly property string slotKvScript: pluginDir + "/slot_kv.py"
   function kvPrefix(model) {
     return Backends.supports(root.backend, "slotKv") ? Backends.slotPrefix(model) : ""
@@ -2229,13 +2238,13 @@ Panel {
     onExited: root.launchServerProcess()
   }
 
-// ---- Étape 7: emit helper avec tolérance aux paramètres non supportés ----
-//
-// emitFlag(build, flag, value) → ajoute [flag, value] à args seulement si
-// ce build le supporte. Sinon le flag reste dans le profile mais est ignoré.
-var ignoredFlags = []  // flags qui ont été ignorés ce build
+  // ---- Étape 7: emit helper avec tolérance aux paramètres non supportés ----
+  //
+  // emitFlag(build, flag, value) → ajoute [flag, value] à args seulement si
+  // ce build le supporte. Sinon le flag reste dans le profile mais est ignoré.
+  property var ignoredFlags: []  // flags qui ont été ignorés ce build
 
-function emitFlag(build, flag, value, args) {
+  function emitFlag(build, flag, value, args) {
   if (Backends.supportsFlag(build, flag)) {
     args.push(flag, String(value))
     return true
@@ -2723,7 +2732,6 @@ function emitFlag(build, flag, value, args) {
   // surviveRestart on, it is deliberately left running to be re-adopted.
   Component.onDestruction: {
     if (!root.surviveRestart && (serverProc.running || root.running)) root.killOrphans()
-    if (serverProc.running || root.running) root.killOrphans()
     journalProc.running = false
   }
 
@@ -2731,8 +2739,6 @@ function emitFlag(build, flag, value, args) {
   // minutes, so this is generous -- it exists to end an indefinite "Starting…"
   // when nothing is ever going to answer, not to bound normal startup.
   readonly property int startupTimeoutSec: 600
-  // List of flags ignored this build (étape 7)
-  readonly property var ignoredFlags: ignoredFlags
 
 
   Timer {
@@ -3121,7 +3127,7 @@ function emitFlag(build, flag, value, args) {
                     root.ppPercent, root.tokensPerSec, root.ppTokensPerSec),
       switchState, root.configChanged)
     active: root.running || root.starting
-    activeColor: Color.accent
+    activeColor: Commons.Color.accent
     opacity: root.starting ? 0.6 : 1.0
     tooltipText: {
       if (switchState !== "") return Model.barSwitchTooltip(switchState, root.slotsProcessing)
@@ -3183,7 +3189,7 @@ function emitFlag(build, flag, value, args) {
             width: Style.space(8)
             height: Style.space(8)
             radius: width / 2
-            color: root.running ? Color.accent : (root.starting ? root.bar.foreground : "transparent")
+            color: root.running ? Commons.Color.accent : (root.starting ? root.bar.foreground : "transparent")
             border.width: root.running || root.starting ? 0 : 1
             border.color: root.bar.foreground
             opacity: root.starting ? 0.6 : 1.0
@@ -3570,65 +3576,192 @@ function emitFlag(build, flag, value, args) {
             }
 
             // Backend section -----------------------------------------------
-            GridLayout {
+            // Backend and endpoint. Same shape as the tuning rows: a label,
+            // a dotted leader, and the value the next start will use. Clicking
+            // the row is what changes it, which keeps two controls out of a
+            // page that already has enough of them.
+            ColumnLayout {
               Layout.fillWidth: true
-              columns: 2
-              columnSpacing: Style.space(8)
-              rowSpacing: Style.space(6)
+              spacing: 2
 
-              Text {
-                text: "Backend"
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-              Dropdown {
+              Rectangle {
+                id: backendRow
                 Layout.fillWidth: true
-                showLabel: false
-                options: root.installedBackends.map(function(b) { return { value: b.id, label: b.label } })
-                value: root.backend
-                enabled: !root.running && !root.starting
-                opacity: enabled ? 1.0 : 0.45
-                onChanged: function(v) { root.backend = v }
-              }
+                implicitHeight: 26
+                radius: 3
+                color: backendHover.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
 
-              Text {
-                text: "Host"
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-              TextField {
-                Layout.fillWidth: true
-                text: root.host
-                Binding on text {
-                  value: root.host
-                  when: !activeFocus
-                  restoreMode: Binding.RestoreNone
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+
+                  Text {
+                    text: "Backend"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    text: root.backendSpec.label
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
                 }
-                enabled: !root.running && !root.starting
-                opacity: enabled ? 1.0 : 0.45
-                onEditingFinished: root.host = text
+
+                MouseArea {
+                  id: backendHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  enabled: !root.running && !root.starting
+                  onClicked: backendPopup.open()
+                }
+                PanelToolTip {
+                  visible: backendHover.containsMouse
+                  text: root.running || root.starting
+                    ? "Stop the server to change the backend."
+                    : "The inference server this widget launches."
+                }
+
+                Popup {
+                  id: backendPopup
+                  x: 0
+                  y: parent.height + 4
+                  width: 260
+                  height: backendPopupCol.implicitHeight + 16
+                  padding: 8
+                  background: Rectangle {
+                    color: Commons.Color.menu.background
+                    radius: 6
+                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
+                    border.width: 1
+                  }
+                  ColumnLayout {
+                    id: backendPopupCol
+                    width: parent.width
+                    spacing: 6
+                    Dropdown {
+                      Layout.fillWidth: true
+                      showLabel: false
+                      options: root.installedBackends.map(function(b) { return { value: b.id, label: b.label } })
+                      value: root.backend
+                      onChanged: function(v) {
+                        root.backend = v
+                        backendPopup.close()
+                      }
+                    }
+                  }
+                }
               }
 
-              Text {
-                text: "Port"
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-              NumField {
+              Rectangle {
+                id: endpointRow
                 Layout.fillWidth: true
-                text: root.port
-                Binding on text {
-                  value: root.port
-                  when: !activeFocus
-                  restoreMode: Binding.RestoreNone
+                implicitHeight: 26
+                radius: 3
+                property bool editing: false
+                color: endpointHover.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: !endpointRow.editing
+
+                  Text {
+                    text: "host:port"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    text: root.host + ":" + root.port
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: (root.running || root.starting) ? 0.45 : 0.85
+                  }
                 }
-                enabled: !root.running && !root.starting
-                opacity: enabled ? 1.0 : 0.45
-                validator: IntValidator { bottom: 1; top: 65535 }
-                onEditingFinished: root.setPort(text)
+
+                TextField {
+                  id: endpointEdit
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  visible: endpointRow.editing
+                  text: root.host + ":" + root.port
+                  placeholderText: "127.0.0.1:8080"
+                  onEditingFinished: {
+                    var value = String(text).trim()
+                    // Split on the last colon: an IPv6 literal is bracketed,
+                    // so the port is always what follows the final one.
+                    var cut = value.lastIndexOf(":")
+                    if (cut > 0) {
+                      var address = value.slice(0, cut).trim()
+                      var portText = value.slice(cut + 1).trim()
+                      var port = parseInt(portText, 10)
+                      if (address !== "" && isFinite(port) && port >= 1 && port <= 65535) {
+                        root.host = address
+                        root.setPort(String(port))
+                      }
+                    }
+                    endpointRow.editing = false
+                  }
+                  Keys.onEscapePressed: endpointRow.editing = false
+                }
+
+                MouseArea {
+                  id: endpointHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  visible: !endpointRow.editing
+                  enabled: !root.running && !root.starting
+                  onClicked: {
+                    endpointRow.editing = true
+                    endpointEdit.text = root.host + ":" + root.port
+                    endpointEdit.forceActiveFocus()
+                  }
+                }
+                PanelToolTip {
+                  visible: endpointHover.containsMouse
+                  text: root.running || root.starting
+                    ? "Stop the server to change the endpoint."
+                    : "Address the server listens on — host:port, e.g. 127.0.0.1:8080."
+                }
               }
             }
 
@@ -3659,13 +3792,54 @@ function emitFlag(build, flag, value, args) {
             }
 
 
-            Toggle {
+            // Same dotted row as the tuning page, so the one switch on this
+            // page does not read as a different kind of control.
+            Rectangle {
               Layout.fillWidth: true
+              implicitHeight: 26
+              radius: 3
               visible: Backends.supports(root.backend, "slotKv")
-              label: "Keep prompt cache"
-              checked: root.kvPersistence
-              onClicked: root.kvPersistence = !root.kvPersistence
-              HoverHandler { id: kvPersistenceHover }
+              color: kvPersistenceHover.hovered
+                ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                : "transparent"
+
+              RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(4)
+                anchors.rightMargin: Style.space(4)
+                spacing: Style.space(4)
+
+                Text {
+                  text: "Keep prompt cache"
+                  color: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  opacity: 0.85
+                }
+                Text {
+                  Layout.fillWidth: true
+                  text: "...................................................................................................."
+                  color: root.bar.foreground
+                  opacity: 0.15
+                  elide: Text.ElideRight
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Text {
+                  text: root.kvPersistence ? "on" : "off"
+                  color: root.kvPersistence ? Commons.Color.accent : root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  opacity: root.kvPersistence ? 1.0 : 0.6
+                }
+              }
+
+              HoverHandler { id: kvPersistenceHover; cursorShape: Qt.PointingHandCursor }
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.kvPersistence = !root.kvPersistence
+              }
               PanelToolTip {
                 visible: kvPersistenceHover.hovered
                 fontSize: Style.font.caption
@@ -3764,8 +3938,6 @@ function emitFlag(build, flag, value, args) {
 
             Text {
               Layout.fillWidth: true
-
-              Layout.fillWidth: true
               text: root.hardwareSummary !== "" ? root.hardwareSummary : "Detecting hardware…"
               color: root.bar.foreground
               opacity: 0.6
@@ -3795,8 +3967,6 @@ function emitFlag(build, flag, value, args) {
 
             // Build selection (llamacpp only) ----------------------------
             // Model selection moved to Server page.
-
-            }
 
             // The build this model runs on. Only a choice when there is more
             // than one; a single build is just named, so it is never a mystery
@@ -3956,12 +4126,48 @@ function emitFlag(build, flag, value, args) {
             // added parameters flow onto further ones rather than making the
             // page scroll. A page holds few enough rows that an enum's popup
             // still has room to open downward.
-            ButtonGroup {
+            // Sub-tabs, as plain numbers: an active page is the one shown in
+            // the accent colour, not the one drawn as a pressed button.
+            RowLayout {
               Layout.fillWidth: true
               visible: root.tuningPageCount > 1
-              options: root.tuningPageLabels
-              value: root.tuningPageLabels[root.effectiveTuningPage]
-              onChanged: function(v) { root.tuningPage = root.tuningPageLabels.indexOf(v) }
+              spacing: Style.space(2)
+
+              Repeater {
+                model: root.tuningPageLabels
+
+                Rectangle {
+                  required property int index
+                  required property var modelData
+
+                  implicitWidth: pageNumber.implicitWidth + Style.space(12)
+                  implicitHeight: 22
+                  radius: 3
+                  color: pageHover.hovered
+                    ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
+                    : "transparent"
+
+                  Text {
+                    id: pageNumber
+                    anchors.centerIn: parent
+                    text: modelData
+                    color: index === root.effectiveTuningPage ? Commons.Color.accent : root.bar.foreground
+                    opacity: index === root.effectiveTuningPage ? 1.0 : 0.55
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: index === root.effectiveTuningPage
+                  }
+
+                  HoverHandler { id: pageHover; cursorShape: Qt.PointingHandCursor }
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.tuningPage = index
+                  }
+                }
+              }
+
+              Item { Layout.fillWidth: true }
             }
 
             // Above the rows, not under them. SearchableDropdown opens its
@@ -3970,17 +4176,49 @@ function emitFlag(build, flag, value, args) {
             // parameter list opened straight past the panel's bottom edge --
             // the same clipping the row order at the top of this page is
             // arranged to avoid, in the one control that most needs the room.
-            Button {
+            // A row rather than a button: the picker is one more thing on the
+            // page, and a bordered box here was the heaviest thing on it.
+            Rectangle {
               Layout.fillWidth: true
+              implicitHeight: 26
+              radius: 3
               visible: !addParamOpen
-              // "Reading parameters…" only while there is nothing to offer:
-              // a removed row can be restored without any catalogue at all,
-              // and a refresh in the background should not disable the button.
-              text: root.catalogueLoading && root.addableCount === 0
-                ? "Reading parameters…"
-                : "+  Add parameter" + (root.addableCount > 0 ? "  (" + root.addableCount + ")" : "")
-              enabled: root.addableCount > 0
-              onClicked: addParamOpen = true
+              color: addHover.hovered && root.addableCount > 0
+                ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                : "transparent"
+
+              RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(4)
+                anchors.rightMargin: Style.space(4)
+
+                Text {
+                  // "Reading parameters…" only while there is nothing to
+                  // offer: a removed row can be restored without any
+                  // catalogue at all, and a refresh in the background should
+                  // not disable the row.
+                  text: root.catalogueLoading && root.addableCount === 0
+                    ? "Reading parameters…"
+                    : "+  Add parameter" + (root.addableCount > 0 ? "  (" + root.addableCount + ")" : "")
+                  color: root.addableCount > 0 ? Commons.Color.accent : root.bar.foreground
+                  opacity: root.addableCount > 0 ? 1.0 : 0.45
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Item { Layout.fillWidth: true }
+              }
+
+              HoverHandler {
+                id: addHover
+                cursorShape: root.addableCount > 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+              }
+              MouseArea {
+                anchors.fill: parent
+                enabled: root.addableCount > 0
+                cursorShape: Qt.PointingHandCursor
+                onClicked: addParamOpen = true
+              }
             }
 
             // Replaces the button in place while choosing, so the rows below
@@ -4024,653 +4262,1589 @@ function emitFlag(build, flag, value, args) {
               }
             }
 
-            GridLayout {
+            // One row per built-in flag, in the same shape as the endpoint:
+            // label, dotted leader, value, and a × that takes the row off the
+            // page. The value is the thing to click -- a number opens an inline
+            // field, an enum opens a list -- so the page reads as a list of
+            // settings rather than a form of boxes.
+            ColumnLayout {
               Layout.fillWidth: true
               visible: root.tuningPageHasBuiltins
-              columns: 2
-              columnSpacing: Style.space(8)
-              rowSpacing: Style.space(6)
-              // Left editable while a server runs: these are launch flags, so
-              // changing one only affects the next start, and the value is
-              // persisted either way. The note below says so.
-              //
-              // Dropdown rows come first deliberately. Ui/Dropdown opens its
-              // popup downward from the trigger with no flip-up fallback, so a
-              // dropdown low on the page opens past the panel's bottom edge and
-              // is clipped -- which reads as the control being dead. The
-              // popup-less text fields are safe lower down.
+              spacing: 2
 
-              Text {
-                text: "KV cache k/v"
+              // ---- KV cache k/v ----
+              Rectangle {
+                id: cacheRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
                 visible: root.builtinOnPage("cacheType")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                HoverHandler { id: cacheTypeHover }
+                color: cacheHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+
+                  Text {
+                    text: "KV cache k/v"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: root.cacheTypeK + " / " + root.cacheTypeV
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    text: "×"
+                    color: cacheHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: cacheHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("cacheType")
+                    }
+                  }
+                }
+
+                MouseArea {
+                  id: cacheHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: cachePopup.open()
+                }
                 PanelToolTip {
-                  visible: cacheTypeHover.hovered
+                  visible: cacheHoverArea.containsMouse
                   text: "--cache-type-k / --cache-type-v — quantization of the K and V caches. Lower than f16 trades some accuracy for less VRAM per token of context."
                 }
-                Text {
-                  visible: root.builtinOnPage("cacheType") && root.rowHasIgnoredFlag("cacheType")
-                  text: "⚠ not in this build"
-                  font.pixelSize: Style.font.small
-                  font.italic: true
-                  color: Style.warn
-                }
-              }
-              RowLayout {
-                Layout.fillWidth: true
-                visible: root.builtinOnPage("cacheType")
-                spacing: Style.space(4)
-                Dropdown {
-                  Layout.fillWidth: true
-                  showLabel: false
-                  options: root.availableCacheTypes
-                  value: root.cacheTypeK
-                  onChanged: function(v) { root.cacheTypeK = v }
-                }
-                Dropdown {
-                  Layout.fillWidth: true
-                  showLabel: false
-                  options: root.availableCacheTypes
-                  value: root.cacheTypeV
-                  onChanged: function(v) { root.cacheTypeV = v }
-                }
-                Button {
-                  text: "\u00d7"
-                  tooltipText: "Remove this row — \"Add parameter\" brings it back with this value"
-                  onClicked: root.removeBuiltin("cacheType")
-                }
-              }
 
-              Text {
-                text: "Flash attn"
-                visible: root.builtinOnPage("flashAttn")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                HoverHandler { id: flashAttnHover }
-                PanelToolTip {
-                  visible: flashAttnHover.hovered
-                  text: "--flash-attn — fused attention kernel. Faster and lighter on VRAM; auto leaves the backend to decide, off falls back to the unfused path."
-                }
-                Text {
-                  visible: root.builtinOnPage("flashAttn") && root.rowHasIgnoredFlag("flashAttn")
-                  text: "⚠ not in this build"
-                  font.pixelSize: Style.font.small
-                  font.italic: true
-                  color: Style.warn
-                }
-              }
-              RowLayout {
-                Layout.fillWidth: true
-                visible: root.builtinOnPage("flashAttn")
-                spacing: Style.space(4)
-                Dropdown {
-                  Layout.fillWidth: true
-                  showLabel: false
-                  options: root.flashAttnValues
-                  value: root.flashAttn
-                  onChanged: function(v) { root.flashAttn = v }
-                }
-                Button {
-                  text: "\u00d7"
-                  tooltipText: "Remove this row — \"Add parameter\" brings it back with this value"
-                  onClicked: root.removeBuiltin("flashAttn")
-                }
-              }
-
-              Text {
-                text: "GPU layers"
-                visible: root.builtinOnPage("ngl")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                HoverHandler { id: nglHover }
-                PanelToolTip {
-                  visible: nglHover.hovered
-                  text: "--n-gpu-layers — how many layers to offload to the GPU. -1 offloads every layer the backend can fit; 0 keeps the whole model on CPU."
-                }
-              }
-              RowLayout {
-                Layout.fillWidth: true
-                visible: root.builtinOnPage("ngl")
-                spacing: Style.space(4)
-                NumField {
-                  Layout.fillWidth: true
-                  text: root.gpuLayers
-                  // Typing severs the declarative `text` binding, so the field
-                  // would keep showing a stale value after the source changes
-                  // elsewhere (a backend switch, applying detected defaults).
-                  // Restored whenever the field is not being edited.
-                  Binding on text {
-                    value: root.gpuLayers
-                    when: !activeFocus
-                    restoreMode: Binding.RestoreNone
+                Popup {
+                  id: cachePopup
+                  x: 0
+                  y: parent.height + 4
+                  width: 260
+                  height: cachePopupCol.implicitHeight + 16
+                  padding: 8
+                  background: Rectangle {
+                    color: Commons.Color.menu.background
+                    radius: 6
+                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
+                    border.width: 1
                   }
-                  validator: IntValidator { bottom: -1; top: 999 }
-                  onEditingFinished: root.gpuLayers = text
+                  ColumnLayout {
+                    id: cachePopupCol
+                    width: parent.width
+                    spacing: 6
+                    Text {
+                      text: "Cache type K"
+                      color: root.bar.foreground
+                      opacity: 0.7
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                    Dropdown {
+                      Layout.fillWidth: true
+                      showLabel: false
+                      options: root.availableCacheTypes
+                      value: root.cacheTypeK
+                      onChanged: function(v) { root.cacheTypeK = v }
+                    }
+                    Text {
+                      text: "Cache type V"
+                      color: root.bar.foreground
+                      opacity: 0.7
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                    Dropdown {
+                      Layout.fillWidth: true
+                      showLabel: false
+                      options: root.availableCacheTypes
+                      value: root.cacheTypeV
+                      onChanged: function(v) { root.cacheTypeV = v }
+                    }
+                  }
                 }
-                Button {
-                  text: "\u00d7"
-                  tooltipText: "Remove this row — \"Add parameter\" brings it back with this value"
-                  onClicked: root.removeBuiltin("ngl")
+              }
+              Text {
+                Layout.fillWidth: true
+                Layout.leftMargin: Style.space(4)
+                visible: root.builtinOnPage("cacheType") && root.rowHasIgnoredFlag("cacheType")
+                text: "⚠ not in this build"
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                color: Commons.Color.urgent
+              }
+
+              // ---- Flash attention ----
+              Rectangle {
+                id: flashRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
+                visible: root.builtinOnPage("flashAttn")
+                color: flashHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+
+                  Text {
+                    text: "Flash attn"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: root.flashAttn
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    text: "×"
+                    color: flashHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: flashHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("flashAttn")
+                    }
+                  }
+                }
+
+                MouseArea {
+                  id: flashHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    var values = root.flashAttnValues
+                    var index = -1
+                    for (var i = 0; i < values.length; i++) {
+                      var value = typeof values[i] === "object" ? values[i].value : values[i]
+                      if (value === root.flashAttn) { index = i; break }
+                    }
+                    var next = (index + 1) % values.length
+                    root.flashAttn = typeof values[next] === "object" ? values[next].value : values[next]
+                  }
+                }
+                PanelToolTip {
+                  visible: flashHoverArea.containsMouse
+                  text: "--flash-attn — fused attention kernel. Faster and lighter on VRAM; auto leaves the backend to decide, off falls back to the unfused path. Click to cycle."
+                }
+              }
+              Text {
+                Layout.fillWidth: true
+                Layout.leftMargin: Style.space(4)
+                visible: root.builtinOnPage("flashAttn") && root.rowHasIgnoredFlag("flashAttn")
+                text: "⚠ not in this build"
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                color: Commons.Color.urgent
+              }
+
+              // ---- GPU layers ----
+              Rectangle {
+                id: nglRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
+                visible: root.builtinOnPage("ngl")
+                property bool editing: false
+                color: nglHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: !nglRow.editing
+
+                  Text {
+                    text: "GPU layers"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: root.gpuLayers
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    text: "×"
+                    color: nglHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: nglHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("ngl")
+                    }
+                  }
+                }
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: nglRow.editing
+
+                  Text {
+                    text: "GPU layers"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  NumField {
+                    id: nglEdit
+                    Layout.fillWidth: true
+                    text: root.gpuLayers
+                    validator: IntValidator { bottom: -1; top: 999 }
+                    onEditingFinished: {
+                      root.gpuLayers = text
+                      nglRow.editing = false
+                    }
+                    Keys.onEscapePressed: nglRow.editing = false
+                  }
+                }
+
+                MouseArea {
+                  id: nglHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  visible: !nglRow.editing
+                  onClicked: {
+                    nglRow.editing = true
+                    nglEdit.text = root.gpuLayers
+                    nglEdit.forceActiveFocus()
+                  }
+                }
+                PanelToolTip {
+                  visible: nglHoverArea.containsMouse
+                  text: "--n-gpu-layers — how many layers to offload to the GPU. -1 offloads every layer the backend can fit; 0 keeps the whole model on CPU. Click to edit."
                 }
               }
 
-              // MoE offload. Sparse models put most of their weights in expert
-              // tensors, so moving those to system RAM is what makes a model
-              // larger than VRAM run at all -- and it is the single setting the
-              // context suggestion swings on. The two flags it drives are
-              // mutually exclusive in llama.cpp (buildLlamaArgs lets the count
-              // win), so the count field and the All button clear each other
-              // rather than leaving a state the launch line ignores.
-              Text {
-                text: "MoE on CPU"
+              // ---- MoE on CPU ----
+              Rectangle {
+                id: moeRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
                 visible: root.builtinOnPage("cpuMoe")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                HoverHandler { id: moeHover }
+                color: moeHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+
+                  Text {
+                    text: "MoE on CPU"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: root.cpuMoe ? "all" : (root.nCpuMoe !== "" ? root.nCpuMoe : "off")
+                    color: root.cpuMoe ? Commons.Color.accent : root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    text: "×"
+                    color: moeHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: moeHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("cpuMoe")
+                    }
+                  }
+                }
+
+                MouseArea {
+                  id: moeHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: moePopup.open()
+                }
                 PanelToolTip {
-                  visible: moeHover.hovered
+                  visible: moeHoverArea.containsMouse
                   text: "--n-cpu-moe N — keep the first N layers' experts in system RAM\n" +
                         "All — --cpu-moe, every layer's experts on CPU\n" +
                         "Empty and All off — neither flag is passed"
                 }
-              }
-              RowLayout {
-                Layout.fillWidth: true
-                visible: root.builtinOnPage("cpuMoe")
-                spacing: Style.space(4)
-                NumField {
-                  Layout.fillWidth: true
-                  // A count is meaningless while All is on, and typing one
-                  // there would silently override the button.
-                  enabled: !root.cpuMoe
-                  placeholderText: root.cpuMoe ? "all layers" : "off"
-                  text: root.nCpuMoe
-                  // Typing severs the declarative `text` binding, so the field
-                  // would keep showing a stale value after the source changes
-                  // elsewhere (a backend switch, applying detected defaults).
-                  // Restored whenever the field is not being edited.
-                  Binding on text {
-                    value: root.nCpuMoe
-                    when: !activeFocus
-                    restoreMode: Binding.RestoreNone
+
+                Popup {
+                  id: moePopup
+                  x: 0
+                  y: parent.height + 4
+                  width: 260
+                  height: moePopupCol.implicitHeight + 16
+                  padding: 8
+                  background: Rectangle {
+                    color: Commons.Color.menu.background
+                    radius: 6
+                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
+                    border.width: 1
                   }
-                  validator: IntValidator { bottom: 0; top: 999 }
-                  onEditingFinished: root.nCpuMoe = text
+                  ColumnLayout {
+                    id: moePopupCol
+                    width: parent.width
+                    spacing: 6
+                    Text {
+                      text: "Layers whose experts stay on CPU"
+                      color: root.bar.foreground
+                      opacity: 0.7
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                    NumField {
+                      Layout.fillWidth: true
+                      placeholderText: root.cpuMoe ? "all layers" : "off"
+                      text: root.nCpuMoe
+                      enabled: !root.cpuMoe
+                      opacity: enabled ? 1.0 : 0.45
+                      validator: IntValidator { bottom: 0; top: 999 }
+                      onEditingFinished: root.nCpuMoe = text
+                    }
+                    Text {
+                      Layout.fillWidth: true
+                      text: (root.cpuMoe ? "✓ " : "") + "All layers (--cpu-moe)"
+                      color: root.cpuMoe ? Commons.Color.accent : root.bar.foreground
+                      opacity: root.cpuMoe ? 1.0 : 0.7
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                      MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                          root.cpuMoe = !root.cpuMoe
+                          if (root.cpuMoe) root.nCpuMoe = ""
+                        }
+                      }
+                    }
+                  }
                 }
-                Button {
-                  text: "All"
-                  active: root.cpuMoe
-                  tooltipText: "Offload every layer's experts to CPU (--cpu-moe)"
+              }
+              Text {
+                Layout.fillWidth: true
+                Layout.leftMargin: Style.space(4)
+                visible: root.builtinOnPage("cpuMoe") && root.rowHasIgnoredFlag("cpuMoe")
+                text: "⚠ not in this build"
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                color: Commons.Color.urgent
+              }
+
+              // ---- Context ----
+              Rectangle {
+                id: ctxRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
+                visible: root.builtinOnPage("ctxSize")
+                property bool editing: false
+                color: ctxHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: !ctxRow.editing
+
+                  Text {
+                    text: "Context"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: root.contextSize !== "" ? root.contextSize : "0"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    text: "×"
+                    color: ctxHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: ctxHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("ctxSize")
+                    }
+                  }
+                }
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: ctxRow.editing
+
+                  Text {
+                    text: "Context"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  NumField {
+                    id: ctxEdit
+                    Layout.fillWidth: true
+                    text: root.contextSize
+                    validator: IntValidator { bottom: 0; top: 10000000 }
+                    onEditingFinished: {
+                      root.contextSize = text
+                      ctxRow.editing = false
+                    }
+                    Keys.onEscapePressed: ctxRow.editing = false
+                  }
+                }
+
+                MouseArea {
+                  id: ctxHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  visible: !ctxRow.editing
                   onClicked: {
-                    root.cpuMoe = !root.cpuMoe
-                    if (root.cpuMoe) root.nCpuMoe = ""
+                    ctxRow.editing = true
+                    ctxEdit.text = root.contextSize
+                    ctxEdit.forceActiveFocus()
                   }
                 }
-                Button {
-                  text: "\u00d7"
-                  tooltipText: "Remove this row — \"Add parameter\" brings it back with this value"
-                  onClicked: root.removeBuiltin("cpuMoe")
-                }
-                Text {
-                  visible: root.builtinOnPage("cpuMoe") && root.rowHasIgnoredFlag("cpuMoe")
-                  text: "⚠ not in this build"
-                  font.pixelSize: Style.font.small
-                  font.italic: true
-                  color: Style.warn
-                }
-              }
-
-              Text {
-                text: "Context"
-                visible: root.builtinOnPage("ctxSize")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                HoverHandler { id: ctxSizeHover }
                 PanelToolTip {
-                  visible: ctxSizeHover.hovered
-                  text: "--ctx-size — the context window in tokens, shared across every slot. 0 uses the model's own trained context."
+                  visible: ctxHoverArea.containsMouse
+                  text: "--ctx-size — the context window in tokens, shared across every slot. 0 uses the model's own trained context. Click to edit."
                 }
               }
-              RowLayout {
+              Text {
                 Layout.fillWidth: true
-                visible: root.builtinOnPage("ctxSize")
-                spacing: Style.space(4)
-                NumField {
-                  Layout.fillWidth: true
-                  text: root.contextSize
-                  // Typing severs the declarative `text` binding, so the field
-                  // would keep showing a stale value after the source changes
-                  // elsewhere (a backend switch, applying detected defaults).
-                  // Restored whenever the field is not being edited.
-                  Binding on text {
-                    value: root.contextSize
-                    when: !activeFocus
-                    restoreMode: Binding.RestoreNone
-                  }
-                  validator: IntValidator { bottom: 0; top: 10000000 }
-                  onEditingFinished: root.contextSize = text
-                }
-                Button {
-                  text: "\u00d7"
-                  tooltipText: "Remove this row — \"Add parameter\" brings it back with this value"
-                  onClicked: root.removeBuiltin("ctxSize")
-                }
-                Text {
-                  visible: root.builtinOnPage("ctxSize") && root.rowHasIgnoredFlag("ctxSize")
-                  text: "⚠ not in this build"
-                  font.pixelSize: Style.font.small
-                  font.italic: true
-                  color: Style.warn
-                }
+                Layout.leftMargin: Style.space(4)
+                visible: root.builtinOnPage("ctxSize") && root.rowHasIgnoredFlag("ctxSize")
+                text: "⚠ not in this build"
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                color: Commons.Color.urgent
               }
 
-              Text {
-                text: "Threads"
-                // Hidden on backends with no thread control: ollama exposes no
-                // such variable, so the field would only look configurable.
+              // ---- Threads ----
+              Rectangle {
+                id: threadsRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
                 visible: root.builtinOnPage("threads")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                HoverHandler { id: threadsHover }
+                property bool editing: false
+                color: threadsHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: !threadsRow.editing
+
+                  Text {
+                    text: "Threads"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: root.threads !== "" ? root.threads : "auto"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    text: "×"
+                    color: threadsHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: threadsHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("threads")
+                    }
+                  }
+                }
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: threadsRow.editing
+
+                  Text {
+                    text: "Threads"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  NumField {
+                    id: threadsEdit
+                    Layout.fillWidth: true
+                    text: root.threads
+                    validator: IntValidator { bottom: 0; top: 512 }
+                    onEditingFinished: {
+                      root.threads = text
+                      threadsRow.editing = false
+                    }
+                    Keys.onEscapePressed: threadsRow.editing = false
+                  }
+                }
+
+                MouseArea {
+                  id: threadsHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  visible: !threadsRow.editing
+                  onClicked: {
+                    threadsRow.editing = true
+                    threadsEdit.text = root.threads
+                    threadsEdit.forceActiveFocus()
+                  }
+                }
                 PanelToolTip {
-                  visible: threadsHover.hovered
-                  text: "--threads — CPU threads for generation. Only matters for work not offloaded to the GPU, so it does little on a fully-offloaded model."
+                  visible: threadsHoverArea.containsMouse
+                  text: "--threads — CPU threads for generation. Only matters for work not offloaded to the GPU, so it does little on a fully-offloaded model. Click to edit."
                 }
               }
-              RowLayout {
-                Layout.fillWidth: true
-                visible: root.builtinOnPage("threads")
-                spacing: Style.space(4)
-                NumField {
-                  Layout.fillWidth: true
-                  text: root.threads
-                  // Typing severs the declarative `text` binding, so the field
-                  // would keep showing a stale value after the source changes
-                  // elsewhere (a backend switch, applying detected defaults).
-                  // Restored whenever the field is not being edited.
-                  Binding on text {
-                    value: root.threads
-                    when: !activeFocus
-                    restoreMode: Binding.RestoreNone
-                  }
-                  validator: IntValidator { bottom: 0; top: 512 }
-                  onEditingFinished: root.threads = text
-                }
-                Button {
-                  text: "\u00d7"
-                  tooltipText: "Remove this row — \"Add parameter\" brings it back with this value"
-                  onClicked: root.removeBuiltin("threads")
-                }
-                Text {
-                  visible: root.builtinOnPage("threads") && root.rowHasIgnoredFlag("threads")
-                  text: "⚠ not in this build"
-                  font.pixelSize: Style.font.small
-                  font.italic: true
-                  color: Style.warn
-                }
-              }
-                Text {
-                  visible: root.builtinOnPage("batchSize") && root.rowHasIgnoredFlag("batchSize")
-                  text: "⚠ not in this build"
-                  font.pixelSize: Style.font.small
-                  font.italic: true
-                  color: Style.warn
-                }
-
               Text {
-                text: "Batch / ubatch"
+                Layout.fillWidth: true
+                Layout.leftMargin: Style.space(4)
+                visible: root.builtinOnPage("threads") && root.rowHasIgnoredFlag("threads")
+                text: "⚠ not in this build"
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                color: Commons.Color.urgent
+              }
+
+              // ---- Batch / ubatch ----
+              Rectangle {
+                id: batchRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
                 visible: root.builtinOnPage("batchSize")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                HoverHandler { id: batchSizeHover }
+                color: batchHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+
+                  Text {
+                    text: "Batch / ubatch"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: (root.batchSize !== "" ? root.batchSize : "auto") + " / " +
+                          (root.ubatchSize !== "" ? root.ubatchSize : "auto")
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    text: "×"
+                    color: batchHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: batchHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("batchSize")
+                    }
+                  }
+                }
+
+                MouseArea {
+                  id: batchHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: batchPopup.open()
+                }
                 PanelToolTip {
-                  visible: batchSizeHover.hovered
+                  visible: batchHoverArea.containsMouse
                   text: "--batch-size / --ubatch-size — tokens processed per prompt-eval pass and per physical GPU batch. Higher trades VRAM for faster prompt processing."
                 }
-              }
-              RowLayout {
-                Layout.fillWidth: true
-                visible: root.builtinOnPage("batchSize")
-                spacing: Style.space(4)
-                NumField {
-                  Layout.fillWidth: true
-                  text: root.batchSize
-                  // Typing severs the declarative `text` binding, so the field
-                  // would keep showing a stale value after the source changes
-                  // elsewhere (a backend switch, applying detected defaults).
-                  // Restored whenever the field is not being edited.
-                  Binding on text {
-                    value: root.batchSize
-                    when: !activeFocus
-                    restoreMode: Binding.RestoreNone
-                  }
-                  validator: IntValidator { bottom: 0; top: 1000000 }
-                  onEditingFinished: root.batchSize = text
-                }
-                NumField {
-                  Layout.fillWidth: true
-                  text: root.ubatchSize
-                  // Typing severs the declarative `text` binding, so the field
-                  // would keep showing a stale value after the source changes
-                  // elsewhere (a backend switch, applying detected defaults).
-                  // Restored whenever the field is not being edited.
-                  Binding on text {
-                    value: root.ubatchSize
-                    when: !activeFocus
-                    restoreMode: Binding.RestoreNone
-                  }
-                  validator: IntValidator { bottom: 0; top: 1000000 }
-                  onEditingFinished: root.ubatchSize = text
-                }
-                Button {
-                  text: "\u00d7"
-                  tooltipText: "Remove this row — \"Add parameter\" brings it back with this value"
-                  onClicked: root.removeBuiltin("batchSize")
-                }
-              }
 
-              // ---- Optional rows ----
-              //
-              // Absent until asked for, or until the plugin is about to act on
-              // one by itself. Placed after the always-on rows so adding one
-              // never reshuffles the controls above it.
-
+                Popup {
+                  id: batchPopup
+                  x: 0
+                  y: parent.height + 4
+                  width: 280
+                  height: batchPopupCol.implicitHeight + 16
+                  padding: 8
+                  background: Rectangle {
+                    color: Commons.Color.menu.background
+                    radius: 6
+                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
+                    border.width: 1
+                  }
+                  ColumnLayout {
+                    id: batchPopupCol
+                    width: parent.width
+                    spacing: 6
+                    Text {
+                      text: "Batch"
+                      color: root.bar.foreground
+                      opacity: 0.7
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                    NumField {
+                      Layout.fillWidth: true
+                      text: root.batchSize
+                      placeholderText: "auto"
+                      validator: IntValidator { bottom: 0; top: 1000000 }
+                      onEditingFinished: root.batchSize = text
+                    }
+                    Text {
+                      text: "Ubatch"
+                      color: root.bar.foreground
+                      opacity: 0.7
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                    NumField {
+                      Layout.fillWidth: true
+                      text: root.ubatchSize
+                      placeholderText: "auto"
+                      validator: IntValidator { bottom: 0; top: 1000000 }
+                      onEditingFinished: root.ubatchSize = text
+                    }
+                  }
+                }
+              }
               Text {
-                text: "Slots (-np)"
+                Layout.fillWidth: true
+                Layout.leftMargin: Style.space(4)
+                visible: root.builtinOnPage("batchSize") && root.rowHasIgnoredFlag("batchSize")
+                text: "⚠ not in this build"
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                color: Commons.Color.urgent
+              }
+
+              // ---- Slots ----
+              Rectangle {
+                id: parallelRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
                 visible: root.builtinOnPage("parallel")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                HoverHandler { id: parallelHover }
+                property bool editing: false
+                color: parallelHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: !parallelRow.editing
+
+                  Text {
+                    text: "Slots (-np)"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: root.parallel !== "" ? root.parallel : "auto"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    text: "×"
+                    color: parallelHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: parallelHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("parallel")
+                    }
+                  }
+                }
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: parallelRow.editing
+
+                  Text {
+                    text: "Slots (-np)"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  NumField {
+                    id: parallelEdit
+                    Layout.fillWidth: true
+                    text: root.parallel
+                    placeholderText: "auto"
+                    validator: IntValidator { bottom: 0; top: 256 }
+                    onEditingFinished: {
+                      root.parallel = text
+                      parallelRow.editing = false
+                    }
+                    Keys.onEscapePressed: parallelRow.editing = false
+                  }
+                }
+
+                MouseArea {
+                  id: parallelHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  visible: !parallelRow.editing
+                  onClicked: {
+                    parallelRow.editing = true
+                    parallelEdit.text = root.parallel
+                    parallelEdit.forceActiveFocus()
+                  }
+                }
                 PanelToolTip {
-                  visible: parallelHover.hovered
+                  visible: parallelHoverArea.containsMouse
                   text: "Number of server slots. Blank leaves the backend on auto.\nEach slot holds its own KV cache, so the context above is divided between them."
                 }
               }
-              RowLayout {
+              Text {
                 Layout.fillWidth: true
-                visible: root.builtinOnPage("parallel")
-                spacing: Style.space(6)
+                Layout.leftMargin: Style.space(4)
+                visible: root.builtinOnPage("parallel") && root.rowHasIgnoredFlag("parallel")
+                text: "⚠ not in this build"
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                color: Commons.Color.urgent
+              }
 
-                NumField {
-                  Layout.fillWidth: true
-                  text: root.parallel
-                  placeholderText: "auto"
-                  Binding on text {
-                    value: root.parallel
-                    when: !activeFocus
-                    restoreMode: Binding.RestoreNone
+              // ---- Reasoning trace ----
+              Rectangle {
+                id: reasoningRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
+                visible: root.builtinOnPage("reasoning")
+                color: reasoningHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+
+                  Text {
+                    text: "Reasoning trace"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
                   }
-                  validator: IntValidator { bottom: 0; top: 256 }
-                  onEditingFinished: root.parallel = text
-                }
-                Button {
-                  text: "\u00d7"
-                  tooltipText: "Remove this row — the backend goes back to deciding for itself"
-                  onClicked: root.removeBuiltin("parallel")
-                }
-              }
-                Text {
-                  visible: root.builtinOnPage("parallel") && root.rowHasIgnoredFlag("parallel")
-                  text: "⚠ not in this build"
-                  font.pixelSize: Style.font.small
-                  font.italic: true
-                  color: Style.warn
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: root.reasoningPreserve
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    text: "×"
+                    color: reasoningHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: reasoningHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("reasoning")
+                    }
+                  }
                 }
 
-              Text {
-                text: "Reasoning trace"
-                visible: root.builtinOnPage("reasoning")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                HoverHandler { id: reasoningHover }
+                MouseArea {
+                  id: reasoningHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    var values = root.tristateValues
+                    var index = -1
+                    for (var i = 0; i < values.length; i++) {
+                      var value = typeof values[i] === "object" ? values[i].value : values[i]
+                      if (value === root.reasoningPreserve) { index = i; break }
+                    }
+                    var next = (index + 1) % values.length
+                    root.reasoningPreserve = typeof values[next] === "object" ? values[next].value : values[next]
+                  }
+                }
                 PanelToolTip {
-                  visible: reasoningHover.hovered
-                  text: "--reasoning-preserve: keep the thinking trace across the whole history rather than only the last reply.\n\"default\" passes neither the flag nor its negation, leaving the chat template's own choice — which is the only safe setting for a template that does not support it."
+                  visible: reasoningHoverArea.containsMouse
+                  text: "--reasoning-preserve: keep the thinking trace across the whole history rather than only the last reply.\n\"default\" passes neither the flag nor its negation, leaving the chat template's own choice — which is the only safe setting for a template that does not support it. Click to cycle."
                 }
               }
-              RowLayout {
+              Text {
                 Layout.fillWidth: true
-                visible: root.builtinOnPage("reasoning")
-                spacing: Style.space(6)
-
-                Dropdown {
-                  Layout.fillWidth: true
-                  showLabel: false
-                  options: root.tristateValues
-                  value: root.reasoningPreserve
-                  onChanged: function(v) { root.reasoningPreserve = v }
-                }
-                Button {
-                  text: "\u00d7"
-                  tooltipText: "Remove this row"
-                  onClicked: root.removeBuiltin("reasoning")
-                }
+                Layout.leftMargin: Style.space(4)
+                visible: root.builtinOnPage("reasoning") && root.rowHasIgnoredFlag("reasoning")
+                text: "⚠ not in this build"
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                color: Commons.Color.urgent
               }
-                Text {
-                  visible: root.builtinOnPage("reasoning") && root.rowHasIgnoredFlag("reasoning")
-                  text: "⚠ not in this build"
-                  font.pixelSize: Style.font.small
-                  font.italic: true
-                  color: Style.warn
+
+              // ---- Speculative ----
+              Rectangle {
+                id: specRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
+                visible: root.builtinOnPage("specType")
+                color: specHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+
+                  Text {
+                    text: "Speculative"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: root.specType
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    text: "×"
+                    color: specHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: specHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("specType")
+                    }
+                  }
                 }
 
-              Text {
-                text: "Speculative"
-                visible: root.builtinOnPage("specType")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                HoverHandler { id: specHover }
+                MouseArea {
+                  id: specHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: specPopup.open()
+                }
                 PanelToolTip {
-                  visible: specHover.hovered
+                  visible: specHoverArea.containsMouse
                   text: root.specType !== "none" && !root.specTypeUserSet
                     ? "--spec-type, picked from this model's own metadata. Change it and the pick stops being automatic."
                     : "--spec-type: draft or n-gram strategy. Only some models carry the weights a draft mode needs."
                 }
-              }
-              RowLayout {
-                Layout.fillWidth: true
-                visible: root.builtinOnPage("specType")
-                spacing: Style.space(6)
 
-                SearchableDropdown {
-                  Layout.fillWidth: true
-                  showLabel: false
-                  options: root.specTypeValues
-                  value: root.specType
-                  triggerLabel: root.specType
-                  onChanged: function(v) {
-                    root.specType = v
-                    // Choosing here ends the automatic pick: the next MTP model
-                    // selected must not quietly overwrite a deliberate choice.
-                    root.specTypeUserSet = true
+                Popup {
+                  id: specPopup
+                  x: 0
+                  y: parent.height + 4
+                  width: 260
+                  height: specPopupCol.implicitHeight + 16
+                  padding: 8
+                  background: Rectangle {
+                    color: Commons.Color.menu.background
+                    radius: 6
+                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
+                    border.width: 1
+                  }
+                  ColumnLayout {
+                    id: specPopupCol
+                    width: parent.width
+                    spacing: 6
+                    SearchableDropdown {
+                      Layout.fillWidth: true
+                      showLabel: false
+                      options: root.specTypeValues
+                      value: root.specType
+                      triggerLabel: root.specType
+                      onChanged: function(v) {
+                        root.specType = v
+                        // Choosing here ends the automatic pick: the next MTP
+                        // model selected must not quietly overwrite it.
+                        root.specTypeUserSet = true
+                        specPopup.close()
+                      }
+                    }
                   }
                 }
-                Button {
-                  text: "\u00d7"
-                  tooltipText: "Remove this row"
-                  onClicked: root.removeBuiltin("specType")
-                }
+              }
+              Text {
+                Layout.fillWidth: true
+                Layout.leftMargin: Style.space(4)
+                visible: root.builtinOnPage("specType") && root.rowHasIgnoredFlag("specType")
+                text: "⚠ not in this build"
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                color: Commons.Color.urgent
               }
 
-              Text {
-                text: "Vision projector"
+              // ---- Vision projector ----
+              Rectangle {
+                id: visionRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
                 visible: root.builtinOnPage("vision")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                HoverHandler { id: visionHover }
+                color: visionHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+
+                  Text {
+                    text: "Vision projector"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: root.mmprojMode + (root.mmprojActive ? " · offload " + root.mmprojOffload : "")
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    text: "×"
+                    color: visionHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: visionHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("vision")
+                    }
+                  }
+                }
+
+                MouseArea {
+                  id: visionHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: visionPopup.open()
+                }
                 PanelToolTip {
-                  visible: visionHover.hovered
+                  visible: visionHoverArea.containsMouse
                   text: root.detectedMmproj !== ""
                     ? "Found next to this model:\n" + root.detectedMmproj +
                       "\n\nauto: use it · off: --no-mmproj · custom: name another file"
                     : "auto: use a projector found next to the model — none was\noff: --no-mmproj · custom: name a file"
                 }
-              }
-              RowLayout {
-                Layout.fillWidth: true
-                visible: root.builtinOnPage("vision")
-                spacing: Style.space(6)
 
-                Dropdown {
-                  Layout.preferredWidth: Style.space(78)
-                  showLabel: false
-                  options: root.mmprojModes
-                  value: root.mmprojMode
-                  onChanged: function(v) { root.mmprojMode = v }
-                }
-                // Offload is only a question while a projector is in play, so
-                // it dims rather than disappearing -- a control that vanishes
-                // reads as a bug, one that greys out reads as "not yet".
-                Text {
-                  text: "offload"
-                  color: root.bar.foreground
-                  opacity: root.mmprojActive ? 0.65 : 0.3
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-                Dropdown {
-                  Layout.fillWidth: true
-                  enabled: root.mmprojActive
-                  opacity: root.mmprojActive ? 1 : 0.4
-                  showLabel: false
-                  options: root.tristateValues
-                  value: root.mmprojOffload
-                  onChanged: function(v) { root.mmprojOffload = v }
-                }
-                Button {
-                  text: "\u00d7"
-                  tooltipText: "Remove this row"
-                  onClicked: root.removeBuiltin("vision")
+                Popup {
+                  id: visionPopup
+                  x: 0
+                  // This row sits low on the page: open upward rather than
+                  // past the panel's clipped bottom edge.
+                  y: -height - 4
+                  width: 300
+                  height: visionPopupCol.implicitHeight + 16
+                  padding: 8
+                  background: Rectangle {
+                    color: Commons.Color.menu.background
+                    radius: 6
+                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
+                    border.width: 1
+                  }
+                  ColumnLayout {
+                    id: visionPopupCol
+                    width: parent.width
+                    spacing: 6
+                    Text {
+                      text: "Projector mode"
+                      color: root.bar.foreground
+                      opacity: 0.7
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                    Dropdown {
+                      Layout.fillWidth: true
+                      showLabel: false
+                      options: root.mmprojModes
+                      value: root.mmprojMode
+                      onChanged: function(v) { root.mmprojMode = v }
+                    }
+                    Text {
+                      text: "Offload"
+                      color: root.bar.foreground
+                      opacity: root.mmprojActive ? 0.7 : 0.3
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                    Dropdown {
+                      Layout.fillWidth: true
+                      enabled: root.mmprojActive
+                      opacity: root.mmprojActive ? 1 : 0.4
+                      showLabel: false
+                      options: root.tristateValues
+                      value: root.mmprojOffload
+                      onChanged: function(v) { root.mmprojOffload = v }
+                    }
+                    TextField {
+                      Layout.fillWidth: true
+                      visible: root.mmprojMode === "custom"
+                      text: root.mmprojPath
+                      placeholderText: "path to mmproj-*.gguf"
+                      Binding on text {
+                        value: root.mmprojPath
+                        when: !activeFocus
+                        restoreMode: Binding.RestoreNone
+                      }
+                      onEditingFinished: root.mmprojPath = text
+                    }
+                  }
                 }
               }
-                Text {
-                  visible: root.builtinOnPage("vision") && root.rowHasIgnoredFlag("vision")
-                  text: "⚠ not in this build"
-                  font.pixelSize: Style.font.small
-                  font.italic: true
-                  color: Style.warn
-                }
-
               Text {
-                text: "Paste args"
+                Layout.fillWidth: true
+                Layout.leftMargin: Style.space(4)
+                visible: root.builtinOnPage("vision") && root.rowHasIgnoredFlag("vision")
+                text: "⚠ not in this build"
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                color: Commons.Color.urgent
+              }
+
+              // ---- Paste args ----
+              Rectangle {
+                id: extraRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
                 visible: root.builtinOnPage("extraArgs")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                HoverHandler { id: extraHover }
+                property bool editing: false
+                color: extraHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: !extraRow.editing
+
+                  Text {
+                    text: "Paste args"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: root.extraArgs !== "" ? "..." : "—"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.5
+                  }
+                  Text {
+                    text: "×"
+                    color: extraHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: extraHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("extraArgs")
+                    }
+                  }
+                }
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: extraRow.editing
+
+                  Text {
+                    text: "Paste args"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  TextField {
+                    id: extraEdit
+                    Layout.fillWidth: true
+                    text: root.extraArgs
+                    placeholderText: "-np 1 --reasoning-preserve …"
+                    onEditingFinished: {
+                      root.extraArgs = text
+                      extraRow.editing = false
+                    }
+                    Keys.onEscapePressed: extraRow.editing = false
+                  }
+                }
+
+                MouseArea {
+                  id: extraHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  visible: !extraRow.editing
+                  onClicked: {
+                    extraRow.editing = true
+                    extraEdit.text = root.extraArgs
+                    extraEdit.forceActiveFocus()
+                  }
+                }
                 PanelToolTip {
-                  visible: extraHover.hovered
+                  visible: extraHoverArea.containsMouse
                   text: "Paste a command line here and it splits into rows — one per flag, filling the controls above where a flag has one.\nThe field empties as it is consumed; it stores nothing of its own."
                 }
               }
-              RowLayout {
-                Layout.fillWidth: true
-                visible: root.builtinOnPage("extraArgs")
-                spacing: Style.space(6)
-
-                TextField {
-                  Layout.fillWidth: true
-                  text: root.extraArgs
-                  placeholderText: "-np 1 --reasoning-preserve …"
-                  Binding on text {
-                    value: root.extraArgs
-                    when: !activeFocus
-                    restoreMode: Binding.RestoreNone
-                  }
-                  onEditingFinished: root.extraArgs = text
-                }
-                Button {
-                  text: "\u00d7"
-                  tooltipText: "Remove this row — and anything left unsplit in it"
-                  onClicked: root.removeBuiltin("extraArgs")
-                }
-              }
-                Text {
-                  visible: root.builtinOnPage("envVars") && root.rowHasIgnoredFlag("envVars")
-                  text: "⚠ not in this build"
-                  font.pixelSize: Style.font.small
-                  font.italic: true
-                  color: Style.warn
-                }
-
               Text {
-                text: "Environment"
+                Layout.fillWidth: true
+                Layout.leftMargin: Style.space(4)
+                visible: root.builtinOnPage("extraArgs") && root.rowHasIgnoredFlag("extraArgs")
+                text: "⚠ not in this build"
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                color: Commons.Color.urgent
+              }
+
+              // ---- Environment ----
+              Rectangle {
+                id: envRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
                 visible: root.builtinOnPage("envVars")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                HoverHandler { id: envHover }
+                property bool editing: false
+                color: envHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: !envRow.editing
+
+                  Text {
+                    text: "Environment"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: root.extraEnv !== "" ? "..." : "—"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.5
+                  }
+                  Text {
+                    text: "×"
+                    color: envHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: envHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("envVars")
+                    }
+                  }
+                }
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: envRow.editing
+
+                  Text {
+                    text: "Environment"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  TextField {
+                    id: envEdit
+                    Layout.fillWidth: true
+                    text: root.extraEnv
+                    placeholderText: "GGML_OP_OFFLOAD_MIN_BATCH=1024 …"
+                    onEditingFinished: {
+                      root.extraEnv = text.trim()
+                      envRow.editing = false
+                    }
+                    Keys.onEscapePressed: envRow.editing = false
+                  }
+                }
+
+                MouseArea {
+                  id: envHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  visible: !envRow.editing
+                  onClicked: {
+                    envRow.editing = true
+                    envEdit.text = root.extraEnv
+                    envEdit.forceActiveFocus()
+                  }
+                }
                 PanelToolTip {
-                  visible: envHover.hovered
+                  visible: envHoverArea.containsMouse
                   text: "Environment for the server, NAME=value separated by spaces — for settings llama.cpp only reads from the environment, such as GGML_OP_OFFLOAD_MIN_BATCH.\nPer model, like the rest of this page."
                 }
               }
-              RowLayout {
+              // ---- System One context ----
+              Rectangle {
+                id: systemoneCtxRow
                 Layout.fillWidth: true
-                visible: root.builtinOnPage("envVars")
-                spacing: Style.space(6)
+                implicitHeight: 26
+                radius: 3
+                visible: root.builtinOnPage("systemoneCtx")
+                property bool editing: false
+                color: systemoneCtxHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
 
-                TextField {
-                  Layout.fillWidth: true
-                  text: root.extraEnv
-                  placeholderText: "GGML_OP_OFFLOAD_MIN_BATCH=1024 …"
-                  Binding on text {
-                    value: root.extraEnv
-                    when: !activeFocus
-                    restoreMode: Binding.RestoreNone
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: !systemoneCtxRow.editing
+
+                  Text {
+                    text: "System One context"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
                   }
-                  onEditingFinished: root.extraEnv = text.trim()
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: root.systemoneCtx !== "" ? root.systemoneCtx : "0"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  Text {
+                    text: "×"
+                    color: systemoneCtxHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: systemoneCtxHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("systemoneCtx")
+                    }
+                  }
                 }
-                Button {
-                  text: "\u00d7"
-                  tooltipText: "Remove this row and its variables"
-                  onClicked: root.removeBuiltin("envVars")
-                }
-              }
 
-              // The path gets its own full-width row: a projector path is far
-              // too long to share one with two dropdowns.
-              Item {
-                visible: root.builtinOnPage("vision") && root.mmprojMode === "custom"
-                Layout.preferredWidth: 1
-                Layout.preferredHeight: 1
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: systemoneCtxRow.editing
+
+                  Text {
+                    text: "System One context"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                  }
+                  NumField {
+                    id: systemoneCtxEdit
+                    Layout.fillWidth: true
+                    text: root.systemoneCtx
+                    validator: IntValidator { bottom: 0; top: 10000000 }
+                    onEditingFinished: {
+                      root.systemoneCtx = text
+                      systemoneCtxRow.editing = false
+                    }
+                    Keys.onEscapePressed: systemoneCtxRow.editing = false
+                  }
+                }
+
+                MouseArea {
+                  id: systemoneCtxHoverArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  visible: !systemoneCtxRow.editing
+                  onClicked: {
+                    systemoneCtxRow.editing = true
+                    systemoneCtxEdit.text = root.systemoneCtx
+                    systemoneCtxEdit.forceActiveFocus()
+                  }
+                }
+                PanelToolTip {
+                  visible: systemoneCtxHoverArea.containsMouse
+                  text: "Context window for the System One backend, in tokens."
+                }
               }
-              TextField {
+              Text {
                 Layout.fillWidth: true
-                visible: root.builtinOnPage("vision") && root.mmprojMode === "custom"
-                text: root.mmprojPath
-                placeholderText: "path to mmproj-*.gguf"
-                Binding on text {
-                  value: root.mmprojPath
-                  when: !activeFocus
-                  restoreMode: Binding.RestoreNone
-                }
-                onEditingFinished: root.mmprojPath = text
+                Layout.leftMargin: Style.space(4)
+                visible: root.builtinOnPage("systemoneCtx") && root.rowHasIgnoredFlag("systemoneCtx")
+                text: "⚠ not in this build"
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                color: Commons.Color.urgent
               }
-
             }
 
-            // Added parameters for this sub-page, one row each.
+            // Added parameters for this sub-page, one dotted row each. The
+            // value is the control: clicking the row opens the editor that
+            // fits the type, so a page of parameters reads like the built-in
+            // rows above it.
             Repeater {
               model: root.customParamsForPage(root.effectiveTuningPage)
 
-              RowLayout {
+              Rectangle {
                 required property var modelData
+                id: customRow
                 Layout.fillWidth: true
-                spacing: Style.space(6)
+                implicitHeight: 26
+                radius: 3
+                color: customHover.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
 
                 readonly property var spec: Params.find(root.paramCatalogue, modelData.key)
                 readonly property string ptype: spec
@@ -4678,74 +5852,134 @@ function emitFlag(build, flag, value, args) {
                   : (modelData.type ? modelData.type : "string")
                 readonly property bool longOptionList: spec && spec.options.length > 12
 
-                Text {
-                  Layout.preferredWidth: Style.space(96)
-                  text: spec ? spec.label : modelData.key
-                  color: root.bar.foreground
-                  elide: Text.ElideRight
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
-                  // The full flag and its help text, since the label alone is
-                  // rarely enough to remember what a flag does.
-                  HoverHandler { id: labelHover }
-                  PanelToolTip {
-                    visible: labelHover.hovered
-                    text: modelData.key + (spec && spec.description ? "\n" + spec.description : "")
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+
+                  Text {
+                    text: spec ? spec.label : modelData.key
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                    elide: Text.ElideRight
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: customRow.ptype === "bool"
+                      ? (modelData.value === "true" ? "on" : "off")
+                      : (String(modelData.value) !== "" ? modelData.value : "—")
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.85
+                    elide: Text.ElideRight
+                    Layout.maximumWidth: Style.space(140)
+                  }
+                  Text {
+                    text: "×"
+                    color: customHover.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: customHover.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeCustomParam(modelData.key)
+                    }
                   }
                 }
 
-                // Booleans are presence-only flags, so the control is on/off.
-                Toggle {
-                  visible: ptype === "bool"
-                  checked: modelData.value === "true"
-                  onClicked: root.setCustomParam(modelData.key, modelData.value === "true" ? "false" : "true")
+                MouseArea {
+                  id: customHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: customPopup.open()
+                }
+                PanelToolTip {
+                  visible: customHover.containsMouse
+                  text: modelData.key + (spec && spec.description ? "\n" + spec.description : "")
                 }
 
-                // Enums are chosen, never typed: the value has to be one the
-                // backend accepts, and a typo here only surfaces as a server
-                // that refuses to start.
-                Dropdown {
-                  Layout.fillWidth: true
-                  visible: (ptype === "enum" || ptype === "tristate") && !parent.longOptionList
-                  showLabel: false
-                  options: spec ? spec.options : []
-                  value: modelData.value
-                  onChanged: function(v) { root.setCustomParam(modelData.key, v) }
-                }
-
-                // Past a dozen entries a plain dropdown is a wall to scroll --
-                // --cache-type-k offers 17 quant types -- so the same choice is
-                // offered with a filter box. Still a closed set: the field
-                // searches the options, it does not accept a new value.
-                SearchableDropdown {
-                  Layout.fillWidth: true
-                  visible: ptype === "enum" && parent.longOptionList
-                  options: spec ? spec.options : []
-                  value: modelData.value
-                  triggerLabel: modelData.value
-                  onChanged: function(v) { root.setCustomParam(modelData.key, v) }
-                }
-
-                TextField {
-                  Layout.fillWidth: true
-                  visible: ptype !== "bool" && ptype !== "enum" && ptype !== "tristate"
-                  text: modelData.value
-                  // Typing severs the declarative `text` binding, so the field
-                  // would keep showing a stale value after the source changes
-                  // elsewhere (a backend switch, applying detected defaults).
-                  // Restored whenever the field is not being edited.
-                  Binding on text {
-                    value: modelData.value
-                    when: !activeFocus
-                    restoreMode: Binding.RestoreNone
+                Popup {
+                  id: customPopup
+                  x: 0
+                  y: parent.height + 4
+                  width: 280
+                  height: customPopupCol.implicitHeight + 16
+                  padding: 8
+                  background: Rectangle {
+                    color: Commons.Color.menu.background
+                    radius: 6
+                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
+                    border.width: 1
                   }
-                  onEditingFinished: root.setCustomParam(modelData.key, text)
-                }
 
-                Button {
-                  text: "×"
-                  tooltipText: "Remove " + modelData.key
-                  onClicked: root.removeCustomParam(modelData.key)
+                  ColumnLayout {
+                    id: customPopupCol
+                    width: parent.width
+                    spacing: 6
+
+                    // Booleans are presence-only flags, so the control is on/off.
+                    Toggle {
+                      visible: customRow.ptype === "bool"
+                      checked: modelData.value === "true"
+                      onClicked: root.setCustomParam(modelData.key, modelData.value === "true" ? "false" : "true")
+                    }
+
+                    // Enums are chosen, never typed: the value has to be one
+                    // the backend accepts, and a typo here only surfaces as a
+                    // server that refuses to start.
+                    Dropdown {
+                      Layout.fillWidth: true
+                      visible: (customRow.ptype === "enum" || customRow.ptype === "tristate") && !customRow.longOptionList
+                      showLabel: false
+                      options: customRow.spec ? customRow.spec.options : []
+                      value: modelData.value
+                      onChanged: function(v) { root.setCustomParam(modelData.key, v) }
+                    }
+
+                    // Past a dozen entries a plain dropdown is a wall to
+                    // scroll -- --cache-type-k offers 17 quant types -- so the
+                    // same choice is offered with a filter box. Still a closed
+                    // set: the field searches the options, it does not accept
+                    // a new value.
+                    SearchableDropdown {
+                      Layout.fillWidth: true
+                      visible: customRow.ptype === "enum" && customRow.longOptionList
+                      options: customRow.spec ? customRow.spec.options : []
+                      value: modelData.value
+                      triggerLabel: modelData.value
+                      onChanged: function(v) { root.setCustomParam(modelData.key, v) }
+                    }
+
+                    TextField {
+                      Layout.fillWidth: true
+                      visible: customRow.ptype !== "bool" && customRow.ptype !== "enum" && customRow.ptype !== "tristate"
+                      text: modelData.value
+                      // Typing severs the declarative `text` binding, so the
+                      // field would keep showing a stale value after the
+                      // source changes elsewhere. Restored whenever the field
+                      // is not being edited.
+                      Binding on text {
+                        value: modelData.value
+                        when: !activeFocus
+                        restoreMode: Binding.RestoreNone
+                      }
+                      onEditingFinished: root.setCustomParam(modelData.key, text)
+                    }
+                  }
                 }
               }
             }
@@ -4788,6 +6022,7 @@ function emitFlag(build, flag, value, args) {
 
 
           }
+        }
 
 
         // ---- Log overlay ----
@@ -4890,7 +6125,7 @@ function emitFlag(build, flag, value, args) {
             bordered: true
             // Opaque, because it floats over log text it must stay readable
             // against.
-            background: Color.background
+            background: Commons.Color.background
             fontSize: Style.font.caption
             text: logView.missedLines > 0
                   ? "\u2193 " + logView.missedLines + " new"

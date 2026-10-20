@@ -23,7 +23,9 @@
       "binary": "",
       "ollamaBinary": "",
       "altBinary": "",
-      "modelsDir": ""
+      "modelsDir": "",
+      "systemoneBinary": "",
+      "systemoneModelsDir": ""
     },
     "schema": [
       {
@@ -42,6 +44,11 @@
             "value": "ollama",
             "label": "ollama",
             "description": "ollama serve; throughput per completed request"
+          },
+          {
+            "value": "systemone",
+            "label": "System One",
+            "description": "System One decision models (Laya, Julia-1, lev); minimal resources, no context/speculative/vision"
           }
         ]
       },
@@ -71,6 +78,20 @@
         "type": "path",
         "label": "Models directory",
         "description": "Leave blank to auto-detect (~/models, ~/.cache/llama.cpp, LM Studio, jan).",
+        "defaultValue": ""
+      },
+      {
+        "key": "systemoneBinary",
+        "type": "path",
+        "label": "System One binary",
+        "description": "llama.cpp build for System One decision models. Leave blank to use the preferred llama-server.",
+        "defaultValue": ""
+      },
+      {
+        "key": "systemoneModelsDir",
+        "type": "path",
+        "label": "System One models directory",
+        "description": "Leave blank to auto-detect. Separate from chat models.",
         "defaultValue": ""
       }
     ]

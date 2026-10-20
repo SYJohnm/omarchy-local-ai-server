@@ -145,8 +145,8 @@ var SYSTEONE = {
   label: "System One",
   // Default port separate from llamacpp so both can run simultaneously.
   defaultPort: 8081,
-  // llama.cpp's systemone endpoint.
-  healthPath: "/v1/systemone",
+  // llama.cpp's health endpoint.
+  healthPath: "/health",
   // Slot-based metrics: same /slots endpoint, same pp% sweep.
   metricsMode: "slots",
   // Model selection is a file path chosen from the gguf tree.
@@ -357,6 +357,7 @@ function journalCommand(backendId, unitName, ownsUnit, tailLines) {
 // decoding, vision, or thinking support.
 function systemoneLaunchArgs(binary, selectedModel, host, port, slotSaveDir, cfg) {
   cfg = cfg || {}
+  var isOverridden = typeof cfg.propOverridden === "function" ? cfg.propOverridden.bind(cfg) : function() { return false }
   var args = [
     binary,
     "--model", selectedModel,
@@ -366,24 +367,24 @@ function systemoneLaunchArgs(binary, selectedModel, host, port, slotSaveDir, cfg
     "--metrics"
   ]
 
-  if (!cfg.propOverridden("ngl") && cfg.ngl !== undefined) {
+  if (!isOverridden("ngl") && cfg.ngl !== undefined) {
     var ngl = parseInt(cfg.ngl, 10)
     if (!isFinite(ngl)) ngl = 0
     if (ngl !== -1) ngl = Math.max(0, Math.min(999, ngl))
     args.push("--gpu-layers", String(ngl))
   }
-  if (!cfg.propOverridden("cacheTypeK") && cfg.cacheTypeK)
+  if (!isOverridden("cacheTypeK") && cfg.cacheTypeK)
     args.push("--cache-type-k", cfg.cacheTypeK)
-  if (!cfg.propOverridden("cacheTypeV") && cfg.cacheTypeV)
+  if (!isOverridden("cacheTypeV") && cfg.cacheTypeV)
     args.push("--cache-type-v", cfg.cacheTypeV)
-  if (!cfg.propOverridden("loadMode") && cfg.loadMode)
+  if (!isOverridden("loadMode") && cfg.loadMode)
     args.push("--load-mode", cfg.loadMode)
-  if (!cfg.propOverridden("threads") && isFinite(cfg.threads) && cfg.threads > 0)
+  if (!isOverridden("threads") && isFinite(cfg.threads) && cfg.threads > 0)
     args.push("--threads", String(cfg.threads))
-  if (!cfg.propOverridden("cpuMoe") && cfg.cpuMoe) args.push("--cpu-moe")
-  if (!cfg.propOverridden("nCpuMoe") && cfg.nCpuMoe) args.push("--n-cpu-moe", cfg.nCpuMoe)
-  if (!cfg.propOverridden("parallel") && cfg.parallel) args.push("--parallel", cfg.parallel)
-  if (!cfg.propOverridden("systemoneCtx") && cfg.systemoneCtx && parseInt(cfg.systemoneCtx, 10) > 0)
+  if (!isOverridden("cpuMoe") && cfg.cpuMoe) args.push("--cpu-moe")
+  if (!isOverridden("nCpuMoe") && cfg.nCpuMoe) args.push("--n-cpu-moe", cfg.nCpuMoe)
+  if (!isOverridden("parallel") && cfg.parallel) args.push("--parallel", cfg.parallel)
+  if (!isOverridden("systemoneCtx") && cfg.systemoneCtx && parseInt(cfg.systemoneCtx, 10) > 0)
     args.push("--ctx-size", cfg.systemoneCtx)
 
   // Extra args and env
