@@ -369,6 +369,14 @@ is named on the page, and is still passed verbatim.
 An argument string in a settings file written before this splits itself on
 load, so nothing has to be retyped.
 
+### Environment is a list, not a string
+
+The **Environment** row on Tuning opens a small editor: one row per
+`NAME=value`, a field to change the value, `×` to remove it, and a NAME/value
+pair to add one. Values may contain spaces, quotes and backslashes; they are
+stored in `extraEnv` in a quoted form and parsed back on load, so an old
+space-separated string still opens as separate rows.
+
 ## Hardware auto-tuning
 
 The Tuning page prefills suggestions derived from an actual probe of the

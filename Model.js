@@ -111,25 +111,80 @@ function barSwitchTooltip(switchState, inflight) {
   return ""
 }
 
-// Parses the Environment row: "NAME=value NAME2='with spaces'" into
-// [{name, value}], plus the tokens that are not assignments. Names follow the
-// shell's rule, so nothing reaching the launch line can be anything but an
-// assignment; values are shell-quoted by the caller.
+// Parses the environment assignment string stored in `extraEnv`:
+// "NAME=value NAME2='with spaces'" into [{name, value}], plus the tokens that
+// are not assignments. Names follow the shell's rule, so nothing reaching the
+// launch line can be anything but an assignment; values are shell-quoted by
+// the caller. Values may be bare, single-quoted or double-quoted; double
+// quotes understand backslash escapes so a value can contain spaces, quotes
+// or a literal backslash. The tokenizer is deliberately small: this is a
+// settings field, not a shell.
 function parseEnvAssignments(text) {
   var env = [], invalid = []
-  var re = /\s*([^\s=]+)=(?:"([^"]*)"|'([^']*)'|([^\s]+)|)/g
-  var src = String(text || ""), m
-  while ((m = re.exec(src)) !== null) {
-    if (m[0].trim() === "") break
-    var name = m[1]
-    var value = m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : (m[4] !== undefined ? m[4] : ""))
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) { invalid.push(m[0].trim()); continue }
-    var replaced = false
-    for (var i = 0; i < env.length; i++)
-      if (env[i].name === name) { env[i].value = value; replaced = true }
-    if (!replaced) env.push({ name: name, value: value })
+  var src = String(text || "")
+  var i = 0
+
+  function isSpace(ch) {
+    return ch === " " || ch === "\t" || ch === "\n" || ch === "\r"
+  }
+  function push(name, value) {
+    for (var j = 0; j < env.length; j++)
+      if (env[j].name === name) { env[j].value = value; return }
+    env.push({ name: name, value: value })
+  }
+
+  while (i < src.length) {
+    while (i < src.length && isSpace(src[i])) i++
+    if (i >= src.length) break
+    var start = i
+    while (i < src.length && !isSpace(src[i]) && src[i] !== "=") i++
+    var name = src.slice(start, i)
+    if (src[i] !== "=") {
+      while (i < src.length && !isSpace(src[i])) i++
+      invalid.push(src.slice(start, i))
+      continue
+    }
+    i++
+    var value = ""
+    if (src[i] === '"' || src[i] === "'") {
+      var quote = src[i++]
+      var closed = false
+      while (i < src.length) {
+        if (src[i] === "\\" && quote === '"' && i + 1 < src.length) {
+          value += src[i + 1]
+          i += 2
+          continue
+        }
+        if (src[i] === quote) { i++; closed = true; break }
+        value += src[i++]
+      }
+      if (!closed) { invalid.push(src.slice(start, i)); continue }
+    } else {
+      var vstart = i
+      while (i < src.length && !isSpace(src[i])) i++
+      value = src.slice(vstart, i)
+    }
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      invalid.push(src.slice(start, i))
+      continue
+    }
+    push(name, value)
   }
   return { env: env, invalid: invalid }
+}
+
+// Canonical inverse of parseEnvAssignments. Any value that would not survive a
+// bare token is double-quoted, with backslashes and quotes escaped.
+function formatEnvAssignments(env) {
+  var parts = []
+  for (var i = 0; i < (env || []).length; i++) {
+    var name = String(env[i].name || "")
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue
+    var value = String(env[i].value == null ? "" : env[i].value)
+    if (value !== "" && !/[\s"'\\]/.test(value)) parts.push(name + "=" + value)
+    else parts.push(name + '="' + value.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"')
+  }
+  return parts.join(" ")
 }
 
 // ---- Log triage ----
@@ -482,6 +537,7 @@ if (typeof module !== "undefined") {
     BAR_ICON: BAR_ICON,
     barSwitchText: barSwitchText,
     parseEnvAssignments: parseEnvAssignments,
+    formatEnvAssignments: formatEnvAssignments,
     barSwitchTooltip: barSwitchTooltip,
     barText: barText,
     dirName: dirName,
