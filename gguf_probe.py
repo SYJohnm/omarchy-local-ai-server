@@ -105,6 +105,10 @@ def probe(path):
         for _ in range(tensor_count):
             name = read_str(f)
             (n_dims,) = struct.unpack('<I', f.read(4))
+            # GGUF tensors have at most a handful of dimensions; a hostile
+            # header must not turn 4 bytes into a multi-gigabyte read.
+            if n_dims > 8 or 8 * n_dims > remaining(f):
+                raise ValueError('tensor dimensions run past end of file')
             f.read(8 * n_dims)          # dims
             f.read(4)                   # tensor type
             f.read(8)                   # offset

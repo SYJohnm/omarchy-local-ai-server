@@ -301,34 +301,6 @@ Panel {
     return root.parsedEnv.env.map(function(e) { return e.name + "=" + root.shellQuote(e.value) }).join(" ")
   }
 
-  // The environment editor keeps the structured list and writes the canonical
-  // assignment string back to the profile. Values are free-form; the parser
-  // quotes anything that needs it.
-  function setEnvValue(index, value) {
-    var env = root.parsedEnv.env.slice()
-    if (index < 0 || index >= env.length) return
-    env[index] = { name: env[index].name, value: String(value) }
-    root.extraEnv = Model.formatEnvAssignments(env)
-  }
-
-  function addEnvVar(name, value) {
-    var n = String(name || "").trim()
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(n)) return false
-    var env = root.parsedEnv.env.slice()
-    var found = false
-    for (var i = 0; i < env.length; i++)
-      if (env[i].name === n) { env[i] = { name: n, value: String(value) }; found = true; break }
-    if (!found) env.push({ name: n, value: String(value) })
-    root.extraEnv = Model.formatEnvAssignments(env)
-    return true
-  }
-
-  function removeEnvVar(index) {
-    var env = root.parsedEnv.env.slice()
-    if (index < 0 || index >= env.length) return
-    env.splice(index, 1)
-    root.extraEnv = Model.formatEnvAssignments(env)
-  }
 
   // ollama-only
   property string keepAlive: ""
@@ -1003,7 +975,7 @@ Panel {
   // assumption held only as long as the panel's contentHeight did: at the old
   // 460 the seventh row rendered under the "Show log" button, so the row that
   // exists and holds a value the next launch uses was the one you could not
-  // read, and the cap was dropped to five to compensate. The panel is 520 now
+  // read, and the cap was dropped to five to compensate. The panel is 460 now
   // (see contentHeight above), so the built-in set fits on one page again
   // without borrowing that headroom from the row cap.
   //
@@ -6906,6 +6878,20 @@ Panel {
                   padding: 8
                   focus: true
                   property string error: ""
+                  // Edited here, written once when the popup closes: a field
+                  // that loses focus because the popup vanished must not lose
+                  // the value that was typed into it.
+                  property var draft: []
+                  property bool dirty: false
+                  onOpened: {
+                    draft = root.parsedEnv.env.map(function(e) { return { name: e.name, value: e.value } })
+                    dirty = false
+                  }
+                  onClosed: {
+                    if (!dirty) return
+                    root.extraEnv = Model.formatEnvAssignments(draft)
+                    dirty = false
+                  }
 
                   background: Rectangle {
                     color: Commons.Color.menu.background
@@ -6920,11 +6906,25 @@ Panel {
                       error = "Name must use A-Z, 0-9 or _, and not start with a digit."
                       return
                     }
-                    if (!root.addEnvVar(name, newEnvValue.text)) return
+                    var env = draft.slice()
+                    var found = false
+                    for (var i = 0; i < env.length; i++)
+                      if (env[i].name === name) { env[i] = { name: name, value: newEnvValue.text }; found = true; break }
+                    if (!found) env.push({ name: name, value: newEnvValue.text })
+                    draft = env
+                    dirty = true
                     newEnvName.text = ""
                     newEnvValue.text = ""
                     error = ""
                     newEnvName.forceActiveFocus()
+                  }
+
+                  function removeVar(index) {
+                    if (index < 0 || index >= draft.length) return
+                    var env = draft.slice()
+                    env.splice(index, 1)
+                    draft = env
+                    dirty = true
                   }
 
                   ColumnLayout {
@@ -6947,7 +6947,7 @@ Panel {
                         spacing: 2
 
                         Repeater {
-                          model: root.parsedEnv.env
+                          model: envPopup.draft
 
                           delegate: Rectangle {
                             required property var modelData
@@ -6981,7 +6981,7 @@ Panel {
                                 placeholderText: "value"
                                 font.family: root.bar.fontFamily
                                 font.pixelSize: root.fontSize
-                                onEditingFinished: root.setEnvValue(index, text)
+                                onTextEdited: { envPopup.draft[index].value = text; envPopup.dirty = true }
                               }
                               Text {
                                 text: "×"
@@ -6992,7 +6992,7 @@ Panel {
                                 MouseArea {
                                   anchors.fill: parent
                                   cursorShape: Qt.PointingHandCursor
-                                  onClicked: root.removeEnvVar(index)
+                                  onClicked: envPopup.removeVar(index)
                                 }
                               }
                             }
