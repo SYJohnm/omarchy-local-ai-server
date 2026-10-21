@@ -2,8 +2,9 @@
 
 An Omarchy bar widget that starts, stops and monitors a local inference server —
 **llama.cpp** (`llama-server`) or **ollama** — with live prompt and generation
-throughput in the bar. A second **System One** instance can run alongside it
-for decision models (port 8081 by default).
+throughput in the bar. A third **System One** backend serves decision models on
+a separate port (8081 by default). One backend runs at a time; the picker is
+disabled while the server is running, so stop it before switching.
 
 <a href="preview.png"><img src="preview.png" alt="Server, Model and Tuning of the panel"></a>
 
@@ -72,7 +73,8 @@ Everything auto-detects; the settings exist to override.
 | `altBinary` | — | An extra `llama-server` build the scan would not find on its own. |
 | `ollamaBinary` | auto | The `ollama` binary. |
 | `modelsDir` | auto | Probes `~/models`, `~/.cache/llama.cpp`, `~/.local/share/models`, LM Studio and jan directories. |
-| `systemoneBinary` · `systemoneModelsDir` | auto | Paths for the System One instance. |
+| `systemoneBinary` | auto | Blank uses the preferred `llama-server`. |
+| `systemoneModelsDir` | auto | Blank reuses the main model scan; set it to keep decision models apart. |
 
 Selected model, tuning values, host and port are runtime state in
 `~/.local/state/omarchy/io.github.syjohnm.local-ai-server/settings.json`.
@@ -203,8 +205,7 @@ model being served and every model found in that store (with `thinking`,
 ```
 
 `contextSize` is what the server was launched with (0: the model's own
-`contextLength`). The System One instance fires the same hooks with
-`"systemone-started"` / `"systemone-stopped"` and opens `backend: "systemone"`
+`contextLength`). System One fires the same hooks with `backend: "systemone"`
 on port 8081.
 
 ## Development

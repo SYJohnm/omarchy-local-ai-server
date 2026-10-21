@@ -23,8 +23,15 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
+
+# One slow slot used to hold Stop for two minutes, and four slots for eight.
+# The cache is a convenience; a stop must finish even when the server is
+# wedged. shortcut: 60 s for a save and 120 s for a restore, then give up.
+SAVE_BUDGET = 60
+RESTORE_BUDGET = 120
 
 
 def call(url, method="GET", body=None, timeout=10):
@@ -50,10 +57,16 @@ def slot_ids(base):
 
 def save(base, slot_dir, prefix):
     saved, notes = 0, []
+    deadline = time.monotonic() + SAVE_BUDGET
     for sid in slot_ids(base):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            notes.append("deadline reached")
+            break
         name = "%s.slot%d.bin" % (prefix, sid)
         tmp = name + ".tmp"
-        status, data = call("%s/slots/%d?action=save" % (base, sid), "POST", {"filename": tmp}, timeout=120)
+        status, data = call("%s/slots/%d?action=save" % (base, sid), "POST",
+                            {"filename": tmp}, timeout=min(120, max(1, int(left))))
         n = int(data.get("n_saved") or 0) if status == 200 and isinstance(data, dict) else 0
         tmp_path = os.path.join(slot_dir, tmp)
         try:
@@ -70,14 +83,20 @@ def save(base, slot_dir, prefix):
 
 def restore(base, slot_dir, prefix):
     restored, notes = 0, []
+    deadline = time.monotonic() + RESTORE_BUDGET
     for sid in slot_ids(base):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            notes.append("deadline reached")
+            break
         candidates = ["%s.slot%d.bin" % (prefix, sid)]
         if sid == 0:
             candidates.append("%s.slot.bin" % prefix)
         name = next((c for c in candidates if os.path.exists(os.path.join(slot_dir, c))), None)
         if name is None:
             continue
-        status, data = call("%s/slots/%d?action=restore" % (base, sid), "POST", {"filename": name}, timeout=300)
+        status, data = call("%s/slots/%d?action=restore" % (base, sid), "POST",
+                            {"filename": name}, timeout=min(300, max(1, int(left))))
         if status == 200 and isinstance(data, dict):
             n = int(data.get("n_restored") or 0)
             restored += n

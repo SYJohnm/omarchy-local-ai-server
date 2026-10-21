@@ -140,10 +140,11 @@ var OLLAMA = {
 //
 // Shares the same llama-server binary family as llamacpp (same --help flags,
 // same slot-based KV persistence), but exposes a different API endpoint.
-var SYSTEONE = {
+var SYSTEMONE = {
   id: "systemone",
   label: "System One",
-  // Default port separate from llamacpp so both can run simultaneously.
+  // Default port separate from llamacpp; the widget runs one backend at a
+  // time, but an external chat server can keep 8080.
   defaultPort: 8081,
   // llama.cpp's health endpoint.
   healthPath: "/health",
@@ -161,7 +162,7 @@ var SYSTEONE = {
   systemUnit: undefined
 }
 
-var BACKENDS = [LLAMA_CPP, OLLAMA, SYSTEONE]
+var BACKENDS = [LLAMA_CPP, OLLAMA, SYSTEMONE]
 
 function all() {
   return BACKENDS
@@ -176,10 +177,6 @@ function get(id) {
 
 function ids() {
   return BACKENDS.map(function(b) { return b.id })
-}
-
-function isSystemOne(backendId) {
-  return String(backendId || "") === "systemone"
 }
 
 function labels() {
@@ -205,11 +202,6 @@ function healthUrl(backendId, host, port) {
 // VRAM/RAM split.
 function loadedModelsUrl(backendId, host, port) {
   return baseUrl(host, port) + (backendId === "ollama" ? "/api/ps" : "/slots")
-}
-
-// Endpoint for System One decision requests.
-function systemoneUrl(host, port) {
-  return baseUrl(host, port) + "/v1/systemone"
 }
 
 // ollama-only: the catalogue of pulled models.
@@ -304,12 +296,6 @@ function modelsDirFromUnitEnvironment(showOutput) {
   return match ? match[2] : ""
 }
 
-// Stop command matching whatever detachedCommand produced.
-function stopCommand(hasSystemdRun, unitName, procMarker) {
-  if (hasSystemdRun) return ["systemctl", "--user", "stop", unitName]
-  return ["pkill", "-f", procMarker]
-}
-
 // Transient unit name for a backend instance. Namespaced by plugin id and
 // backend so two widgets, or two backends, never collide on one unit.
 // Dots are legal in systemd unit names, but they also delimit the unit-type
@@ -319,7 +305,7 @@ function stopCommand(hasSystemdRun, unitName, procMarker) {
 function unitName(pluginId, backendId) {
   var name = String(pluginId || "local-ai-server").replace(/[^A-Za-z0-9_-]/g, "-")
   // "systemone" -> "sys1" for shorter unit names (io.github.syjohnm.local-ai-server-sys1.service)
-  var id = String(backendId || "server")
+  var id = String(backendId || "server").replace(/[^A-Za-z0-9_-]/g, "-")
   if (id === "systemone") id = "sys1"
   return name + "-" + id
 }
@@ -387,11 +373,11 @@ function systemoneLaunchArgs(binary, selectedModel, host, port, slotSaveDir, cfg
   if (!isOverridden("systemoneCtx") && cfg.systemoneCtx && parseInt(cfg.systemoneCtx, 10) > 0)
     args.push("--ctx-size", cfg.systemoneCtx)
 
-  // Extra args and env
-  if (cfg.extraPieces) {
-    for (var p = 0; p < cfg.extraPieces.length; p++) args = args.concat(cfg.extraPieces)
-  }
-  if (cfg.envPrefix) args = [cfg.envPrefix].concat(args)
+  // Extra args are already split into one token per element; concatenating the
+  // whole list once is what the caller expects. The env prefix belongs in the
+  // shell command, not in argv, or exec would look for a program named
+  // "KEY=value".
+  if (cfg.extraPieces) args = args.concat(cfg.extraPieces)
 
   return args
 }
@@ -402,8 +388,16 @@ function systemoneLaunchArgs(binary, selectedModel, host, port, slotSaveDir, cfg
 // model only: a cache saved under different tuning is rejected at restore and
 // the start is simply cold, then the next save replaces it.
 function slotPrefix(model) {
-  var base = String(model || "").replace(/^.*\//, "")
-  return base === "" ? "" : base.replace(/[^A-Za-z0-9._-]/g, "_")
+  var path = String(model || "")
+  var base = path.replace(/^.*\//, "")
+  if (base === "") return ""
+  // The file name alone is not unique: two models called model.gguf in
+  // different folders shared one cache file and overwrote each other. A short
+  // hash of the full path keeps the readable name and makes it unique.
+  var h = 5381
+  for (var i = 0; i < path.length; i++) h = (((h << 5) + h) + path.charCodeAt(i)) >>> 0
+  return base.replace(/[^A-Za-z0-9._-]/g, "_") + "-" +
+    ("00000000" + h.toString(16)).slice(-8)
 }
 
 // ---- llama.cpp builds ----
@@ -522,16 +516,14 @@ if (typeof module !== "undefined") {
   module.exports = {
     LLAMA_CPP: LLAMA_CPP,
     OLLAMA: OLLAMA,
-    SYSTEONE: SYSTEONE,
+    SYSTEMONE: SYSTEMONE,
     all: all,
     get: get,
     ids: ids,
     labels: labels,
     supports: supports,
-    isSystemOne: isSystemOne,
     baseUrl: baseUrl,
     healthUrl: healthUrl,
-    systemoneUrl: systemoneUrl,
     loadedModelsUrl: loadedModelsUrl,
     tagsUrl: tagsUrl,
     llamaBinaryCandidates: llamaBinaryCandidates,
@@ -543,7 +535,6 @@ if (typeof module !== "undefined") {
     systemoneLaunchArgs: systemoneLaunchArgs,
     envPrefix: envPrefix,
     detachedCommand: detachedCommand,
-    stopCommand: stopCommand,
     takeoverStopCommand: takeoverStopCommand,
     modelsDirFromUnitEnvironment: modelsDirFromUnitEnvironment,
     unitName: unitName,

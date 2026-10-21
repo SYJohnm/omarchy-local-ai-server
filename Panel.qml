@@ -51,16 +51,52 @@ Panel {
   readonly property string configuredModelsDir: setting("modelsDir", "")
   readonly property string configuredSystemoneBinary: setting("systemoneBinary", "")
   readonly property string configuredSystemoneModelsDir: setting("systemoneModelsDir", "")
-  readonly property string detectedSystemoneBinary: ""
-  readonly property string activeSystemoneBinary: root.configuredSystemoneBinary !== "" ? expandPath(root.configuredSystemoneBinary) : root.detectedSystemoneBinary
-  property string systemoneModel: ""
-  readonly property var systemoneModelOptions:
-    root.configuredSystemoneModelsDir !== "" ? Model.scanModelsDir(root.configuredSystemoneModelsDir, "") : []
-  function setSystemoneBinary(v) { root.saveSetting("systemoneBinary", v) }
-  function setSystemoneModelsDir(v) { root.saveSetting("systemoneModelsDir", v) }
-  function refreshSystemoneModels() {
-    root.systemoneModelOptions = Model.scanModelsDir(root.configuredSystemoneModelsDir, "")
+  // Blank means "use the preferred llama-server", the same binary the chat
+  // backend runs. A separate build only matters for a fork.
+  readonly property string activeSystemoneBinary:
+    root.configuredSystemoneBinary !== "" ? expandPath(root.configuredSystemoneBinary) : root.launchLlamaBinary
+  // Real path of that binary when the build probe knows it; empty otherwise.
+  // Used to notice a build change, since argv[0] is the process marker.
+  readonly property string activeSystemoneExe: {
+    var b = Backends.findBuild(root.llamaBuilds, root.activeSystemoneBinary)
+    return b && b.real ? b.real : ""
   }
+  property string systemoneModel: ""
+  property var systemoneScannedOptions: []
+  property bool systemoneScanning: false
+  // Blank means "auto-detect": reuse the main model scan, which already
+  // searches the configured/detected model directories. A separate directory
+  // is scanned on its own so decision models can live apart from chat models.
+  readonly property var systemoneModelOptions:
+    root.configuredSystemoneModelsDir !== "" ? root.systemoneScannedOptions : root.modelOptions
+  function setSystemoneBinary(v) { root.setWidgetSetting("systemoneBinary", v) }
+  function setSystemoneModelsDir(v) { root.setWidgetSetting("systemoneModelsDir", v) }
+  function validateSystemoneModel() {
+    if (root.systemoneModel === "") return
+    // Empty means a scan is in flight or the backend switch just cleared the
+    // shared list; do not throw the saved choice away for that.
+    if (root.systemoneModelOptions.length === 0) return
+    for (var i = 0; i < root.systemoneModelOptions.length; i++)
+      if (root.systemoneModelOptions[i].value === root.systemoneModel) return
+    root.systemoneModel = ""
+  }
+  function refreshSystemoneModels() {
+    if (root.configuredSystemoneModelsDir === "") {
+      root.refreshModels()
+      return
+    }
+    root.systemoneScanning = true
+    systemoneScan.command = ["find", "-L", expandPath(root.configuredSystemoneModelsDir),
+      "-maxdepth", String(root.modelScanDepth),
+      "(", "-type", "f", "-iname", "*.gguf", "!", "-iname", "*mmproj*", "-printf", "F\t%p\n", ")"]
+    systemoneScan.running = false
+    systemoneScan.running = true
+  }
+  onConfiguredSystemoneModelsDirChanged: {
+    root.systemoneScannedOptions = []
+    if (root.settingsLoaded) root.refreshSystemoneModels()
+  }
+  onSystemoneModelOptionsChanged: root.validateSystemoneModel()
 
   property string detectedLlamaBinary: ""
   property string detectedOllamaBinary: ""
@@ -72,7 +108,10 @@ Panel {
 
   readonly property string llamaBinary: configuredLlamaBinary !== "" ? expandPath(configuredLlamaBinary) : detectedLlamaBinary
   readonly property string ollamaBinary: configuredOllamaBinary !== "" ? expandPath(configuredOllamaBinary) : detectedOllamaBinary
-  readonly property string activeBinary: root.backend === "ollama" ? root.ollamaBinary : (root.backend === "systemone" ? root.systemoneBinary : root.launchLlamaBinary)
+  readonly property string activeBinary: root.backend === "ollama" ? root.ollamaBinary : (root.backend === "systemone" ? root.activeSystemoneBinary : root.launchLlamaBinary)
+  // The model the current backend would launch. System One keeps its own
+  // selection because the chat model list can point at a different file.
+  readonly property string launchModel: root.backend === "systemone" ? root.systemoneModel : root.selectedModel
 
 
   // ---- llama.cpp builds ----
@@ -317,6 +356,16 @@ Panel {
   property bool catalogueLoading: false
   // Added parameters, in display order: [{ key, value }]. Persisted.
   property var customParams: []
+  // ollama reads OLLAMA_* variables; a row left over from a llama.cpp profile
+  // is not passed. Name it instead of dropping it in envPrefix.
+  readonly property var ollamaInvalidParams: {
+    var out = []
+    if (root.backend !== "ollama") return out
+    for (var i = 0; i < root.customParams.length; i++)
+      if (!/^OLLAMA_[A-Za-z0-9_]+$/.test(root.customParams[i].key))
+        out.push(root.customParams[i].key)
+    return out
+  }
   // Flags the page already has dedicated controls for; excluded from the
   // picker so the same setting cannot be driven from two places.
   // Flags the plugin owns outright: identity and plumbing, not tuning. They
@@ -842,7 +891,8 @@ Panel {
   // dropdown offers.
   readonly property var installedBackends: Backends.installedBackends({
     llamacpp: root.llamaBinary !== "" || root.altBinary !== "" || root.llamaBuilds.length > 0,
-    ollama: root.ollamaBinary !== ""
+    ollama: root.ollamaBinary !== "",
+    systemone: root.activeSystemoneBinary !== ""
   }, root.capabilitiesProbed)
 
   // A saved backend that is not installed here (settings copied from another
@@ -872,7 +922,6 @@ Panel {
   // The server outlives the shell on purpose: it is started detached, and the
   // next panel re-adopts it through /proc. Not a setting any more -- a shell
   // restart that took the model down with it was never what anyone wanted.
-  readonly property bool surviveRestart: true
   readonly property string slotKvScript: pluginDir + "/slot_kv.py"
   function kvPrefix(model) {
     return Backends.supports(root.backend, "slotKv") ? Backends.slotPrefix(model) : ""
@@ -885,11 +934,15 @@ Panel {
   // Resolved path of the running binary, so a change of build restarts too --
   // argv[0] is the process marker, not the binary.
   property string runningExe: ""
+  // ollama takes no argv, so its launch environment is fingerprinted instead.
+  property string runningConfigHash: ""
   // "draining" while a restart waits for running requests, "" otherwise.
   property string restartPhase: ""
   property int restartIdleTicks: 0
   // Set by a restart so the stop it goes through starts the server again.
   property bool restartAfterStop: false
+  // Stop was pressed while the debounced autosave was writing the cache.
+  property bool stopAfterAutosave: false
   property bool slotsBusy: false
   property int slotsProcessing: 0
   property real slotsSeenAtMs: 0
@@ -898,11 +951,49 @@ Panel {
   // Waits for everything the argv depends on to be detected -- otherwise an
   // adopted server reads as changed until the hardware probe lands.
   readonly property bool configChanged: root.running && root.ownsUnit && !root.switching &&
-    root.backend === "llamacpp" && root.runningArgs.length > 1 &&
-    root.capabilitiesProbed && root.buildsProbed && root.hardware !== null &&
-    root.settingsLoaded && !root.catalogueLoading &&
-    (JSON.stringify(root.buildLlamaArgs().slice(1)) !== JSON.stringify(root.runningArgs.slice(1)) ||
-     (root.runningExe !== "" && root.resolvedBuild !== null && root.resolvedBuild.real !== root.runningExe))
+    root.settingsLoaded && root.capabilitiesProbed &&
+    (root.backend === "ollama"
+      ? !root.catalogueLoading && root.runningConfigHash !== "" && root.ollamaConfigHash() !== root.runningConfigHash
+      : (root.backend === "llamacpp" || root.backend === "systemone") &&
+        root.runningArgs.length > 1 && root.buildsProbed && root.hardware !== null &&
+        !root.catalogueLoading &&
+        (JSON.stringify(root.currentLaunchArgs().slice(1)) !== JSON.stringify(root.runningArgs.slice(1)) ||
+         (root.backend === "systemone"
+           ? root.runningExe !== "" && root.activeSystemoneExe !== "" &&
+             root.activeSystemoneExe !== root.runningExe
+           : root.runningExe !== "" && root.resolvedBuild !== null &&
+             root.resolvedBuild.real !== root.runningExe)))
+
+  // Extra args are stored as semicolon-separated fragments ("--temp 0.5; --foo");
+  // System One takes an argv token list, so parse each fragment first.
+  function extraArgTokens() {
+    var pieces = Model.splitExtraArgs(root.extraArgs)
+    var out = []
+    for (var i = 0; i < pieces.length; i++) out = out.concat(Model.parseArgs(pieces[i]))
+    return out
+  }
+
+  // What the page would launch now. The running argv is compared with this;
+  // both llama.cpp and System One use the same /proc reader.
+  function currentLaunchArgs() {
+    if (root.backend === "systemone")
+      return Backends.systemoneLaunchArgs(
+        root.activeSystemoneBinary, root.systemoneModel, root.host, root.port,
+        expandPath(root.slotSaveDir),
+        {
+          ngl: root.gpuLayers,
+          cacheTypeK: root.cacheTypeK,
+          cacheTypeV: root.cacheTypeV,
+          loadMode: root.loadMode,
+          threads: root.threads,
+          cpuMoe: root.cpuMoe,
+          nCpuMoe: root.nCpuMoe,
+          parallel: root.parallel,
+          systemoneCtx: root.systemoneCtx,
+          extraPieces: root.extraArgTokens()
+        })
+    return root.buildLlamaArgs()
+  }
 
   // ---- Metrics ----
 
@@ -923,7 +1014,11 @@ Panel {
   property string loadedModelInfo: ""
 
   property string lastLogLine: ""
-  property var logLines: []
+  // The log is a ListModel so a new line appends one delegate instead of
+  // resetting the whole view. logRevision changes on every append (the count
+  // stops changing at the cap) and is what the view follows.
+  ListModel { id: logModel }
+  property int logRevision: 0
   readonly property int logLinesMax: 400
   // "" not attached yet | "user" transient unit | "system" distribution unit |
   // "none" foreign server whose output no journal holds.
@@ -1056,15 +1151,9 @@ Panel {
     for (var j = 0; j < row.props.length; j++) {
       var spec = Params.find(root.paramCatalogue, row.props[j])
       if (spec) rowFlags.push(spec.flag)
-      // Check all params in catalogue that map to this row's props
-      for (var k = 0; k < root.paramCatalogue.length; k += 3) {
-        var flag = root.paramCatalogue[k]
-        if (row.props.indexOf(root.paramCatalogue[k + 1]) !== -1)
-          rowFlags.push(flag)
-      }
     }
     for (var f = 0; f < rowFlags.length; f++)
-      if (ignoredFlags.indexOf(rowFlags[f]) !== -1) return true
+      if (root.ignoredFlags.indexOf(rowFlags[f]) !== -1) return true
     return false
   }
 
@@ -1528,6 +1617,7 @@ Panel {
       if (typeof parsed.mmprojOffload === "string" && root.tristateValues.indexOf(parsed.mmprojOffload) !== -1)
         root.mmprojOffload = parsed.mmprojOffload
       if (typeof parsed.selectedModel === "string") root.selectedModel = parsed.selectedModel
+      if (typeof parsed.systemoneModel === "string") root.systemoneModel = parsed.systemoneModel
       if (typeof parsed.showMetric === "boolean") root.showMetric = parsed.showMetric
       if (typeof parsed.extraArgs === "string") root.extraArgs = parsed.extraArgs
       if (typeof parsed.extraEnv === "string") root.extraEnv = parsed.extraEnv
@@ -1590,6 +1680,7 @@ Panel {
     // different model, so the selection has the last word.
     root.applyTuningForSelection()
     root.ensureInstalledBackend()
+    if (root.configuredSystemoneModelsDir !== "") root.refreshSystemoneModels()
     root.adoptRunningServer()
   }
 
@@ -1639,6 +1730,7 @@ Panel {
       mmprojMode: root.mmprojMode, mmprojPath: root.mmprojPath,
       mmprojOffload: root.mmprojOffload,
       selectedModel: root.selectedModel, showMetric: root.showMetric,
+      systemoneModel: root.systemoneModel,
       extraArgs: root.extraArgs, keepAlive: root.keepAlive, extraEnv: root.extraEnv,
       llamaBuild: root.llamaBuild,
       kvPersistence: root.kvPersistence,
@@ -1702,6 +1794,9 @@ Panel {
   onBackendChanged: {
     root.selectedModel = ""
     root.modelOptions = []
+    // Warnings are per launch line; do not carry the old backend's flags into
+    // the new one's tuning page.
+    root.ignoredFlags = []
     // Parameters are backend-specific: llama.cpp flags mean nothing to ollama
     // and vice versa, so both the catalogue and the user's additions reset --
     // as does the rest of the tuning, which comes back from the backend's
@@ -1767,6 +1862,8 @@ Panel {
     root.scheduleSettingsSave()
     if (root.selectedModel !== "") root.revealModel(root.selectedModel)
   }
+  onSystemoneModelChanged: root.scheduleSettingsSave()
+  onSystemoneCtxChanged: root.scheduleSettingsSave()
   onShowMetricChanged: root.scheduleSettingsSave()
   onExtraArgsChanged: {
     root.touchTuning()
@@ -1777,7 +1874,6 @@ Panel {
   onParamCatalogueChanged: root.splitPastedArgs()
   onKeepAliveChanged: root.touchTuning()
   onExtraEnvChanged: root.touchTuning()
-  onSurviveRestartChanged: root.scheduleSettingsSave()
   onKvPersistenceChanged: root.scheduleSettingsSave()
 
   Process {
@@ -1873,7 +1969,8 @@ Panel {
   function countModelDirs() {
     if (modelDirCountProbe.running || root.setupModelDirs.length === 0) return
     modelDirCountProbe.command = ["bash", "-c",
-      "for d in \"$@\"; do n=$(find -L \"$d\" -maxdepth 6 -type f -iname '*.gguf' ! -iname '*mmproj*' 2>/dev/null | wc -l); " +
+      "for d in \"$@\"; do n=$(find -L \"$d\" -maxdepth " + root.modelScanDepth +
+      " -type f -iname '*.gguf' ! -iname '*mmproj*' 2>/dev/null | wc -l); " +
       "printf '%s\\t%s\\n' \"$n\" \"$d\"; done", "_"].concat(root.setupModelDirs)
     modelDirCountProbe.running = true
   }
@@ -2029,6 +2126,10 @@ Panel {
 
   // ---- Model discovery ----
 
+  // Deep enough for LM Studio/Jan layouts, shallow enough that pointing the
+  // setting at $HOME does not walk every cache and node_modules on the disk.
+  readonly property int modelScanDepth: 8
+
   readonly property var searchDirs: {
     if (root.configuredModelsDir !== "") return [expandPath(root.configuredModelsDir)]
     return root.detectedModelDirs
@@ -2156,6 +2257,9 @@ Panel {
 
   readonly property var modelTree: root.buildPickerTree()
 
+  // A flat search can match thousands of files; a Repeater would build a
+  // delegate for every one. The list is capped and the count says "200+".
+  readonly property int modelSearchLimit: 200
   readonly property var modelRows: {
     var q = String(root.modelFilter || "").trim().toLowerCase()
     if (q !== "") {
@@ -2165,6 +2269,7 @@ Panel {
         var node = files[i]
         var hay = (String(node.label || "") + " " + node.path).toLowerCase()
         if (hay.indexOf(q) !== -1) out.push({ node: node, depth: 0, flat: true })
+        if (out.length >= root.modelSearchLimit) break
       }
       return out
     }
@@ -2237,11 +2342,10 @@ Panel {
     }
     if (root.searchDirs.length === 0) { root.modelOptions = []; return }
     root.scanning = true
-    var cmd = ["find"]
-    for (var i = 0; i < root.searchDirs.length; i++) cmd.push(root.searchDirs[i])
     // -L so symlinked model collections are followed; findings are de-duped
-    // by path in buildModelOptions.
-    cmd = ["find", "-L"].concat(root.searchDirs).concat([
+    // by path in buildModelOptions. The depth cap matches the Settings count.
+    var cmd = ["find", "-L"].concat(root.searchDirs).concat([
+      "-maxdepth", String(root.modelScanDepth),
       "(", "-type", "f", "-iname", "*.gguf", "-printf", "F\t%p\n", ")"
     ])
     treeScan.command = cmd
@@ -2269,6 +2373,26 @@ Panel {
         blobScan.command = ["python3", root.blobScript].concat(root.ollamaStoreDirs())
         blobScan.running = false
         blobScan.running = true
+      }
+    }
+  }
+
+  // System One models are GGUF files like any other; only the directory can
+  // differ. Blank uses the main scan (systemoneModelOptions is bound to it).
+  Process {
+    id: systemoneScan
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var parsed = Model.parseFindOutput(text)
+        var opts = []
+        for (var i = 0; i < parsed.files.length; i++) {
+          var p = parsed.files[i]
+          opts.push({ value: p, label: Model.baseName(p), description: Model.dirName(p) })
+        }
+        root.systemoneScannedOptions = opts
+        root.systemoneScanning = false
+        root.validateSystemoneModel()
       }
     }
   }
@@ -2523,7 +2647,13 @@ Panel {
         // depends on it, and starting first meant tailing the system unit --
         // inactive whenever the server is one we own -- so throughput silently
         // never appeared.
-        unitOwnerProc.command = ["systemctl", "--user", "is-active", root.unitName]
+        // systemd is not always available: the fallback launch uses setsid,
+        // and systemctl would call that server external, disabling Stop.
+        // The per-instance marker is the same one killOrphans uses.
+        unitOwnerProc.command = root.hasSystemdRun
+          ? ["systemctl", "--user", "is-active", root.unitName]
+          : ["bash", "-c", "pgrep -f -- \"^$1 \" >/dev/null && echo active || echo inactive",
+             "_", root.procMarker]
         unitOwnerProc.running = false
         unitOwnerProc.running = true
       }
@@ -2536,6 +2666,9 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         root.ownsUnit = text.trim() === "active"
+        // ollama has no argv to read; assume the unit was launched from the
+        // settings on disk, which is what the panel just loaded.
+        if (root.ownsUnit && root.backend === "ollama") root.runningConfigHash = root.ollamaConfigHash()
         // Not ours: find out whether the distribution's system unit is what
         // is holding the port, and where it keeps its models.
         if (!root.ownsUnit && root.backendSpec.systemUnit) root.probeSystemUnit()
@@ -2623,7 +2756,7 @@ Panel {
   }
 
   function startServer() {
-    if (root.backend !== "ollama" && !root.selectedModel) {
+    if (root.backend !== "ollama" && !root.launchModel) {
       root.lastError = "Pick a model first"
       return
     }
@@ -2631,8 +2764,12 @@ Panel {
       root.lastError = root.backendSpec.label + " binary not found — set it in plugin settings"
       return
     }
-    if (serverProc.running || root.stopping) return
+    if (serverProc.running || root.stopping || startSweepProc.running) return
     root.lastError = ""
+    // Count the pre-launch sweep as starting too: Stop pressed in this window
+    // must not be ignored while the sweep is still running.
+    root.starting = true
+    root.expectedStop = false
     // Sweep for a stale instance synchronously before launching. killOrphans
     // is fire-and-forget, and the new process carries the same marker the
     // sweep hunts for, so a late-arriving pkill could kill the process just
@@ -2646,7 +2783,11 @@ Panel {
 
   Process {
     id: startSweepProc
-    onExited: root.launchServerProcess()
+    onExited: {
+      // A stop that arrived during the sweep wins over the launch.
+      if (root.stopping || root.expectedStop) return
+      root.launchServerProcess()
+    }
   }
 
   // ---- Étape 7: emit helper avec tolérance aux paramètres non supportés ----
@@ -2809,54 +2950,64 @@ Panel {
 
   // The shell script that starts the backend, listening on the public
   // endpoint.
+  function ollamaLaunchSpec() {
+    return Backends.ollamaLaunch({
+      binary: root.ollamaBinary,
+      host: root.host,
+      port: String(root.port),
+      keepAlive: String(root.keepAlive).trim(),
+      numParallel: root.propOverridden("parallel") ? "" : String(root.parallel).trim(),
+      // The shared Tuning controls, so they actually reach ollama rather
+      // than being rendered and silently ignored.
+      contextSize: root.contextSize,
+      cacheType: root.cacheTypeK,
+      flashAttn: root.flashAttn,
+      // modelsDir is the GGUF search path, not necessarily an ollama store.
+      // Passing it here made ollama serve an empty store on a normal
+      // llama.cpp setup; a custom store belongs in the env-vars row.
+      modelsDir: root.resolvedOllamaStore !== "" ? root.resolvedOllamaStore : root.systemModelsDir
+    })
+  }
+
+  function ollamaLaunchEnv(launch) {
+    launch = launch || root.ollamaLaunchSpec()
+    // ollama is configured through the environment, so user-added parameters
+    // become additional assignments rather than argv.
+    for (var c = 0; c < root.customParams.length; c++) {
+      var spec = Params.find(root.paramCatalogue, root.customParams[c].key) ||
+                 Params.fallbackSpec(root.customParams[c].key, root.customParams[c].type)
+      var entry = Params.toEnvEntry(spec, root.customParams[c].value)
+      if (entry) launch.env[entry.name] = entry.value
+    }
+    for (var ev = 0; ev < root.parsedEnv.env.length; ev++)
+      launch.env[root.parsedEnv.env[ev].name] = root.parsedEnv.env[ev].value
+    return launch.env
+  }
+
+  // Stable fingerprint of what ollama would be launched with. The env map is
+  // sorted so key order does not look like a change.
+  function ollamaConfigHash() {
+    var env = root.ollamaLaunchEnv()
+    var keys = Object.keys(env).sort()
+    var parts = [root.ollamaBinary]
+    for (var i = 0; i < keys.length; i++) parts.push(keys[i] + "=" + env[keys[i]])
+    return parts.join("\n")
+  }
+
   function buildBackendScript() {
     var script = ""
     if (root.backend === "ollama") {
-      var launch = Backends.ollamaLaunch({
-        binary: root.ollamaBinary,
-        host: root.host,
-        port: String(root.port),
-        keepAlive: String(root.keepAlive).trim(),
-        numParallel: root.propOverridden("parallel") ? "" : String(root.parallel).trim(),
-        // The shared Tuning controls, so they actually reach ollama rather
-        // than being rendered and silently ignored.
-        contextSize: root.contextSize,
-        cacheType: root.cacheTypeK,
-        flashAttn: root.flashAttn,
-        // Serve whatever the system service already had on disk. Without this
-        // our instance would start from an empty per-user store and report no
-        // models at all. The directory is typically readable but not writable,
-        // so serving works while `ollama pull` does not -- surfaced in the UI.
-        // An explicit setting wins; otherwise use the store the models were
-        // actually resolved from, falling back to the system unit's own.
-        // systemModelsDir alone is not enough -- it is only populated when an
-        // ollama service is adopted, so starting a server directly left this
-        // empty and ollama served an empty per-user store.
-        modelsDir: root.configuredModelsDir !== ""
-          ? expandPath(root.configuredModelsDir)
-          : (root.resolvedOllamaStore !== "" ? root.resolvedOllamaStore : root.systemModelsDir)
-      })
-      // ollama is configured through the environment, so user-added
-      // parameters become additional assignments rather than argv.
-      for (var c = 0; c < root.customParams.length; c++) {
-        var spec = Params.find(root.paramCatalogue, root.customParams[c].key) ||
-                   Params.fallbackSpec(root.customParams[c].key, root.customParams[c].type)
-        var entry = Params.toEnvEntry(spec, root.customParams[c].value)
-        if (entry) launch.env[entry.name] = entry.value
-      }
-      for (var ev = 0; ev < root.parsedEnv.env.length; ev++)
-        launch.env[root.parsedEnv.env[ev].name] = root.parsedEnv.env[ev].value
-      script = Backends.envPrefix(launch.env, root.shellQuote) + " " +
-        "exec -a " + root.procMarker + " " + launch.argv.map(root.shellQuote).join(" ")
-      script = Backends.envPrefix(launch.env, root.shellQuote) + " " +
+      var launch = root.ollamaLaunchSpec()
+      var env = root.ollamaLaunchEnv(launch)
+      script = Backends.envPrefix(env, root.shellQuote) + " " +
         "exec -a " + root.procMarker + " " + launch.argv.map(root.shellQuote).join(" ")
     } else if (root.backend === "systemone") {
       var soArgs = Backends.systemoneLaunchArgs(
-        root.systemoneBinary,
-        root.selectedModel,
+        root.activeSystemoneBinary,
+        root.launchModel,
         root.host,
         root.port,
-        root.slotSaveDir,
+        expandPath(root.slotSaveDir),
         {
           ngl: root.gpuLayers,
           cacheTypeK: root.cacheTypeK,
@@ -2867,13 +3018,15 @@ Panel {
           nCpuMoe: root.nCpuMoe,
           parallel: root.parallel,
           systemoneCtx: root.systemoneCtx,
-          extraPieces: Model.splitExtraArgs(root.extraArgs),
-          envPrefix: root.envScriptPrefix()
+          extraPieces: root.extraArgTokens()
         }
       )
       var cudaEnv = Hardware.isCuda(root.hardware)
         ? "GGML_CUDA_REGISTER_HOST=1 GGML_CUDA_DISABLE_GRAPHS=1 " : ""
-      script = cudaEnv + "exec -a " + root.procMarker + " " + soArgs.map(root.shellQuote).join(" ")
+      var userEnv = root.envScriptPrefix()
+      script = "mkdir -p " + root.shellQuote(expandPath(root.slotSaveDir)) + "; " +
+        cudaEnv + (userEnv !== "" ? userEnv + " " : "") +
+        "exec -a " + root.procMarker + " " + soArgs.map(root.shellQuote).join(" ")
     } else {
 
       // These two work around NVIDIA-specific faults and mean nothing on
@@ -2901,12 +3054,14 @@ Panel {
     // throughput still be read after this widget is torn down and rebuilt.
     serverProc.command = Backends.detachedCommand(root.hasSystemdRun, root.unitName, script)
     root.ownsUnit = root.hasSystemdRun
-    root.runningModel = root.selectedModel
+    root.runningModel = root.launchModel
+    root.runningConfigHash = root.backend === "ollama" ? root.ollamaConfigHash() : ""
     root.adopted = false
     root.starting = true
     root.expectedStop = false
     root.lastLogLine = ""
-    root.logLines = []
+    logModel.clear()
+    root.logRevision++
     root.startingElapsed = 0
     root.healthUrl = Backends.healthUrl(root.backend, root.host, root.port)
     startingTimer.restart()
@@ -2991,14 +3146,20 @@ Panel {
   function clearRestartState() {
     root.runningArgs = []
     root.runningExe = ""
+    root.runningConfigHash = ""
     root.restartPhase = ""
     restartDrainTimer.stop()
   }
 
   // Log triage lives in Model.js so it can be tested against real captured
   // crash output; this is the one caller.
+  function logLinesArray() {
+    var out = []
+    for (var i = 0; i < logModel.count; i++) out.push(logModel.get(i).line)
+    return out
+  }
   function lifecycleErrorLine() {
-    return Model.pickErrorLine(root.logLines, root.lastLogLine)
+    return Model.pickErrorLine(root.logLinesArray(), root.lastLogLine)
   }
   function lastErrorLine() { return root.lifecycleErrorLine() }
 
@@ -3010,8 +3171,15 @@ Panel {
     if (!root.configChanged) return
     root.lastError = ""
     root.restartIdleTicks = 0
+    // ollama has no /slots; waiting for a fresh poll would never finish.
+    if (root.backendSpec.metricsMode !== "slots") {
+      root.handleServerLine("[restart] requested: " + Model.baseName(root.launchModel) +
+                            " — restarting (no slot drain for this backend)")
+      root.finishRestart()
+      return
+    }
     root.restartPhase = "draining"
-    root.handleServerLine("[restart] requested: " + Model.baseName(root.selectedModel) +
+    root.handleServerLine("[restart] requested: " + Model.baseName(root.launchModel) +
                           " — waiting for running requests to finish")
     restartDrainTimer.restart()
   }
@@ -3047,15 +3215,24 @@ Panel {
   }
 
   function readRunningArgs() {
-    if (root.backend !== "llamacpp") return
+    // ollama has no per-launch argv to compare; its restart hash is separate.
+    if (root.backend === "ollama") {
+      root.runningArgs = []
+      root.runningExe = ""
+      return
+    }
     runningArgsProc.running = false
     runningArgsProc.running = true
   }
 
   Process {
     id: runningArgsProc
-    command: ["bash", "-c", "pid=$(systemctl --user show -p MainPID --value " + root.shellQuote(root.unitName) +
-              ") && [ \"$pid\" != 0 ] && readlink /proc/$pid/exe && tr '\\0' '\\n' < /proc/$pid/cmdline"]
+    // systemd first, then the marker for the setsid fallback; without the
+    // fallback a non-systemd server had no argv and never offered Restart.
+    command: ["bash", "-c",
+      "pid=$(systemctl --user show -p MainPID --value " + root.shellQuote(root.unitName) + " 2>/dev/null); " +
+      "[ -n \"$pid\" ] && [ \"$pid\" != 0 ] || pid=$(pgrep -f -- \"^" + root.procMarker + " \" | head -n1); " +
+      "[ -n \"$pid\" ] && [ \"$pid\" != 0 ] && readlink /proc/$pid/exe && tr '\\0' '\\n' < /proc/$pid/cmdline"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -3092,7 +3269,26 @@ Panel {
     slotAutosaveTimer.stop()
     stopMetrics()
 
-    var model = root.runningModel !== "" ? root.runningModel : root.selectedModel
+    // Stop pressed while the pre-launch sweep is still running: let the
+    // sweep finish the cleanup it already started, but onExited must not
+    // launch afterwards.
+    if (startSweepProc.running) {
+      root.expectedStop = true
+      root.restartAfterStop = false
+      root.stopping = false
+      return
+    }
+
+    // An autosave already writing the same files must finish before the stop
+    // save starts; two writers to the same .tmp name can lose the cache.
+    if (slotAutosaveProc.running) {
+      root.expectedStop = true
+      root.stopping = true
+      root.stopAfterAutosave = true
+      return
+    }
+
+    var model = root.runningModel !== "" ? root.runningModel : root.launchModel
     if (root.running && root.canStop && root.savesSlots && model !== "") {
       // Dump the KV cache before stopping, so the next start does not
       // reprocess the whole prompt. The stop itself runs from the save's
@@ -3102,7 +3298,10 @@ Panel {
       slotSaveProc.command = root.slotKvCommand("save", model)
       slotSaveProc.running = false
       slotSaveProc.running = true
-    } else if (serverProc.running || root.running) {
+    } else if (root.starting || serverProc.running || root.running) {
+      // The detached wrapper exits as soon as the unit is created, so during
+      // model load serverProc.running is already false while the unit is very
+      // much alive. starting has to count as "something to stop".
       root.expectedStop = true
       root.stopping = true
       root.finishStop()
@@ -3116,6 +3315,7 @@ Panel {
   // ends it.
   function finishStop() {
     serverProc.running = false
+    root.stopAfterAutosave = false
     root.killOrphans()
     root.clearRestartState()
     root.runHook("stopped")
@@ -3142,11 +3342,12 @@ Panel {
     root.loadedModelInfo = ""
   }
 
-  // The shell tears this panel down on restart or plugin removal. Killing the
-  // server here is what made it die on every `omarchy restart shell`; with
-  // surviveRestart on, it is deliberately left running to be re-adopted.
+  // The shell tears this panel down on restart or plugin removal. The server
+  // is deliberately left running to be re-adopted; the last debounced edit
+  // is not, so flush it before the FileView goes away.
   Component.onDestruction: {
-    if (!root.surviveRestart && (serverProc.running || root.running)) root.killOrphans()
+    settingsSaveTimer.stop()
+    if (root.settingsLoaded) root.flushSettings()
     journalProc.running = false
   }
 
@@ -3229,7 +3430,7 @@ Panel {
       }
       return out
     }
-    var loaded = root.runningModel !== "" ? root.runningModel : root.selectedModel
+    var loaded = root.runningModel !== "" ? root.runningModel : root.launchModel
     if (loaded === "") return out
     var probed = root.modelCaps[loaded] || {}
     var geometry = root.modelGeometry[loaded] || null
@@ -3248,8 +3449,10 @@ Panel {
       endpoint: Backends.baseUrl(root.host, root.port),
       openaiBaseUrl: Backends.baseUrl(root.host, root.port) + "/v1",
       // The context the server was launched with; 0 means the model's own.
-      contextSize: parseInt(root.contextSize, 10) || 0,
-      model: serving ? (root.runningModel !== "" ? root.runningModel : root.selectedModel) : "",
+      contextSize: root.backend === "systemone"
+        ? (parseInt(root.systemoneCtx, 10) || 0)
+        : (parseInt(root.contextSize, 10) || 0),
+      model: serving ? (root.runningModel !== "" ? root.runningModel : root.launchModel) : "",
       build: serving && root.backend === "llamacpp" ? Backends.buildLabel(root.resolvedBuild) : "",
       models: serving ? root.servedModels() : []
     }
@@ -3405,9 +3608,10 @@ Panel {
     var text = String(line).trim()
     if (text !== "") {
       root.lastLogLine = text
-      var next = root.logLines.concat([text])
-      if (next.length > root.logLinesMax) next = next.slice(next.length - root.logLinesMax)
-      root.logLines = next
+      logModel.append({ line: text })
+      if (logModel.count > root.logLinesMax)
+        logModel.remove(0, logModel.count - root.logLinesMax)
+      root.logRevision++
     }
 
     // Live ingestion progress, when the build logs it. Both numbers come
@@ -3476,7 +3680,10 @@ Panel {
   // write per burst instead of one per turn.
   Timer {
     id: slotAutosaveTimer
-    interval: 20000
+    // One minute of quiet, not twenty seconds. An agent that makes a request
+    // every 25 s used to trigger a full cache write every 25 s; at 60 s it
+    // waits for a real gap, and Stop/Restart still save unconditionally.
+    interval: 60000
     onTriggered: {
       if (!root.running || root.stopping || !root.savesSlots || root.runningModel === "") return
       if (root.slotsBusy) { restart(); return }
@@ -3491,6 +3698,13 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.handleServerLine("[slot] autosave: " + text.trim())
+    }
+    onExited: {
+      if (!root.stopAfterAutosave) return
+      root.stopAfterAutosave = false
+      // The autosave just wrote the cache; go straight to the stop rather
+      // than saving the same slots a second time.
+      root.finishStop()
     }
   }
 
@@ -4881,7 +5095,7 @@ Panel {
               TextField {
                 Layout.fillWidth: true
                 text: root.configuredSystemoneBinary
-                placeholderText: "systemone binary path"
+                placeholderText: "systemone binary path (blank = preferred llama-server)"
                 enabled: !root.running && !root.starting
                 opacity: enabled ? 1.0 : 0.45
                 onEditingFinished: root.setSystemoneBinary(text)
@@ -4900,15 +5114,15 @@ Panel {
                 options: root.systemoneModelOptions
                 value: root.systemoneModel
                 placeholderText: "Select a System One model…"
-                emptyText: root.scanning ? "Scanning…" : "No models found"
+                emptyText: root.systemoneScanning ? "Scanning…" : "No models found"
                 triggerLabel: root.systemoneModel === "" ? "Select a System One model" : ""
                 onChanged: function(v) { root.systemoneModel = v }
               }
 
               Button {
                 text: "⟳"
-                tooltipText: root.scanning ? "Scanning…" : "Rescan for System One models"
-                enabled: !root.scanning
+                tooltipText: root.systemoneScanning ? "Scanning…" : "Rescan for System One models"
+                enabled: !root.systemoneScanning
                 onClicked: root.refreshSystemoneModels()
               }
             }
@@ -4917,7 +5131,7 @@ Panel {
               Layout.fillWidth: true
               visible: root.backend === "systemone"
               text: root.configuredSystemoneModelsDir
-              placeholderText: "System One models directory"
+              placeholderText: "System One models directory (blank = main model scan)"
               enabled: !root.running && !root.starting
               opacity: enabled ? 1.0 : 0.45
               onEditingFinished: root.setSystemoneModelsDir(text)
@@ -5247,8 +5461,9 @@ Panel {
                 var n = root.modelOptions.length
                 if (n === 0) return "No models available"
                 var shown = root.modelRows.length
+                var capped = root.modelFilter !== "" && shown >= root.modelSearchLimit
                 return root.modelFilter !== ""
-                  ? shown + " match" + (shown === 1 ? "" : "es") + " of " + n
+                  ? shown + (capped ? "+" : "") + " match" + (shown === 1 ? "" : "es") + " of " + n
                   : n + " model" + (n === 1 ? "" : "s") + " available"
               }
               color: root.bar.foreground
@@ -7367,6 +7582,20 @@ Panel {
             }
 
 
+            // ollama only understands OLLAMA_* variables. A row left over from
+            // a llama.cpp profile is not passed; name it instead of letting
+            // envPrefix drop it silently.
+            Text {
+              Layout.fillWidth: true
+              visible: root.backend === "ollama" && root.ollamaInvalidParams.length > 0
+              text: "Ignored by ollama (not OLLAMA_* variables): " +
+                    root.ollamaInvalidParams.join(", ")
+              color: Commons.Color.urgent
+              wrapMode: Text.WordWrap
+              font.family: root.bar.fontFamily
+              font.pixelSize: root.fontSize
+            }
+
             // What the splitter could not attribute to a flag. Still passed
             // verbatim at launch, so it has to be visible: a stray token that
             // reaches the server unannounced is the invisible state splitting
@@ -7450,7 +7679,7 @@ Panel {
             }
 
             Text {
-              text: root.logLines.length + " line" + (root.logLines.length === 1 ? "" : "s")
+              text: logModel.count + " line" + (logModel.count === 1 ? "" : "s")
               color: root.bar.foreground
               opacity: 0.45
               font.family: root.bar.fontFamily
@@ -7469,7 +7698,7 @@ Panel {
               anchors.fill: parent
               anchors.margins: Style.space(6)
               clip: true
-              model: root.logLines
+              model: logModel
               spacing: 1
               // Cheap for a 400-line cap, and it keeps positionViewAtEnd exact
               // with variable-height wrapped delegates instead of estimated.
@@ -7482,9 +7711,9 @@ Panel {
               property int missedLines: 0
 
               delegate: Text {
-                required property var modelData
+                required property string line
                 width: logView.width
-                text: modelData
+                text: line
                 color: root.bar.foreground
                 opacity: 0.8
                 wrapMode: Text.WrapAnywhere
@@ -7512,13 +7741,12 @@ Panel {
               Component.onCompleted: Qt.callLater(positionViewAtEnd)
             }
 
-            // logLines is replaced wholesale on every line, and once the
-            // 400-line cap is reached the count stops changing, so
-            // onCountChanged alone would stop following exactly when the log
-            // gets busy.
+            // A ListModel append is cheap, but the view still has to be told
+            // to follow the tail; logRevision changes on every line, including
+            // once the 400-line cap stops count from changing.
             Connections {
               target: root
-              function onLogLinesChanged() {
+              function onLogRevisionChanged() {
                 if (logView.stickToBottom) Qt.callLater(logView.positionViewAtEnd)
                 else logView.missedLines = Math.min(logView.missedLines + 1, root.logLinesMax)
               }
@@ -7532,7 +7760,7 @@ Panel {
               anchors.right: parent.right
               anchors.top: parent.top
               anchors.margins: Style.space(8)
-              visible: root.logLines.length === 0
+              visible: logModel.count === 0
               text: root.logsSource === "none"
                     ? "This server was started outside systemd, so its output is not in any journal. Restart it from here to see its log."
                     : (root.running ? "Waiting for the server to log something…"
@@ -7550,7 +7778,7 @@ Panel {
               anchors.right: parent.right
               anchors.bottom: parent.bottom
               anchors.margins: Style.space(6)
-              visible: !logView.stickToBottom && root.logLines.length > 0
+              visible: !logView.stickToBottom && logModel.count > 0
               implicitWidth: followLabel.implicitWidth + Style.space(16)
               implicitHeight: 24
               radius: 12

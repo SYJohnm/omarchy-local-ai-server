@@ -28,9 +28,31 @@ test("statusLabel names the restart wait", () => {
   assert.strictEqual(Model.statusLabel(false, true, 3, "", 0), "Starting… 3s")
 })
 
-test("slotPrefix is the model's file name, made filename-safe", () => {
-  assert.strictEqual(Backends.slotPrefix("/m/Qwen 3.6 (Q4).gguf"), "Qwen_3.6__Q4_.gguf")
+test("slotPrefix keeps the file name and is unique per full path", () => {
+  const a = Backends.slotPrefix("/m/a/Qwen 3.6 (Q4).gguf")
+  const b = Backends.slotPrefix("/m/b/Qwen 3.6 (Q4).gguf")
+  assert.ok(a.startsWith("Qwen_3.6__Q4_.gguf-"))
+  assert.strictEqual(a.indexOf("/"), -1)
+  assert.notStrictEqual(a, b)
   assert.strictEqual(Backends.slotPrefix(""), "")
+})
+
+test("systemoneLaunchArgs appends extra pieces once and keeps env out of argv", () => {
+  const args = Backends.systemoneLaunchArgs(
+    "/bin/llama-server", "/m/model.gguf", "127.0.0.1", 8081, "/slots", {
+      ngl: "99", cacheTypeK: "q8_0", cacheTypeV: "q8_0", loadMode: "mmap",
+      threads: 8, cpuMoe: false, nCpuMoe: "", parallel: "2", systemoneCtx: "4096",
+      extraPieces: ["--temp", "0.5", "--foo"], envPrefix: "A='b'"
+    })
+
+  assert.deepStrictEqual(args.slice(0, 8), [
+    "/bin/llama-server", "--model", "/m/model.gguf", "--host", "127.0.0.1",
+    "--port", "8081", "--slot-save-path"
+  ])
+  assert.strictEqual(args.filter((x) => x === "--temp").length, 1)
+  assert.strictEqual(args.filter((x) => x === "0.5").length, 1)
+  assert.strictEqual(args.filter((x) => x === "--foo").length, 1)
+  assert.strictEqual(args.filter((x) => x.indexOf("A=") === 0).length, 0)
 })
 
 // ---- slot_kv.py against a fake llama-server ----

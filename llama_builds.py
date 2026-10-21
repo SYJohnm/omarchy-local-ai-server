@@ -153,6 +153,22 @@ def gpu_backend(path):
     return " + ".join(found) if found else "CPU"
 
 
+def flags(help_text):
+    # The flag column is everything before the two-or-more spaces that start
+    # the description. Extract every flag token from it, so both "-t" and
+    # "--threads" are known. Description lines are skipped.
+    out = set()
+    for line in help_text.splitlines():
+        # Split like Params.parseLlamaHelp: the flag column can contain its own
+        # two-space gaps ("-h,    --help, --usage"), so walk the chunks while
+        # they still start with a dash and stop at the description.
+        for chunk in re.split(r"\s{2,}", line.strip()):
+            if not chunk.startswith("-"):
+                break
+            out.update(re.findall(r"--?[A-Za-z0-9][\w-]*", chunk))
+    return sorted(out)
+
+
 def cache_types(help_text):
     # "-ctk,  --cache-type-k TYPE   KV cache data type for K
     #                               allowed values: f32, f16, ..., q5_1,
@@ -199,6 +215,7 @@ def describe(path):
         "date": git(root, "log", "-1", "--format=%cs") if root else "",
         "gpu": gpu_backend(path),
         "cacheTypes": cache_types(help_out),
+        "flags": flags(help_out),
     }
 
 

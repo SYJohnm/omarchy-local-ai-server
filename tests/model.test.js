@@ -805,3 +805,33 @@ test("an empty page list is still one page", () => {
   // The section renders whatever page is current; there is no "no page".
   assert.deepStrictEqual(Model.paginateRows([], 7, 0), [[]])
 })
+
+test("buildModelTree keeps only branches that lead to a model", () => {
+  const tree = Model.buildModelTree("/models", [
+    "/models/zeta/a.gguf",
+    "/models/alpha/b.gguf",
+    "/models/alpha/sub/c.gguf"
+  ], { "/models/alpha/b.gguf": { tools: true, thinking: true } }, { "/models/alpha": true })
+
+  // Directories sort before files, and empty folders never appear.
+  assert.deepStrictEqual(tree.map((n) => n.name), ["alpha", "zeta"])
+  assert.deepStrictEqual(tree[0].children.map((n) => n.name), ["sub", "b.gguf"])
+  const b = Model.collectFiles(tree).find((f) => f.path.endsWith("b.gguf"))
+  assert.strictEqual(b.tools, true)
+  assert.strictEqual(b.thinking, true)
+  assert.strictEqual(b.vision, true)
+  assert.strictEqual(Model.collectFiles(tree).length, 3)
+})
+
+test("flattenTree hides the children of a collapsed directory", () => {
+  const tree = Model.buildModelTree("/models", [
+    "/models/alpha/b.gguf",
+    "/models/zeta/a.gguf"
+  ], {}, {})
+
+  assert.deepStrictEqual(Model.flattenTree(tree, {}).map((r) => r.node.name), ["alpha", "zeta"])
+  assert.deepStrictEqual(
+    Model.flattenTree(tree, { "/models/alpha": true }).map((r) => r.node.name),
+    ["alpha", "b.gguf", "zeta"]
+  )
+})

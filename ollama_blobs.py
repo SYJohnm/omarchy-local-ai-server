@@ -14,6 +14,7 @@ Prints {"name": {"path": ..., "size": ...}} for every resolvable model.
 """
 import json
 import os
+import re
 import sys
 
 # The layer holding the GGUF weights. Other layers (template, license, params,
@@ -21,6 +22,10 @@ import sys
 MODEL_MEDIA_TYPES = (
     "application/vnd.ollama.image.model",
 )
+
+# The digest is joined into a path. A manifest is local, but it is still a
+# trust boundary: a value like ../../etc/passwd must not escape the store.
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def model_name(manifest_path, manifests_root):
@@ -69,7 +74,7 @@ def resolve(store):
                 if layer.get("mediaType") not in MODEL_MEDIA_TYPES:
                     continue
                 digest = str(layer.get("digest", ""))
-                if not digest:
+                if not DIGEST_RE.match(digest):
                     continue
                 # Blobs are stored with the digest's ":" rewritten to "-".
                 blob = os.path.join(blobs_root, digest.replace(":", "-"))

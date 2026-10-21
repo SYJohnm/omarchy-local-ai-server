@@ -3,6 +3,11 @@ import sys, struct, json
 
 FIXED_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
 
+# A header can declare a chat template as large as the rest of the file. The
+# probe only needs enough of it to spot tool/thinking markers, so read this
+# much and skip the rest instead of pulling a multi-gigabyte string into RAM.
+MAX_STRING = 1 << 20
+
 # Model files come from the internet, so every length read from one is checked
 # against what is actually left in the file: a corrupt or hostile header must
 # not make the probe allocate terabytes or spin at end-of-file forever.
@@ -16,6 +21,10 @@ def read_str(f):
     (n,) = struct.unpack('<Q', f.read(8))
     if n > remaining(f):
         raise ValueError('string length %d runs past end of file' % n)
+    if n > MAX_STRING:
+        data = f.read(MAX_STRING)
+        f.seek(n - MAX_STRING, 1)
+        return data.decode('utf-8', errors='replace')
     return f.read(n).decode('utf-8', errors='replace')
 
 def skip_value(f, vtype):
