@@ -1,6 +1,0 @@
-        // Register flag aliases for supportsFlag (étape 7)
-        Backends.registerFlagAliases("--gpu-layers", ["--gpu-layers", "-ngl"])
-        Backends.registerFlagAliases("--cache-type-k", ["--cache-type-k", "--ctx-k"])
-        Backends.registerFlagAliases("--cache-type-v", ["--cache-type-v", "--ctx-v"])
-        Backends.registerFlagAliases("--load-mode", ["--load-mode", "-m"])
-        Backends.registerFlagAliases("--mmproj-offload", ["--mmproj-offload"])

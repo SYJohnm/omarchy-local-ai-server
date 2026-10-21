@@ -2656,13 +2656,16 @@ Panel {
   property var ignoredFlags: []  // flags qui ont été ignorés ce build
 
   function emitFlag(build, flag, value, args) {
-  if (Backends.supportsFlag(build, flag)) {
-    args.push(flag, String(value))
-    return true
+    if (Backends.supportsFlag(build, flag)) {
+      // Boolean flags carry no value; an empty argv entry is an error to
+      // llama-server, not "use the default".
+      args.push(flag)
+      if (String(value) !== "") args.push(String(value))
+      return true
+    }
+    if (ignoredFlags.indexOf(flag) === -1) ignoredFlags.push(flag)
+    return false
   }
-  if (ignoredFlags.indexOf(flag) === -1) ignoredFlags.push(flag)
-  return false
-}
 
 
 
@@ -2728,9 +2731,9 @@ Panel {
           if (!root.resolvedBuild || root.backend !== "llamacpp" ||
             Backends.supportsFlag(root.resolvedBuild, "--mmproj-offload"))
             args.push("--mmproj-offload")
-          else if (!root.resolvedBuild || root.backend !== "llamacpp" ||
-            Backends.supportsFlag(root.resolvedBuild, "--no-mmproj-offload"))
-            args.push("--no-mmproj-offload")
+        } else if (!root.resolvedBuild || root.backend !== "llamacpp" ||
+                   Backends.supportsFlag(root.resolvedBuild, "--no-mmproj-offload")) {
+          args.push("--no-mmproj-offload")
         }
       }
     }
@@ -2882,6 +2885,7 @@ Panel {
       var cudaEnv = Hardware.isCuda(root.hardware)
         ? "GGML_CUDA_REGISTER_HOST=1 GGML_CUDA_DISABLE_GRAPHS=1 " : ""
       var userEnv = root.envScriptPrefix()
+      var args = root.buildLlamaArgs()
       script = "mkdir -p " + root.shellQuote(expandPath(root.slotSaveDir)) + "; " +
         cudaEnv + (userEnv !== "" ? userEnv + " " : "") + "exec -a " + root.procMarker + " " + args.map(root.shellQuote).join(" ")
     }
@@ -3538,7 +3542,11 @@ Panel {
                     root.ppPercent, root.tokensPerSec, root.ppTokensPerSec),
       switchState, root.configChanged)
     active: root.running || root.starting
-    activeColor: Commons.Color.accent
+    // The live number already says the server is up; an accent colour on top
+    // would be the only coloured mark in the bar.
+    useActiveColor: false
+    fontFamily: root.bar.fontFamily
+    fontSize: Style.font.bodySmall
     opacity: root.starting ? 0.6 : 1.0
     tooltipText: {
       if (switchState !== "") return Model.barSwitchTooltip(switchState, root.slotsProcessing)
@@ -5055,6 +5063,7 @@ Panel {
                   Text {
                     visible: root.modelFilter !== ""
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: root.bar.foreground
                     opacity: filterClearHover.hovered ? 0.9 : 0.45
                     font.family: root.bar.fontFamily
@@ -5479,6 +5488,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: cacheHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: cacheHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -5493,6 +5503,7 @@ Panel {
 
                 MouseArea {
                   id: cacheHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -5603,6 +5614,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: flashHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: flashHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -5617,6 +5629,7 @@ Panel {
 
                 MouseArea {
                   id: flashHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -5690,6 +5703,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: nglHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: nglHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -5731,6 +5745,7 @@ Panel {
 
                 MouseArea {
                   id: nglHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -5789,6 +5804,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: moeHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: moeHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -5803,6 +5819,7 @@ Panel {
 
                 MouseArea {
                   id: moeHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -5921,6 +5938,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: ctxHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: ctxHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -5962,6 +5980,7 @@ Panel {
 
                 MouseArea {
                   id: ctxHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -6031,6 +6050,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: threadsHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: threadsHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -6072,6 +6092,7 @@ Panel {
 
                 MouseArea {
                   id: threadsHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -6140,6 +6161,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: batchHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: batchHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -6154,6 +6176,7 @@ Panel {
 
                 MouseArea {
                   id: batchHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -6266,6 +6289,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: parallelHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: parallelHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -6308,6 +6332,7 @@ Panel {
 
                 MouseArea {
                   id: parallelHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -6375,6 +6400,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: reasoningHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: reasoningHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -6389,6 +6415,7 @@ Panel {
 
                 MouseArea {
                   id: reasoningHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -6460,6 +6487,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: specHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: specHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -6474,6 +6502,7 @@ Panel {
 
                 MouseArea {
                   id: specHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -6572,6 +6601,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: visionHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: visionHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -6586,6 +6616,7 @@ Panel {
 
                 MouseArea {
                   id: visionHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -6717,6 +6748,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: extraHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: extraHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -6758,6 +6790,7 @@ Panel {
 
                 MouseArea {
                   id: extraHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -6801,6 +6834,7 @@ Panel {
                 // gets the click that removes the row, not the editor.
                 MouseArea {
                   id: envHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -6852,6 +6886,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: envHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: envHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -6985,6 +7020,7 @@ Panel {
                               }
                               Text {
                                 text: "×"
+                                Layout.leftMargin: Style.space(8)
                                 color: envVarHover.hovered ? Commons.Color.urgent : root.bar.foreground
                                 opacity: envVarHover.hovered ? 0.8 : 0.3
                                 font.family: root.bar.fontFamily
@@ -7105,6 +7141,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: systemoneCtxHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: systemoneCtxHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
@@ -7146,6 +7183,7 @@ Panel {
 
                 MouseArea {
                   id: systemoneCtxHoverArea
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
@@ -7231,6 +7269,7 @@ Panel {
                   }
                   Text {
                     text: "×"
+                    Layout.leftMargin: Style.space(8)
                     color: customHover.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: customHover.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily

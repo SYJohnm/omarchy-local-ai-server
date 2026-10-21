@@ -79,12 +79,8 @@ function metricText(showMetric, ppActive, ppPercent, tokensPerSec, ppTokensPerSe
   return ""
 }
 
-// The mark is the word itself. It replaced a colour llama emoji -- ollama's
-// logo, shown for both backends, so it was wrong for llama.cpp and was the
-// one colour glyph in a monochrome bar -- and then a server glyph carrying a
-// tiny "AI" badge, which needed the badge positioned off the label's own
-// metrics and still read as two marks. Two letters need none of that: they
-// take the bar's font, its colour rules and its baseline for free.
+// The mark is the word itself: two letters need no badge or vendor logo, and
+// they inherit the bar's font and colour, so the widget stays monochrome.
 var BAR_ICON = "AI"
 
 // The mark identifies the widget; a live number identifies it just as well
