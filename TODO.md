@@ -103,6 +103,13 @@ the code is changed and the test suite still passes.
       each model keeps its own values and an untouched model loads the
       defaults; profiles left under the old key are rekeyed on load.
 
+## External MTP drafts (done)
+
+- [x] **Not models.** A GGUF named after its draft (`*mtp*`) is split out of the
+      scan and mapped by directory, like an mmproj file.
+- [x] **Automatic.** The draft is passed with `--model-draft` and the spec type
+      is set to `draft-mtp` when the model has no choice of its own.
+
 ## Done when
 
 - `node --test tests/*.test.js` passes.

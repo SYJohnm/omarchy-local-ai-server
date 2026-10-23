@@ -224,6 +224,7 @@ Panel {
   property var modelOptions: []
   property var pendingModelFiles: []
   property var visionDirs: ({})
+  property var mtpDirs: ({})
   property string selectedModel: ""
   property bool scanning: false
   // Bumped on every scan so a late result cannot overwrite a newer list.
@@ -352,6 +353,18 @@ Panel {
     return root.detectedMmproj
   }
   readonly property bool mmprojActive: root.resolvedMmproj !== ""
+
+  // The external MTP draft found beside the launched model, if any. Like the
+  // projector, it is not a model: the scan maps it by directory and the launch
+  // path hands it to llama.cpp as the draft for speculative decoding.
+  readonly property string detectedMtp: {
+    if (root.launchModel === "") return ""
+    var found = root.mtpDirs[Model.dirName(root.launchModel)]
+    return found ? String(found) : ""
+  }
+  // Loaded only when the spec type will use it -- --model-draft alone loads the
+  // draft weights and decodes nothing with them.
+  readonly property bool mtpDraftActive: root.detectedMtp !== "" && root.specType === "draft-mtp"
 
   property string extraArgs: ""
   // Environment for the server process, "NAME=value ..." -- for knobs llama.cpp
@@ -1536,6 +1549,18 @@ Panel {
     root.applyTuning(profile !== null ? profile : Profiles.resolve(null))
     // A profile written before arguments were split still carries a line.
     root.splitPastedArgs()
+    root.autoSpecType()
+  }
+
+  // An external MTP draft is a decision the plugin can make for the user: the
+  // draft weights are useless until the spec type asks for them. A spec type
+  // the user chose themselves always wins.
+  function autoSpecType() {
+    if (root.specTypeUserSet || root.specType === "draft-mtp") return
+    // A removed row is a decision too: the draft is not loaded behind it.
+    if (root.hiddenBuiltins.indexOf("specType") !== -1) return
+    if (root.detectedMtp === "") return
+    root.specType = "draft-mtp"
   }
 
   // Drops this model's profile and goes back to the neutral defaults.
@@ -1981,7 +2006,7 @@ Panel {
     if (modelDirCountProbe.running || root.setupModelDirs.length === 0) return
     modelDirCountProbe.command = ["bash", "-c",
       "for d in \"$@\"; do n=$(find -L \"$d\" -maxdepth " + root.modelScanDepth +
-      " -type f -iname '*.gguf' ! -iname '*mmproj*' 2>/dev/null | wc -l); " +
+      " -type f -iname '*.gguf' ! -iname '*mmproj*' ! -iname '*mtp*' 2>/dev/null | wc -l); " +
       "printf '%s\\t%s\\n' \"$n\" \"$d\"; done", "_"].concat(root.setupModelDirs)
     modelDirCountProbe.running = true
   }
@@ -2389,15 +2414,11 @@ Panel {
       onStreamFinished: {
         if (treeScan.gen !== root.scanGen) return
         var parsed = Model.parseFindOutput(text)
-        var modelFiles = []
-        var vision = {}
-        for (var i = 0; i < parsed.files.length; i++) {
-          var path = parsed.files[i]
-          if (Model.isMmprojName(Model.baseName(path))) vision[Model.dirName(path)] = path
-          else modelFiles.push(path)
-        }
-        root.pendingModelFiles = modelFiles
-        root.visionDirs = vision
+        var split = Model.classifyModelFiles(parsed.files)
+        root.pendingModelFiles = split.models
+        root.visionDirs = split.visionDirs
+        root.mtpDirs = split.mtpDirs
+        root.autoSpecType()
         // Resolve ollama's blobs before probing, so both sources go through
         // one gguf_probe pass and land in one list.
         blobScan.command = ["python3", root.blobScript].concat(root.ollamaStoreDirs())
@@ -2418,9 +2439,10 @@ Panel {
       onStreamFinished: {
         if (systemoneScan.gen !== root.systemoneScanGen) return
         var parsed = Model.parseFindOutput(text)
+        var split = Model.classifyModelFiles(parsed.files)
         var opts = []
-        for (var i = 0; i < parsed.files.length; i++) {
-          var p = parsed.files[i]
+        for (var i = 0; i < split.models.length; i++) {
+          var p = split.models[i]
           opts.push({ value: p, label: Model.baseName(p).replace(/\.gguf$/i, ""), description: Model.dirName(p) })
         }
         root.systemoneScannedOptions = opts
@@ -2518,7 +2540,10 @@ Panel {
       if (root.visionDirs[Model.dirName(path)]) badges.push("vision")
       if (cap.tools) badges.push("tools")
       if (cap.thinking) badges.push("thinking")
-      if (cap.mtp) badges.push("mtp")
+      // The draft is a file of its own, so "mtp" means either the weights are
+      // embedded in this model or a draft sits beside it.
+      var hasMtp = !!cap.mtp || !!root.mtpDirs[Model.dirName(path)]
+      if (hasMtp) badges.push("mtp")
       // A shared blob is labelled by its ollama name and marked, so it is
       // clear the same file is serving both backends rather than being a
       // second copy.
@@ -2529,7 +2554,7 @@ Panel {
         value: path,
         label: sharedName ? sharedName : name.replace(/\.gguf$/i, ""),
         description: badges.join(" · ") || Model.dirName(path),
-        mtp: !!cap.mtp
+        mtp: hasMtp
       })
     }
     return out
@@ -2925,6 +2950,24 @@ Panel {
                    Backends.supportsFlag(root.resolvedBuild, "--no-mmproj-offload")) {
           args.push("--no-mmproj-offload")
         }
+      }
+    }
+
+    // External MTP draft, the same idea as the projector above: a file named
+    // like a draft beside the model, never a picker entry. It is passed only
+    // while the spec type uses it -- --model-draft alone loads the weights and
+    // decodes nothing with them. A hand-added --model-draft keeps the last
+    // word on which file is loaded.
+    var mtpOwned = false
+    for (var d = 0; d < root.customParams.length; d++)
+      if (root.customParams[d].key === "--model-draft") mtpOwned = true
+    if (!mtpOwned && root.mtpDraftActive) {
+      if (!root.resolvedBuild || root.backend !== "llamacpp" ||
+          Backends.supportsFlag(root.resolvedBuild, "--model-draft")) {
+        args.push("--model-draft", expandPath(root.detectedMtp))
+        root.emittedFlags["--model-draft"] = true
+      } else if (ignoredFlags.indexOf("--model-draft") === -1) {
+        ignoredFlags.push("--model-draft")
       }
     }
 

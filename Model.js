@@ -264,10 +264,18 @@ function isMmprojName(name) {
   return /mmproj/i.test(name)
 }
 
+// An external MTP draft sits beside the model it accelerates, the way a
+// projector does ("...-FastMTP-32K.gguf", "mtp-....gguf"). It is never a
+// model itself: launched on its own it is a draft-only file that cannot
+// serve a chat.
+function isMtpName(name) {
+  return /mtp/i.test(name)
+}
+
 // Parses `find DIR \( -type d -printf "D\t%p\n" \) -o \( -type f
 // -iname '*.gguf' -printf "F\t%p\n" \)` output into directory and file
-// path lists. Files include mmproj siblings -- those are filtered out of
-// the model list by the caller but still used to mark vision support.
+// path lists. Files include mmproj and MTP siblings -- those are filtered
+// out of the model list by the caller but still used to mark the model.
 function parseFindOutput(raw) {
   var dirs = []
   var files = []
@@ -283,6 +291,51 @@ function parseFindOutput(raw) {
     else if (kind === "F") files.push(path)
   }
   return { dirs: dirs, files: files }
+}
+
+// Splits scanned GGUF paths into the files that are models and the companions
+// that are not. A projector (`*mmproj*`) and an external MTP draft (`*mtp*`)
+// both live beside the model they serve: they are mapped by directory so the
+// launch path can pick them up, and kept out of the picker so neither can be
+// started as a chat model.
+//
+// Companions are mapped only in a directory that kept a model: a folder with
+// nothing else has nothing for them to accompany.
+function classifyModelFiles(paths) {
+  var list = paths || []
+  var i, path, base, dir
+
+  // Directories that hold an ordinary model. An MTP-named file is a draft only
+  // beside one of those: a folder whose only file is named "*mtp*" is showing
+  // its model, not a sidecar, and hiding it would hide the folder.
+  var plainDirs = {}
+  for (i = 0; i < list.length; i++) {
+    base = baseName(list[i])
+    if (!isMmprojName(base) && !isMtpName(base)) plainDirs[dirName(list[i])] = true
+  }
+
+  var models = []
+  var visionDirs = {}
+  var mtpDirs = {}
+  var modelDirs = {}
+  for (i = 0; i < list.length; i++) {
+    path = list[i]
+    base = baseName(path)
+    dir = dirName(path)
+    if (isMmprojName(base)) continue
+    if (isMtpName(base) && plainDirs[dir]) continue
+    models.push(path)
+    modelDirs[dir] = true
+  }
+  for (i = 0; i < list.length; i++) {
+    path = list[i]
+    base = baseName(path)
+    dir = dirName(path)
+    if (!modelDirs[dir]) continue
+    if (isMmprojName(base)) visionDirs[dir] = path
+    else if (isMtpName(base) && plainDirs[dir]) mtpDirs[dir] = path
+  }
+  return { models: models, visionDirs: visionDirs, mtpDirs: mtpDirs }
 }
 
 // Best-effort quantization label pulled from the filename, e.g.
@@ -551,6 +604,8 @@ if (typeof module !== "undefined") {
     ancestorDirs: ancestorDirs,
     baseName: baseName,
     isMmprojName: isMmprojName,
+    isMtpName: isMtpName,
+    classifyModelFiles: classifyModelFiles,
     parseFindOutput: parseFindOutput,
     quantLabel: quantLabel,
     parseProbeCapabilities: parseProbeCapabilities,

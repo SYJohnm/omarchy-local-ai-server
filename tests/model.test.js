@@ -806,6 +806,40 @@ test("an empty page list is still one page", () => {
   assert.deepStrictEqual(Model.paginateRows([], 7, 0), [[]])
 })
 
+test("classifyModelFiles hides MTP drafts and maps them by directory", () => {
+  const dir = "/models/Qwen3.8-27B-MTP-GGUF"
+  const split = Model.classifyModelFiles([
+    dir + "/mmproj-Qwen3.8-27B-BF16.gguf",
+    dir + "/Qwen3.8-27B-Aggressive-FastMTP-32K.gguf",
+    dir + "/Qwen3.8-27B-Aggressive-Q4_K_P.gguf",
+    "/models/other/Qwen3.8-35B-Q4_K_M.gguf"
+  ])
+
+  // The draft and the projector are companions, not models.
+  assert.deepStrictEqual(split.models, [
+    dir + "/Qwen3.8-27B-Aggressive-Q4_K_P.gguf",
+    "/models/other/Qwen3.8-35B-Q4_K_M.gguf"
+  ])
+  assert.strictEqual(split.visionDirs[dir], dir + "/mmproj-Qwen3.8-27B-BF16.gguf")
+  assert.strictEqual(split.mtpDirs[dir], dir + "/Qwen3.8-27B-Aggressive-FastMTP-32K.gguf")
+  // A folder with no draft gets no entry, so nothing is attached to it.
+  assert.strictEqual(split.mtpDirs["/models/other"], undefined)
+})
+
+test("isMtpName leaves the main model alone", () => {
+  assert.strictEqual(Model.isMtpName("Qwen3.8-27B-Aggressive-Q4_K_P.gguf"), false)
+  assert.strictEqual(Model.isMtpName("Qwen3.8-27B-Aggressive-FastMTP-32K.gguf"), true)
+  assert.strictEqual(Model.isMtpName("mtp-Qwen3.8-27B-Q4_K_M.gguf"), true)
+})
+
+test("classifyModelFiles keeps an MTP-named file that has no model beside it", () => {
+  // A repo that names its only model "...-MTP-...gguf" must not vanish from
+  // the picker: with nothing to accompany, the file is what the folder has.
+  const split = Model.classifyModelFiles(["/models/lone/Qwen3-27B-MTP-Q4_K_M.gguf"])
+  assert.deepStrictEqual(split.models, ["/models/lone/Qwen3-27B-MTP-Q4_K_M.gguf"])
+  assert.deepStrictEqual(split.mtpDirs, {})
+})
+
 test("buildModelTree keeps only branches that lead to a model", () => {
   const tree = Model.buildModelTree("/models", [
     "/models/zeta/a.gguf",

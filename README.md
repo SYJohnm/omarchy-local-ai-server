@@ -93,6 +93,10 @@ and selects that backend's decision models (its own directory when
 `systemoneModelsDir` is set), and the Tuning page stores their profile under the
 model the server actually launches.
 
+A folder that holds a projector (`mmproj`) or an external MTP draft (`...MTP...`)
+beside its model is read as one package: neither file is offered as a model, and
+both are picked up automatically when that model starts.
+
 ## Tuning
 
 Tuning is per model: picking a model and changing anything creates a profile
