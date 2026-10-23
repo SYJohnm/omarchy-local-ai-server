@@ -113,7 +113,17 @@ Panel {
   readonly property string activeBinary: root.backend === "ollama" ? root.ollamaBinary : (root.backend === "systemone" ? root.activeSystemoneBinary : root.launchLlamaBinary)
   // The model the current backend would launch. System One keeps its own
   // selection because the chat model list can point at a different file.
-  readonly property string launchModel: root.backend === "systemone" ? root.systemoneModel : root.selectedModel
+  // The model the active backend would launch.
+  //
+  // Handlers that run on a selection change must not read `launchModel`: a
+  // binding still holds the previous value for the rest of the handler, and is
+  // refreshed only after the event loop -- so the profile applied on a switch
+  // would be the one belonging to the model just left. This reads the
+  // selection properties themselves, which are already updated.
+  function currentModel() {
+    return root.backend === "systemone" ? root.systemoneModel : root.selectedModel
+  }
+  readonly property string launchModel: root.currentModel()
   // The Model page follows the backend: same picker, but reading and writing
   // the selection and the directory list of whichever model is launched.
   readonly property var activeModelOptions:
@@ -357,11 +367,12 @@ Panel {
   // The external MTP draft found beside the launched model, if any. Like the
   // projector, it is not a model: the scan maps it by directory and the launch
   // path hands it to llama.cpp as the draft for speculative decoding.
-  readonly property string detectedMtp: {
-    if (root.launchModel === "") return ""
-    var found = root.mtpDirs[Model.dirName(root.launchModel)]
+  function mtpDraftFor(model) {
+    if (model === "") return ""
+    var found = root.mtpDirs[Model.dirName(model)]
     return found ? String(found) : ""
   }
+  readonly property string detectedMtp: root.mtpDraftFor(root.launchModel)
   // Loaded only when the spec type will use it -- --model-draft alone loads the
   // draft weights and decodes nothing with them.
   readonly property bool mtpDraftActive: root.detectedMtp !== "" && root.specType === "draft-mtp"
@@ -1511,8 +1522,9 @@ Panel {
   // With no model selected there is nothing to key on — edits are ignored
   // until a model is picked.
   function touchTuning() {
-    if (!root.settingsLoaded || root.applyingTuning || root.launchModel === "") return
-    root.profiles = Profiles.set(root.profiles, root.backend, root.launchModel, Profiles.snapshot(root))
+    var model = root.currentModel()
+    if (!root.settingsLoaded || root.applyingTuning || model === "") return
+    root.profiles = Profiles.set(root.profiles, root.backend, model, Profiles.snapshot(root))
     root.scheduleSettingsSave()
   }
 
@@ -1545,21 +1557,23 @@ Panel {
   // a selection that no longer exists.
   function applyTuningForSelection() {
     if (!root.settingsLoaded || root.applyingTuning) return
-    var profile = Profiles.get(root.profiles, root.backend, root.launchModel)
+    var model = root.currentModel()
+    var profile = Profiles.get(root.profiles, root.backend, model)
     root.applyTuning(profile !== null ? profile : Profiles.resolve(null))
     // A profile written before arguments were split still carries a line.
     root.splitPastedArgs()
-    root.autoSpecType()
+    root.autoSpecType(model)
   }
 
   // An external MTP draft is a decision the plugin can make for the user: the
   // draft weights are useless until the spec type asks for them. A spec type
   // the user chose themselves always wins.
-  function autoSpecType() {
+  function autoSpecType(model) {
+    var m = model === undefined ? root.currentModel() : model
     if (root.specTypeUserSet || root.specType === "draft-mtp") return
     // A removed row is a decision too: the draft is not loaded behind it.
     if (root.hiddenBuiltins.indexOf("specType") !== -1) return
-    if (root.detectedMtp === "") return
+    if (root.mtpDraftFor(m) === "") return
     root.specType = "draft-mtp"
   }
 
