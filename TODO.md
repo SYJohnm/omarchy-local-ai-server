@@ -95,6 +95,14 @@ the code is changed and the test suite still passes.
 - [x] **Scanning.** A separate System One model directory is scanned on open and
       on backend switch, and the page shows its own scanning state.
 
+## Tuning page fixes (done)
+
+- [x] **Row removal.** The added-parameter row's hover area sat above its ✕ and
+      swallowed the click; it sits below now, like every built-in row.
+- [x] **Flags per model.** Profiles key on the model the backend launches, so
+      each model keeps its own values and an untouched model loads the
+      defaults; profiles left under the old key are rekeyed on load.
+
 ## Done when
 
 - `node --test tests/*.test.js` passes.

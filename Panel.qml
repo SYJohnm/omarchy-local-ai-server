@@ -7576,6 +7576,9 @@ Panel {
 
                 MouseArea {
                   id: customHover
+                  // Below the row content, like every built-in row, so the ✕
+                  // is reachable instead of only opening the editor.
+                  z: -1
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
