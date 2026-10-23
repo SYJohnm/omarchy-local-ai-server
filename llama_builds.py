@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 HOME = os.path.expanduser("~")
 
@@ -108,7 +109,7 @@ def candidates(extra):
     return out
 
 
-def run(argv, timeout=15):
+def run(argv, timeout=5):
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         return r.stdout + r.stderr
@@ -220,11 +221,12 @@ def describe(path):
 
 
 def main():
-    builds = []
-    for p in candidates(sys.argv[1:]):
-        info = describe(p)
-        if info:
-            builds.append(info)
+    paths = candidates(sys.argv[1:])
+    # A build that hangs on --version (broken driver, slow mount) must not hold
+    # the others: describe them together and keep candidate order.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        described = list(pool.map(describe, paths))
+    builds = [info for info in described if info]
     print(json.dumps(builds))
 
 

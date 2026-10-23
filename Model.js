@@ -7,6 +7,16 @@ function statusLabel(running, starting, startingElapsed, switchState, inflight) 
   return running ? "Running" : "Stopped"
 }
 
+// What pressing Stop should do. Split out of Panel.qml so the branches are
+// testable. "blocked" means the server is running but is not ours to stop (an
+// adopted root-owned service), which must not be reported as stopped.
+function stopPlan(running, starting, canStop, savesSlots, model, serverRunning) {
+  if (running && !canStop) return "blocked"
+  if (running && savesSlots && model !== "") return "save"
+  if (starting || serverRunning || running) return "stop"
+  return "none"
+}
+
 // Parses a llama.cpp timing line into {kind: "pp"|"tg", tps}.
 //
 // Both backends emit this identical format, because ollama embeds llama.cpp
@@ -523,6 +533,7 @@ function paginateRows(rows, capacity, firstPageReserved) {
 if (typeof module !== "undefined") {
   module.exports = {
     statusLabel: statusLabel,
+    stopPlan: stopPlan,
     parseTimingLine: parseTimingLine,
     parsePromptProgressLine: parsePromptProgressLine,
     isSystemdNoise: isSystemdNoise,
@@ -550,7 +561,6 @@ if (typeof module !== "undefined") {
     collectFiles: collectFiles,
     splitExtraArgs: splitExtraArgs,
     parseArgs: parseArgs,
-    turboVForK: turboVForK,
     recommendedCacheTypeV: recommendedCacheTypeV,
     isTurboQuantCacheType: isTurboQuantCacheType
   }

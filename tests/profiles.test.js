@@ -26,6 +26,26 @@ test("a profile is keyed by backend as well as model", () => {
   assert.strictEqual(Profiles.key("llamacpp", ""), "")
 })
 
+test("rekey moves a System One profile to the model it now keys on", () => {
+  const from = live()
+  const store = Profiles.set({}, "systemone", "/m/chat.gguf", from)
+
+  const moved = Profiles.rekey(store, "systemone", "/m/chat.gguf", "/m/decision.gguf")
+  assert.deepStrictEqual(Profiles.get(moved, "systemone", "/m/decision.gguf"), Profiles.resolve(from))
+  assert.strictEqual(Profiles.get(moved, "systemone", "/m/chat.gguf"), null)
+
+  // A target that already has a profile wins; the other one is left alone.
+  const both = Profiles.set(moved, "systemone", "/m/chat.gguf", live({ threads: "9" }))
+  const kept = Profiles.rekey(both, "systemone", "/m/chat.gguf", "/m/decision.gguf")
+  assert.strictEqual(Profiles.get(kept, "systemone", "/m/decision.gguf"),
+                     Profiles.get(both, "systemone", "/m/decision.gguf"))
+  assert.notStrictEqual(Profiles.get(kept, "systemone", "/m/chat.gguf"), null)
+
+  // Nothing to move, or nowhere to move it.
+  assert.strictEqual(Profiles.rekey(both, "systemone", "", "/m/x.gguf"), both)
+  assert.strictEqual(Profiles.rekey(both, "systemone", "/m/chat.gguf", ""), both)
+})
+
 test("snapshot copies structured fields rather than aliasing them", () => {
   const source = live()
   const snap = Profiles.snapshot(source)

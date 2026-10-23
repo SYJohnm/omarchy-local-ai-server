@@ -129,6 +129,15 @@ function remove(profiles, backend, model) {
   return out
 }
 
+// Moves a profile from one model key to another. Used when a backend started
+// keying profiles by a different model; an existing target is never overwritten.
+function rekey(profiles, backend, from, to) {
+  if (from === "" || to === "" || from === to) return profiles || {}
+  var source = get(profiles, backend, from)
+  if (source === null || get(profiles, backend, to) !== null) return profiles || {}
+  return set(remove(profiles, backend, from), backend, to, source)
+}
+
 
 
 // Reads the profile store out of a settings file.
@@ -163,8 +172,6 @@ function fromSettings(parsed, flatValues) {
 if (typeof module !== "undefined") {
   module.exports = {
     FIELDS: FIELDS,
-    STRUCTURED: STRUCTURED,
-    DEFAULTS: DEFAULTS,
     key: key,
     snapshot: snapshot,
     resolve: resolve,
@@ -172,6 +179,7 @@ if (typeof module !== "undefined") {
     has: has,
     set: set,
     remove: remove,
+    rekey: rekey,
     fromSettings: fromSettings
   }
 }

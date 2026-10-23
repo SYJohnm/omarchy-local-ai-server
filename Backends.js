@@ -164,10 +164,6 @@ var SYSTEMONE = {
 
 var BACKENDS = [LLAMA_CPP, OLLAMA, SYSTEMONE]
 
-function all() {
-  return BACKENDS
-}
-
 function get(id) {
   var wanted = String(id || "")
   for (var i = 0; i < BACKENDS.length; i++)
@@ -177,10 +173,6 @@ function get(id) {
 
 function ids() {
   return BACKENDS.map(function(b) { return b.id })
-}
-
-function labels() {
-  return BACKENDS.map(function(b) { return b.label })
 }
 
 function supports(backendId, feature) {
@@ -514,13 +506,8 @@ function procMarker(pluginId, backendId) {
 
 if (typeof module !== "undefined") {
   module.exports = {
-    LLAMA_CPP: LLAMA_CPP,
-    OLLAMA: OLLAMA,
-    SYSTEMONE: SYSTEMONE,
-    all: all,
     get: get,
     ids: ids,
-    labels: labels,
     supports: supports,
     baseUrl: baseUrl,
     healthUrl: healthUrl,
@@ -530,7 +517,6 @@ if (typeof module !== "undefined") {
     ollamaBinaryCandidates: ollamaBinaryCandidates,
     ggufSearchDirs: ggufSearchDirs,
     ollamaStoreCandidates: ollamaStoreCandidates,
-    OLLAMA_KV_CACHE_TYPES: OLLAMA_KV_CACHE_TYPES,
     ollamaLaunch: ollamaLaunch,
     systemoneLaunchArgs: systemoneLaunchArgs,
     envPrefix: envPrefix,

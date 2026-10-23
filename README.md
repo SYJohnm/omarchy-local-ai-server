@@ -88,6 +88,11 @@ backend, plus the flags its `--help` accepts. With more than one build the
 Model and Server pages show a **Build** picker; **Auto** (the default) takes
 the first build that serves the model's tuning.
 
+The **Model** page follows the active backend: with System One selected it lists
+and selects that backend's decision models (its own directory when
+`systemoneModelsDir` is set), and the Tuning page stores their profile under the
+model the server actually launches.
+
 ## Tuning
 
 Tuning is per model: picking a model and changing anything creates a profile

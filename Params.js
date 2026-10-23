@@ -263,14 +263,15 @@ function parseLlamaHelp(text) {
     var def = extractDefault(description)
     var flag = canonicalFlag(current.flags)
     if (flag) {
+      var type = inferType(current.arg, description, def, current.flags)
       params.push({
         key: flag,
         flags: current.flags,
         flag: flag,
         label: flag.replace(/^--/, ""),
         arg: current.arg,
-        type: inferType(current.arg, description, def, current.flags),
-        options: inferType(current.arg, description, def, current.flags) === "tristate"
+        type: type,
+        options: type === "tristate"
           ? TRISTATE_OPTIONS.slice()
           : enumOptions(current.arg, description),
         negatedFlag: isNegatablePair(current.flags) ? negatedForm(flag) : "",
@@ -525,15 +526,6 @@ function toEnvEntry(param, value) {
 
 if (typeof module !== "undefined") {
   module.exports = {
-    splitFlagsAndArg: splitFlagsAndArg,
-    canonicalFlag: canonicalFlag,
-    negatedForm: negatedForm,
-    isNegatablePair: isNegatablePair,
-    TRISTATE_OPTIONS: TRISTATE_OPTIONS,
-    extractDefault: extractDefault,
-    extractDefaultHint: extractDefaultHint,
-    inferType: inferType,
-    enumOptions: enumOptions,
     parseLlamaHelp: parseLlamaHelp,
     parseOllamaHelp: parseOllamaHelp,
     parse: parse,

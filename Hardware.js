@@ -256,16 +256,11 @@ function summary(hw) {
 
 if (typeof module !== "undefined") {
   module.exports = {
-    reservedVramMb: reservedVramMb,
     parseProbe: parseProbe,
     isCuda: isCuda,
-    hasGpu: hasGpu,
     suggestGpuLayers: suggestGpuLayers,
     suggestThreads: suggestThreads,
-    cacheTypeBytes: cacheTypeBytes,
     kvBytesPerToken: kvBytesPerToken,
-    kvBudgetMb: kvBudgetMb,
-    snapContext: snapContext,
     suggestContextSize: suggestContextSize,
     suggestBatchSize: suggestBatchSize,
     suggestUbatchSize: suggestUbatchSize,

@@ -58,6 +58,43 @@ the code is changed and the test suite still passes.
 - [x] **20. Ollama digest.** Validate `sha256:<64 hex>` before joining the blob
       path.
 
+## Follow-up audit (fixed)
+
+- [x] **1. Stop on an external server.** `stopServer()` runs even when
+      `canStop` is false; guard it and do not fire the `stopped` hook.
+- [x] **2. System One overrides.** Pass `propOverridden` to
+      `systemoneLaunchArgs` in both call sites.
+- [x] **3. Debug logging.** Delete the per-key `console.log` in `NumField`.
+- [x] **4. Rescan on open.** Reuse the last model scan instead of walking and
+      probing the library on every panel open.
+- [x] **5. Stale scan results.** Tag scans and ignore callbacks from an older
+      backend/scan.
+- [x] **6. Stuck `scanning`.** Clear it on the no-model-folders early return.
+- [x] **7. Search cost.** Cache the flat file list; do not rebuild it on every
+      keystroke.
+- [x] **8. IPv6 loopback.** Do not warn for `[::1]`.
+- [x] **9. Tree counts.** Count while labelling instead of one walk per folder.
+- [x] **10. System One binary.** Probe it and offer Restart when it changes.
+- [x] **11. Build probe.** Shorter timeout, candidates described in parallel.
+- [x] **12. Stop logic tests.** Extract the stop decision into a pure helper and
+      test it.
+- [x] **13. Hook models.** Send every model on every backend, as the README
+      promises.
+- [x] **14. Flag backstop.** Do not treat an argv value as an emitted flag.
+- [x] **15. Dead exports.** Remove exports nothing calls.
+- [x] **16. French comments.** Remove the leftover step notes.
+- [x] **17. `inferType`.** Compute once per parameter.
+- [x] **18. `cacheRamMb`.** Remove the dead plumbing.
+
+## System One in the main UI (done)
+
+- [x] **Model page.** Lists and selects the active backend's model; System One
+      uses its own directory when one is configured.
+- [x] **Profiles.** Keyed by the model the server launches, not the chat model;
+      a profile left under the old key is moved over on load.
+- [x] **Scanning.** A separate System One model directory is scanned on open and
+      on backend switch, and the page shows its own scanning state.
+
 ## Done when
 
 - `node --test tests/*.test.js` passes.

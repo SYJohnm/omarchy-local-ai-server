@@ -86,9 +86,11 @@ Panel {
       return
     }
     root.systemoneScanning = true
+    root.systemoneScanGen++
     systemoneScan.command = ["find", "-L", expandPath(root.configuredSystemoneModelsDir),
       "-maxdepth", String(root.modelScanDepth),
       "(", "-type", "f", "-iname", "*.gguf", "!", "-iname", "*mmproj*", "-printf", "F\t%p\n", ")"]
+    systemoneScan.gen = root.systemoneScanGen
     systemoneScan.running = false
     systemoneScan.running = true
   }
@@ -112,6 +114,22 @@ Panel {
   // The model the current backend would launch. System One keeps its own
   // selection because the chat model list can point at a different file.
   readonly property string launchModel: root.backend === "systemone" ? root.systemoneModel : root.selectedModel
+  // The Model page follows the backend: same picker, but reading and writing
+  // the selection and the directory list of whichever model is launched.
+  readonly property var activeModelOptions:
+    root.backend === "systemone" ? root.systemoneModelOptions : root.modelOptions
+  readonly property var activeSearchDirs:
+    root.backend === "systemone" && root.configuredSystemoneModelsDir !== ""
+      ? [expandPath(root.configuredSystemoneModelsDir)] : root.searchDirs
+  readonly property bool activeScanning:
+    root.backend === "systemone" ? root.systemoneScanning : root.scanning
+  function selectActiveModel(value) {
+    if (root.backend === "systemone") {
+      root.systemoneModel = value
+      return
+    }
+    root.selectModel(value)
+  }
 
 
   // ---- llama.cpp builds ----
@@ -183,7 +201,7 @@ Panel {
   // path -> {tools, thinking, mtp} from gguf_probe; reported to hooks so an
   // agent config can describe each served model.
   property var modelCaps: ({})
-  readonly property var selectedGeometry: root.modelGeometry[root.selectedModel] || null
+  readonly property var selectedGeometry: root.modelGeometry[root.launchModel] || null
 
   // Recomputed as the inputs change, so the suggestion tracks the settings
   // that actually determine what fits -- cache type and MoE offload move it
@@ -197,8 +215,7 @@ Panel {
       geometry: root.selectedGeometry,
       cacheTypeK: root.cacheTypeK,
       cacheTypeV: root.cacheTypeV,
-      cpuMoeActive: root.cpuMoe || String(root.nCpuMoe).trim() !== "",
-      cacheRamMb: parseInt(root.cacheRam, 10) || 0
+      cpuMoeActive: root.cpuMoe || String(root.nCpuMoe).trim() !== ""
     })
   }
 
@@ -209,6 +226,11 @@ Panel {
   property var visionDirs: ({})
   property string selectedModel: ""
   property bool scanning: false
+  // Bumped on every scan so a late result cannot overwrite a newer list.
+  property int scanGen: 0
+  property int systemoneScanGen: 0
+  // When the last full model scan ran, so opening the panel does not repeat it.
+  property double lastModelScanAt: 0
 
   // ---- Model picker accordion ----
   //
@@ -320,8 +342,8 @@ Panel {
 
   // The projector found beside the selected model, if any.
   readonly property string detectedMmproj: {
-    if (root.selectedModel === "") return ""
-    var found = root.visionDirs[Model.dirName(root.selectedModel)]
+    if (root.launchModel === "") return ""
+    var found = root.visionDirs[Model.dirName(root.launchModel)]
     return found ? String(found) : ""
   }
   readonly property string resolvedMmproj: {
@@ -990,7 +1012,8 @@ Panel {
           nCpuMoe: root.nCpuMoe,
           parallel: root.parallel,
           systemoneCtx: root.systemoneCtx,
-          extraPieces: root.extraArgTokens()
+          extraPieces: root.extraArgTokens(),
+          propOverridden: root.propOverridden
         })
     return root.buildLlamaArgs()
   }
@@ -1220,16 +1243,9 @@ Panel {
   // that item did not accept -- a single-line TextInput swallows Home/End/
   // Left/Right and passes Up/Down through, so a panel-level handler catches
   // some keypad digits and never sees the rest.
-  //
-  // DEBUG: every key reaching a numeric field is logged while the numpad
-  // behaviour is being diagnosed. Remove once confirmed.
   component NumField: TextField {
     Keys.priority: Keys.BeforeItem
     Keys.onPressed: function(event) {
-      console.log("[local-ai-server] key=" + event.key +
-                  " text=" + JSON.stringify(event.text) +
-                  " mods=" + event.modifiers +
-                  " keypad=" + ((event.modifiers & Qt.KeypadModifier) ? 1 : 0))
       if (event.text && event.text.length > 0) return
       var digit = ""
       switch (event.key) {
@@ -1473,35 +1489,17 @@ Panel {
   // capturing the outgoing model's values into it.
   property bool applyingTuning: false
 
-  // The picker, with the models carrying their own tuning marked.
-  //
-  // Which models have been tuned is otherwise invisible from the page where
-  // models are chosen, and switching to one silently changes every value on
-  // Tuning -- so the switch has to be announced before it is made, not
-  // discovered afterwards.
-  readonly property var modelOptionsWithProfile: {
-    var out = []
-    for (var i = 0; i < root.modelOptions.length; i++) {
-      var opt = root.modelOptions[i]
-      if (!Profiles.has(root.profiles, root.backend, opt.value)) { out.push(opt); continue }
-      var marked = {}
-      for (var k in opt) marked[k] = opt[k]
-      marked.description = (opt.description ? opt.description + " · " : "") + "tuned"
-      out.push(marked)
-    }
-    return out
-  }
+  // The model this backend would launch, with its own tuning if it has one.
+  readonly property bool hasProfile: Profiles.has(root.profiles, root.backend, root.launchModel)
 
-  readonly property bool hasProfile: Profiles.has(root.profiles, root.backend, root.selectedModel)
-
-  // A user edit to any tuning value: stores it against the selected model,
-  // creating that model's profile if this is its first.
+  // A user edit to any tuning value: stores it against the model this backend
+  // would launch, creating its profile if this is the first edit.
   //
   // With no model selected there is nothing to key on — edits are ignored
   // until a model is picked.
   function touchTuning() {
-    if (!root.settingsLoaded || root.applyingTuning || root.selectedModel === "") return
-    root.profiles = Profiles.set(root.profiles, root.backend, root.selectedModel, Profiles.snapshot(root))
+    if (!root.settingsLoaded || root.applyingTuning || root.launchModel === "") return
+    root.profiles = Profiles.set(root.profiles, root.backend, root.launchModel, Profiles.snapshot(root))
     root.scheduleSettingsSave()
   }
 
@@ -1534,7 +1532,7 @@ Panel {
   // a selection that no longer exists.
   function applyTuningForSelection() {
     if (!root.settingsLoaded || root.applyingTuning) return
-    var profile = Profiles.get(root.profiles, root.backend, root.selectedModel)
+    var profile = Profiles.get(root.profiles, root.backend, root.launchModel)
     root.applyTuning(profile !== null ? profile : Profiles.resolve(null))
     // A profile written before arguments were split still carries a line.
     root.splitPastedArgs()
@@ -1544,7 +1542,7 @@ Panel {
   // The next edit starts a fresh profile from them.
   function clearProfile() {
     if (!root.hasProfile) return
-    root.profiles = Profiles.remove(root.profiles, root.backend, root.selectedModel)
+    root.profiles = Profiles.remove(root.profiles, root.backend, root.launchModel)
     root.applyTuning(Profiles.resolve(null))
     root.scheduleSettingsSave()
   }
@@ -1672,6 +1670,9 @@ Panel {
     // tuning set, and it belongs to the model that file names.
     var restoredProfiles = Profiles.fromSettings(parsed, Profiles.snapshot(root))
     root.profiles = restoredProfiles.profiles
+    // Before the Model page could pick a System One model, that backend's
+    // profile was keyed by the chat selection. Move it onto the decision model.
+    root.profiles = Profiles.rekey(root.profiles, "systemone", root.selectedModel, root.systemoneModel)
 
     root.sanitizeSettings()
     root.settingsLoaded = true
@@ -1809,6 +1810,9 @@ Panel {
     root.scheduleSettingsSave()
     root.refreshModels()
     root.refreshCatalogue()
+    // The new backend has its own model's profile to restore; for llama.cpp
+    // the selection is empty here, so this is still the neutral default.
+    root.applyTuningForSelection()
     root.adoptRunningServer()
   }
 
@@ -1858,11 +1862,18 @@ Panel {
   onMmprojPathChanged: root.touchTuning()
   onMmprojOffloadChanged: root.touchTuning()
   onSelectedModelChanged: {
-    root.applyTuningForSelection()
+    // System One retunes from its own selection, not from the chat model's.
+    if (root.backend !== "systemone") root.applyTuningForSelection()
     root.scheduleSettingsSave()
     if (root.selectedModel !== "") root.revealModel(root.selectedModel)
   }
-  onSystemoneModelChanged: root.scheduleSettingsSave()
+  onSystemoneModelChanged: {
+    if (root.backend === "systemone") {
+      root.applyTuningForSelection()
+      if (root.systemoneModel !== "") root.revealModel(root.systemoneModel)
+    }
+    root.scheduleSettingsSave()
+  }
   onSystemoneCtxChanged: root.scheduleSettingsSave()
   onShowMetricChanged: root.scheduleSettingsSave()
   onExtraArgsChanged: {
@@ -2018,7 +2029,7 @@ Panel {
       if (root.switching) root.forceSwitch()
       else if (root.configChanged) root.switchServer()
     }
-    function model(path: string): void { root.selectModel(path) }
+    function model(path: string): void { root.selectActiveModel(path) }
     function page(name: string): void {
       var i = root.pageNames.map(function(n) { return n.toLowerCase() }).indexOf(String(name).toLowerCase())
       if (i === -1) return
@@ -2033,7 +2044,7 @@ Panel {
       return JSON.stringify({
         running: root.running, starting: root.starting, stopping: root.stopping,
         restarting: root.switching, changesPending: root.configChanged,
-        backend: root.backend, model: root.runningModel, selected: root.selectedModel,
+        backend: root.backend, model: root.runningModel, selected: root.launchModel,
         build: root.backend === "llamacpp" ? Backends.buildLabel(root.resolvedBuild) : "",
         endpoint: root.host + ":" + root.port,
         pp: root.ppTokensPerSec, tg: root.tokensPerSec
@@ -2092,6 +2103,7 @@ Panel {
     var extra = []
     if (root.configuredLlamaBinary !== "") extra.push(expandPath(root.configuredLlamaBinary))
     if (root.altBinary !== "") extra.push(expandPath(root.altBinary))
+    if (root.configuredSystemoneBinary !== "") extra.push(expandPath(root.configuredSystemoneBinary))
     if (root.detectedLlamaBinary !== "") extra.push(root.detectedLlamaBinary)
     buildsProbe.command = ["python3", root.pluginDir + "/llama_builds.py"].concat(extra)
     buildsProbe.running = true
@@ -2114,6 +2126,7 @@ Panel {
   // A binary set or changed in settings joins the list without a shell restart.
   onConfiguredLlamaBinaryChanged: if (root.capabilitiesProbed) root.probeBuilds()
   onAltBinaryChanged: if (root.capabilitiesProbed) root.probeBuilds()
+  onConfiguredSystemoneBinaryChanged: if (root.capabilitiesProbed) root.probeBuilds()
 
   Process {
     id: hwProbe
@@ -2158,7 +2171,7 @@ Panel {
 
   function modelRootFor(path) {
     var best = ""
-    var dirs = root.searchDirs || []
+    var dirs = root.activeSearchDirs || []
     for (var i = 0; i < dirs.length; i++) {
       var dir = String(dirs[i] || "").replace(/\/+$/, "")
       if (dir === "") dir = "/"
@@ -2167,14 +2180,10 @@ Panel {
     return best
   }
 
-  function countModelFiles(nodes) {
-    var n = 0
-    for (var i = 0; i < nodes.length; i++)
-      n += nodes[i].type === "file" ? 1 : root.countModelFiles(nodes[i].children)
-    return n
-  }
-
+  // Labels in one pass and returns how many files the subtree holds, so the
+  // folder counts cost one walk of the tree rather than one walk per folder.
   function labelModelTree(nodes, byPath, used) {
+    var n = 0
     for (var i = 0; i < nodes.length; i++) {
       var node = nodes[i]
       if (node.type === "file") {
@@ -2183,11 +2192,13 @@ Panel {
         node.description = opt ? opt.description : ""
         node.mtp = opt ? opt.mtp : false
         used[node.path] = true
+        n++
       } else {
-        node.count = root.countModelFiles(node.children)
-        root.labelModelTree(node.children, byPath, used)
+        node.count = root.labelModelTree(node.children, byPath, used)
+        n += node.count
       }
     }
+    return n
   }
 
   // Rebuilt whenever the scan result changes. Each configured/detected
@@ -2196,7 +2207,7 @@ Panel {
   // (ollama's shared blob store, or ollama's model names) get their own
   // section instead of vanishing.
   function buildPickerTree() {
-    var opts = root.modelOptions || []
+    var opts = root.activeModelOptions || []
     if (opts.length === 0) return []
 
     var byPath = {}
@@ -2204,7 +2215,7 @@ Panel {
 
     var used = {}
     var roots = []
-    var dirs = root.searchDirs || []
+    var dirs = root.activeSearchDirs || []
     for (var d = 0; d < dirs.length; d++) {
       var dir = String(dirs[d] || "").replace(/\/+$/, "")
       if (dir === "") dir = "/"
@@ -2256,6 +2267,9 @@ Panel {
   }
 
   readonly property var modelTree: root.buildPickerTree()
+  // Flat list built once per tree, so typing in the search field does not walk
+  // the same folders on every keystroke.
+  readonly property var modelFilesFlat: Model.collectFiles(root.modelTree)
 
   // A flat search can match thousands of files; a Repeater would build a
   // delegate for every one. The list is capped and the count says "200+".
@@ -2263,7 +2277,7 @@ Panel {
   readonly property var modelRows: {
     var q = String(root.modelFilter || "").trim().toLowerCase()
     if (q !== "") {
-      var files = Model.collectFiles(root.modelTree)
+      var files = root.modelFilesFlat
       var out = []
       for (var i = 0; i < files.length; i++) {
         var node = files[i]
@@ -2277,8 +2291,8 @@ Panel {
   }
 
   readonly property var selectedModelOption: {
-    for (var i = 0; i < root.modelOptions.length; i++)
-      if (root.modelOptions[i].value === root.selectedModel) return root.modelOptions[i]
+    for (var i = 0; i < root.activeModelOptions.length; i++)
+      if (root.activeModelOptions[i].value === root.launchModel) return root.activeModelOptions[i]
     return null
   }
   readonly property string selectedModelLabel: root.selectedModelOption
@@ -2326,6 +2340,14 @@ Panel {
   }
 
   function refreshModels() {
+    root.scanGen++
+    root.lastModelScanAt = Date.now()
+    // A separate System One directory is the only list its picker shows, so
+    // scan that instead of the chat library.
+    if (root.backend === "systemone" && root.configuredSystemoneModelsDir !== "") {
+      root.refreshSystemoneModels()
+      return
+    }
     if (root.backend === "ollama") {
       root.scanning = true
       // Resolved from ollama's store on disk, not from /api/tags.
@@ -2336,11 +2358,16 @@ Panel {
       // The manifests on disk are authoritative and always readable; the API
       // is consulted afterwards only to enrich what is already listed.
       ollamaStoreScan.command = ["python3", root.blobScript].concat(root.ollamaStoreDirs())
+      ollamaStoreScan.gen = root.scanGen
       ollamaStoreScan.running = false
       ollamaStoreScan.running = true
       return
     }
-    if (root.searchDirs.length === 0) { root.modelOptions = []; return }
+    if (root.searchDirs.length === 0) {
+      root.modelOptions = []
+      root.scanning = false
+      return
+    }
     root.scanning = true
     // -L so symlinked model collections are followed; findings are de-duped
     // by path in buildModelOptions. The depth cap matches the Settings count.
@@ -2349,15 +2376,18 @@ Panel {
       "(", "-type", "f", "-iname", "*.gguf", "-printf", "F\t%p\n", ")"
     ])
     treeScan.command = cmd
+    treeScan.gen = root.scanGen
     treeScan.running = false
     treeScan.running = true
   }
 
   Process {
     id: treeScan
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (treeScan.gen !== root.scanGen) return
         var parsed = Model.parseFindOutput(text)
         var modelFiles = []
         var vision = {}
@@ -2371,6 +2401,7 @@ Panel {
         // Resolve ollama's blobs before probing, so both sources go through
         // one gguf_probe pass and land in one list.
         blobScan.command = ["python3", root.blobScript].concat(root.ollamaStoreDirs())
+        blobScan.gen = root.scanGen
         blobScan.running = false
         blobScan.running = true
       }
@@ -2381,14 +2412,16 @@ Panel {
   // differ. Blank uses the main scan (systemoneModelOptions is bound to it).
   Process {
     id: systemoneScan
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (systemoneScan.gen !== root.systemoneScanGen) return
         var parsed = Model.parseFindOutput(text)
         var opts = []
         for (var i = 0; i < parsed.files.length; i++) {
           var p = parsed.files[i]
-          opts.push({ value: p, label: Model.baseName(p), description: Model.dirName(p) })
+          opts.push({ value: p, label: Model.baseName(p).replace(/\.gguf$/i, ""), description: Model.dirName(p) })
         }
         root.systemoneScannedOptions = opts
         root.systemoneScanning = false
@@ -2414,9 +2447,11 @@ Panel {
 
   Process {
     id: blobScan
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (blobScan.gen !== root.scanGen) return
         var blobs = {}
         if (root.shareOllamaModels) {
           try { blobs = JSON.parse(String(text || "").trim() || "{}") } catch (e) { blobs = {} }
@@ -2435,6 +2470,7 @@ Panel {
         }
         root.pendingModelFiles = all
         probeScan.command = ["python3", root.probeScript].concat(all)
+        probeScan.gen = root.scanGen
         probeScan.running = false
         probeScan.running = true
       }
@@ -2443,9 +2479,11 @@ Panel {
 
   Process {
     id: probeScan
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (probeScan.gen !== root.scanGen) return
         var caps = Model.parseProbeCapabilities(text)
         root.modelCaps = caps
         root.modelGeometry = Model.parseProbeGeometry(text)
@@ -2499,9 +2537,11 @@ Panel {
 
   Process {
     id: ollamaStoreScan
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (ollamaStoreScan.gen !== root.scanGen) return
         var found = {}
         try { found = JSON.parse(String(text || "").trim() || "{}") } catch (e) { found = {} }
         root.ollamaBlobs = found
@@ -2525,6 +2565,7 @@ Panel {
         // Enrich with parameter size and quantization when the server happens
         // to be up. Failure is fine -- the list already stands without it.
         ollamaTags.command = ["curl", "-s", "-m", "2", Backends.tagsUrl(root.host, root.port)]
+        ollamaTags.gen = root.scanGen
         ollamaTags.running = false
         ollamaTags.running = true
       }
@@ -2533,9 +2574,11 @@ Panel {
 
   Process {
     id: ollamaTags
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (ollamaTags.gen !== root.scanGen) return
         root.scanning = false
         var data
         try { data = JSON.parse(String(text || "").trim() || "{}") } catch (e) { data = {} }
@@ -2580,9 +2623,14 @@ Panel {
     }
   }
 
-  // Keeps selectedModel pointing at something that still exists, falling back
-  // to the first entry rather than launching against a deleted path.
+  // Keeps the backend's selection pointing at something that still exists,
+  // falling back to the first entry rather than launching against a deleted
+  // path. System One never falls back: a decision model is picked on purpose.
   function validateSelection() {
+    if (root.backend === "systemone") {
+      root.validateSystemoneModel()
+      return
+    }
     var opts = root.modelOptions
     for (var i = 0; i < opts.length; i++)
       if (opts[i].value === root.selectedModel) return
@@ -2790,11 +2838,13 @@ Panel {
     }
   }
 
-  // ---- Étape 7: emit helper avec tolérance aux paramètres non supportés ----
-  //
-  // emitFlag(build, flag, value) → ajoute [flag, value] à args seulement si
-  // ce build le supporte. Sinon le flag reste dans le profile mais est ignoré.
-  property var ignoredFlags: []  // flags qui ont été ignorés ce build
+  // A flag this build does not describe is left out of argv but remembered, so
+  // the tuning page can say it was ignored.
+  property var ignoredFlags: []
+  // Which flags a built-in control emitted for this launch. The custom-parameter
+  // backstop uses this map rather than searching argv, where a *value* could
+  // equal a flag name and cause a false skip.
+  property var emittedFlags: ({})
 
   function emitFlag(build, flag, value, args) {
     if (Backends.supportsFlag(build, flag)) {
@@ -2802,21 +2852,20 @@ Panel {
       // llama-server, not "use the default".
       args.push(flag)
       if (String(value) !== "") args.push(String(value))
+      root.emittedFlags[flag] = true
       return true
     }
     if (ignoredFlags.indexOf(flag) === -1) ignoredFlags.push(flag)
     return false
   }
 
-
-
   // Builds the llama-server argv. Kept as a function returning the array so
   // the composition is testable by eye and the launch path stays one line.
   function buildLlamaArgs() {
     var ngl = parseInt(root.gpuLayers, 10)
     ignoredFlags = []
+    root.emittedFlags = {}
     var currentBuild = root.resolvedBuild
-
 
     if (!isFinite(ngl)) ngl = 0
     // -1 is llama.cpp's "fit as many layers as VRAM allows" sentinel, not a
@@ -2929,7 +2978,7 @@ Panel {
     // the flag instead of yielding it.
     for (var c = 0; c < root.customParams.length; c++) {
       var entry = root.customParams[c]
-      if (args.indexOf(entry.key) !== -1) {
+      if (root.emittedFlags[entry.key]) {
         console.warn("local-ai-server: skipping", entry.key,
                      "-- already set by a built-in control")
         continue
@@ -3018,7 +3067,8 @@ Panel {
           nCpuMoe: root.nCpuMoe,
           parallel: root.parallel,
           systemoneCtx: root.systemoneCtx,
-          extraPieces: root.extraArgTokens()
+          extraPieces: root.extraArgTokens(),
+          propOverridden: root.propOverridden
         }
       )
       var cudaEnv = Hardware.isCuda(root.hardware)
@@ -3262,6 +3312,17 @@ Panel {
   readonly property bool savesSlots: root.kvPersistence && Backends.supports(root.backend, "slotKv")
 
   function stopServer() {
+    var model = root.runningModel !== "" ? root.runningModel : root.launchModel
+    var plan = Model.stopPlan(root.running, root.starting, root.canStop,
+                              root.savesSlots, model, serverProc.running)
+    if (plan === "blocked") {
+      // An adopted root-owned service or a hand-started server: nothing here
+      // can stop it, so do not hide it and do not fire the stopped hook.
+      root.restartAfterStop = false
+      root.lastError = "This server was not started by this widget, so it cannot be stopped from here."
+      return
+    }
+
     root.starting = false
     startingTimer.stop()
     healthPollTimer.stop()
@@ -3288,8 +3349,7 @@ Panel {
       return
     }
 
-    var model = root.runningModel !== "" ? root.runningModel : root.launchModel
-    if (root.running && root.canStop && root.savesSlots && model !== "") {
+    if (plan === "save") {
       // Dump the KV cache before stopping, so the next start does not
       // reprocess the whole prompt. The stop itself runs from the save's
       // completion.
@@ -3298,7 +3358,7 @@ Panel {
       slotSaveProc.command = root.slotKvCommand("save", model)
       slotSaveProc.running = false
       slotSaveProc.running = true
-    } else if (root.starting || serverProc.running || root.running) {
+    } else if (plan === "stop") {
       // The detached wrapper exits as soon as the unit is created, so during
       // model load serverProc.running is already false while the unit is very
       // much alive. starting has to count as "something to stop".
@@ -3415,6 +3475,16 @@ Panel {
   // itself writes no one else's configuration; pointing a coding agent at
   // the live endpoint is what a hook is for. The JSON describes what is being
   // served; see README "Hooks".
+  function servedModelEntry(path, label) {
+    var probed = root.modelCaps[path] || {}
+    var geometry = root.modelGeometry[path] || null
+    return { id: path,
+             name: (label || Model.baseName(path)).replace(/\.gguf$/i, ""),
+             thinking: !!probed.thinking, tools: !!probed.tools,
+             vision: !!root.visionDirs[Model.dirName(path)],
+             contextLength: geometry ? (geometry.context_length || 0) : 0 }
+  }
+
   function servedModels() {
     var out = []
     if (root.backend === "ollama") {
@@ -3430,14 +3500,15 @@ Panel {
       }
       return out
     }
+    // Every model in the store, not only the loaded one (README "Hooks").
+    var options = root.backend === "systemone" ? root.systemoneModelOptions : root.modelOptions
+    for (var j = 0; j < options.length; j++)
+      out.push(root.servedModelEntry(options[j].value, options[j].label))
     var loaded = root.runningModel !== "" ? root.runningModel : root.launchModel
     if (loaded === "") return out
-    var probed = root.modelCaps[loaded] || {}
-    var geometry = root.modelGeometry[loaded] || null
-    out.push({ id: loaded, name: Model.baseName(loaded).replace(/\.gguf$/i, ""),
-               thinking: !!probed.thinking, tools: !!probed.tools,
-               vision: !!root.visionDirs[Model.dirName(loaded)],
-               contextLength: geometry ? (geometry.context_length || 0) : 0 })
+    var listed = false
+    for (var k = 0; k < out.length; k++) if (out[k].id === loaded) listed = true
+    if (!listed) out.push(root.servedModelEntry(loaded, ""))
     return out
   }
 
@@ -3454,6 +3525,8 @@ Panel {
         : (parseInt(root.contextSize, 10) || 0),
       model: serving ? (root.runningModel !== "" ? root.runningModel : root.launchModel) : "",
       build: serving && root.backend === "llamacpp" ? Backends.buildLabel(root.resolvedBuild) : "",
+      // shortcut: the whole store travels as one argv string; past ~600 models
+      // it can exceed MAX_ARG_STRLEN, then write the payload to a temp file.
       models: serving ? root.servedModels() : []
     }
     Quickshell.execDetached(["omarchy-hook", "local-ai-server", event, JSON.stringify(payload)])
@@ -3733,7 +3806,11 @@ Panel {
 
   onOpenedChanged: if (opened) {
     root.showingLogs = false
-    refreshModels()
+    // shortcut: a full scan at most once a minute, refreshed by any explicit
+    // rescan; upgrade to a watch if new models must appear immediately.
+    if (!root.activeScanning &&
+        (root.activeModelOptions.length === 0 || Date.now() - root.lastModelScanAt > 60000))
+      refreshModels()
     if (!root.running) root.adoptRunningServer()
     // A hot reload keeps `running` without adopting again, so the running
     // argv is looked up here as well.
@@ -4974,7 +5051,7 @@ Panel {
             // anyone who can reach the port.
             Text {
               Layout.fillWidth: true
-              visible: !/^(127\.|localhost$|::1$)/.test(String(root.host).trim())
+              visible: !/^(127\.|localhost$|\[::1\]$|::1$)/.test(String(root.host).trim())
               text: "⚠ " + root.host + " is reachable from other machines, and the server has no API key. " +
                     "Use 127.0.0.1 unless you mean to share it."
               color: root.bar.urgent
@@ -5206,7 +5283,7 @@ Panel {
                   Layout.maximumWidth: modelRow.width * 0.72
                   text: root.selectedModelLabel !== ""
                         ? root.selectedModelLabel
-                        : (root.scanning ? "Scanning…" : "Select a model")
+                        : (root.activeScanning ? "Scanning…" : "Select a model")
                   color: root.bar.foreground
                   opacity: root.selectedModelLabel !== "" ? 0.85 : 0.45
                   elide: Text.ElideRight
@@ -5219,8 +5296,8 @@ Panel {
               HoverHandler { id: modelRowHover }
               PanelToolTip {
                 visible: modelRowHover.hovered
-                text: root.selectedModel !== ""
-                      ? root.selectedModel.replace(Quickshell.env("HOME"), "~")
+                text: root.launchModel !== ""
+                      ? root.launchModel.replace(Quickshell.env("HOME"), "~")
                       : "Pick the model this server loads."
               }
             }
@@ -5325,7 +5402,7 @@ Panel {
                         readonly property var node: modelData.node
                         readonly property int depth: modelData.depth
                         readonly property bool isDir: node.type === "dir"
-                        readonly property bool current: !isDir && node.path === root.selectedModel
+                        readonly property bool current: !isDir && node.path === root.launchModel
                         readonly property bool open: isDir && root.expandedModelDirs[node.path] === true
 
                         width: modelColumn.width
@@ -5403,7 +5480,7 @@ Panel {
                           cursorShape: Qt.PointingHandCursor
                           onClicked: {
                             if (isDir) root.toggleModelDir(node)
-                            else root.selectModel(node.path)
+                            else root.selectActiveModel(node.path)
                           }
                         }
                         PanelToolTip {
@@ -5418,7 +5495,7 @@ Panel {
                 Text {
                   anchors.centerIn: parent
                   visible: root.modelRows.length === 0
-                  text: root.scanning
+                  text: root.activeScanning
                         ? "Scanning…"
                         : (root.modelFilter !== ""
                             ? "No matching model"
@@ -5444,7 +5521,7 @@ Panel {
             Text {
               Layout.fillWidth: true
               visible: root.running && root.runningModel !== "" &&
-                       root.selectedModel !== root.runningModel &&
+                       root.launchModel !== root.runningModel &&
                        Backends.supports(root.backend, "slotKv")
               text: "Running " + Model.baseName(root.runningModel) + " — press Restart to load this one."
               color: root.bar.foreground
@@ -5457,8 +5534,8 @@ Panel {
             Text {
               Layout.fillWidth: true
               text: {
-                if (root.scanning) return "Scanning…"
-                var n = root.modelOptions.length
+                if (root.activeScanning) return "Scanning…"
+                var n = root.activeModelOptions.length
                 if (n === 0) return "No models available"
                 var shown = root.modelRows.length
                 var capped = root.modelFilter !== "" && shown >= root.modelSearchLimit
@@ -5491,13 +5568,13 @@ Panel {
               Text {
                 Layout.fillWidth: true
                 text: {
-                  if (root.selectedModel === "")
+                  if (root.launchModel === "")
                     return "Select a model first"
-                  var name = Model.baseName(root.selectedModel).replace(/\.gguf$/i, "")
+                  var name = Model.baseName(root.launchModel).replace(/\.gguf$/i, "")
                   return root.hasProfile ? "Profile · " + name : "Tuning · " + name
                 }
                 color: root.bar.foreground
-                opacity: root.selectedModel === "" ? 0.45 : 0.7
+                opacity: root.launchModel === "" ? 0.45 : 0.7
                 elide: Text.ElideMiddle
                 font.family: root.bar.fontFamily
                 font.pixelSize: root.fontSize

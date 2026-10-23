@@ -28,6 +28,21 @@ test("statusLabel names the restart wait", () => {
   assert.strictEqual(Model.statusLabel(false, true, 3, "", 0), "Starting… 3s")
 })
 
+test("stopPlan never reports an external server as stopped", () => {
+  // Adopted root service: running, but not ours to stop.
+  assert.strictEqual(Model.stopPlan(true, false, false, true, "/m/a.gguf", false), "blocked")
+  // Ours, slots enabled, model known: save the cache first.
+  assert.strictEqual(Model.stopPlan(true, false, true, true, "/m/a.gguf", false), "save")
+  // Ours without a slot cache, or before a model is known.
+  assert.strictEqual(Model.stopPlan(true, false, true, false, "/m/a.gguf", false), "stop")
+  assert.strictEqual(Model.stopPlan(true, false, true, true, "", false), "stop")
+  // Still loading (serverProc already exited) and the pre-launch wrapper.
+  assert.strictEqual(Model.stopPlan(false, true, false, true, "/m/a.gguf", false), "stop")
+  assert.strictEqual(Model.stopPlan(false, false, false, true, "/m/a.gguf", true), "stop")
+  // Nothing running.
+  assert.strictEqual(Model.stopPlan(false, false, false, true, "/m/a.gguf", false), "none")
+})
+
 test("slotPrefix keeps the file name and is unique per full path", () => {
   const a = Backends.slotPrefix("/m/a/Qwen 3.6 (Q4).gguf")
   const b = Backends.slotPrefix("/m/b/Qwen 3.6 (Q4).gguf")
