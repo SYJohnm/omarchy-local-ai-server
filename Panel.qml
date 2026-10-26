@@ -1849,23 +1849,6 @@ Panel {
     if (root.running && root.runningModel === model) configReloadTimer.restart()
   }
 
-  // Unloads and loads the resident model so llama-swap re-reads its command.
-  // The unit is deliberately not restarted: other models and the router stay.
-  function reloadLoadedModel() {
-    if (root.backend === "ollama" || root.loadedModelId === "" || !root.running) return
-    var id = root.loadedModelId
-    root.starting = true
-    root.startingElapsed = 0
-    startingTimer.restart()
-    reloadProc.command = ["bash", "-lc",
-      "curl -s -m 10 -X POST " + root.shellQuote(LlamaSwap.unloadUrl(root.host, root.port, id)) +
-      " >/dev/null 2>&1; " +
-      "curl -s -m 1800 " + root.shellQuote(LlamaSwap.loadUrl(root.host, root.port, id)) +
-      " >/dev/null 2>&1"]
-    reloadProc.running = false
-    reloadProc.running = true
-  }
-
 
 
   // ---- Settings persistence ----
@@ -3964,6 +3947,7 @@ Panel {
   }
 
   onOpenedChanged: if (opened) {
+    briefPopup.open = false
     root.showingLogs = false
     // shortcut: a full scan at most once a minute, refreshed by any explicit
     // rescan; upgrade to a watch if new models must appear immediately.
@@ -3998,8 +3982,6 @@ Panel {
     onTriggered: if (!root.showBriefPopup) briefPopup.open = false
   }
 
-  onOpenedChanged: if (opened) briefPopup.open = false
-
   WidgetButton {
     id: button
     anchors.fill: parent
@@ -4016,7 +3998,7 @@ Panel {
     useActiveColor: false
     fontFamily: root.bar.fontFamily
     fontSize: Style.font.bodySmall
-    opacity: root.starting ? 0.6 : 1.0
+    dimmed: root.starting
     tooltipText: ""
     onPressed: function(b) {
       if (b === Qt.RightButton) root.showMetric = !root.showMetric

@@ -15,9 +15,12 @@
 //
 // Pure logic: no QML, no I/O. Panel.qml writes the files and talks to the API.
 
-var Model = require("./Model.js")
-var Params = require("./Params.js")
-var Backends = require("./Backends.js")
+var _req = (function() {
+  try { return eval("require") } catch (e) { return null }
+})()
+var Model = _req ? _req("./Model.js") : null
+var Params = _req ? _req("./Params.js") : null
+var Backends = _req ? _req("./Backends.js") : null
 
 // ---- Defaults ----
 
@@ -833,7 +836,7 @@ function unitFile(opts) {
     "ExecStart=" + exec.join(" "),
     "Restart=on-failure",
     "RestartSec=5",
-    "WorkingDirectory=" + systemdQuote(opts.workDir || "/")
+    "WorkingDirectory=" + String(opts.workDir || "/").replace(/\/+$/, "")
   ]
   var env = opts.env || []
   for (var i = 0; i < env.length; i++) lines.push("Environment=" + systemdQuote(env[i]))

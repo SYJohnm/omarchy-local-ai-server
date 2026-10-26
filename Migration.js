@@ -10,9 +10,12 @@
 // Migration reuses the same block writer and argv builder the Tuning page uses,
 // so a migrated model and an edited one cannot drift apart.
 
-var LS = require("./LlamaSwap.js")
-var Profiles = require("./Profiles.js")
-var Backends = require("./Backends.js")
+var _req = (function() {
+  try { return eval("require") } catch (e) { return null }
+})()
+var LS = _req ? _req("./LlamaSwap.js") : null
+var Profiles = _req ? _req("./Profiles.js") : null
+var Backends = _req ? _req("./Backends.js") : null
 
 var CONFIG_VERSION = 4
 var MAIN_START_PORT = 5800
