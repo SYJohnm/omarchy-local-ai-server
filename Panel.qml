@@ -12,6 +12,8 @@ import "Backends.js" as Backends
 import "Hardware.js" as Hardware
 import "Params.js" as Params
 import "Profiles.js" as Profiles
+import "LlamaSwap.js" as LlamaSwap
+import "Migration.js" as Migration
 
 // Local AI server manager.
 //
@@ -51,6 +53,12 @@ Panel {
   readonly property string configuredModelsDir: setting("modelsDir", "")
   readonly property string configuredSystemoneBinary: setting("systemoneBinary", "")
   readonly property string configuredSystemoneModelsDir: setting("systemoneModelsDir", "")
+  // llama-swap owns the model child processes. Blank means auto-detect; the
+  // capability probe fills detectedLlamaSwapBinary in.
+  readonly property string configuredLlamaSwapBinary: setting("llamaSwapBinary", "")
+  property string detectedLlamaSwapBinary: ""
+  readonly property string llamaSwapBinary:
+    root.configuredLlamaSwapBinary !== "" ? expandPath(root.configuredLlamaSwapBinary) : root.detectedLlamaSwapBinary
   // Blank means "use the preferred llama-server", the same binary the chat
   // backend runs. A separate build only matters for a fork.
   readonly property string activeSystemoneBinary:
@@ -921,16 +929,109 @@ Panel {
   // Stopping is ours to do whenever we launched the process; an externally
   // managed one is not.
   readonly property bool canStop: root.running && !(root.adopted && !root.ownsUnit)
-  // Takeover is only meaningful when something we do not control is in the way.
+  // ---- Services ----
+  //
+  // Three services run side by side: the main llama-swap router, the System
+  // One router, and ollama. The panel shows one category at a time, so the
+  // runtime properties below stay the active service's live view; the other
+  // two keep a snapshot here and are polled from it. Switching category saves
+  // the outgoing view and restores the incoming one.
+  property var serviceStates: ({})
+  property string lastBackend: ""
+  // ollama has no config file; its live tuning is set aside here on the way out
+  // so switching to a router and back does not replace it.
+  property var ollamaTuning: null
+
+  function blankServiceState() {
+    return {
+      running: false, starting: false, stopping: false, adopted: false, ownsUnit: false,
+      loadedModel: "", loadedModelId: "", tokensPerSec: 0,
+      ppPercent: 0, ppTokensPerSec: 0, ppActive: false, ppFromLog: false,
+      loadedModelInfo: "", lastError: "", healthUrl: "", startingElapsed: 0,
+      logsSource: "", rateHistory: []
+    }
+  }
+
+  function getServiceState(id) {
+    var s = root.serviceStates[id]
+    return (s && typeof s === "object") ? s : root.blankServiceState()
+  }
+
+  function setServiceState(id, patch) {
+    var next = {}
+    var current = root.getServiceState(id)
+    for (var k in current) next[k] = current[k]
+    for (var p in patch) next[p] = patch[p]
+    var all = {}
+    for (var s in root.serviceStates) all[s] = root.serviceStates[s]
+    all[id] = next
+    root.serviceStates = all
+  }
+
+  function activeSnapshot() {
+    return {
+      running: root.running, starting: root.starting, stopping: root.stopping,
+      adopted: root.adopted, ownsUnit: root.ownsUnit,
+      loadedModel: root.runningModel, loadedModelId: root.loadedModelId,
+      tokensPerSec: root.tokensPerSec, ppPercent: root.ppPercent,
+      ppTokensPerSec: root.ppTokensPerSec, ppActive: root.ppActive,
+      ppFromLog: root.ppFromLog, loadedModelInfo: root.loadedModelInfo,
+      lastError: root.lastError, healthUrl: root.healthUrl,
+      startingElapsed: root.startingElapsed, logsSource: root.logsSource,
+      rateHistory: root.rateHistory.slice()
+    }
+  }
+
+  function saveActiveState() {
+    if (!root.settingsLoaded) return
+    root.setServiceState(root.backend, root.activeSnapshot())
+  }
+
+  function restoreActiveState() {
+    var s = root.getServiceState(root.backend)
+    root.running = s.running
+    root.starting = s.starting
+    root.stopping = s.stopping
+    root.adopted = s.adopted
+    root.ownsUnit = s.ownsUnit
+    root.runningModel = s.loadedModel
+    root.loadedModelId = s.loadedModelId
+    root.tokensPerSec = s.tokensPerSec
+    root.ppPercent = s.ppPercent
+    root.ppTokensPerSec = s.ppTokensPerSec
+    root.ppActive = s.ppActive
+    root.ppFromLog = s.ppFromLog
+    root.loadedModelInfo = s.loadedModelInfo
+    root.lastError = s.lastError
+    root.healthUrl = s.healthUrl
+    root.startingElapsed = s.startingElapsed
+    root.logsSource = s.logsSource
+    root.rateHistory = s.rateHistory || []
+    root.slotsProcessing = 0
+    root.slotsBusy = false
+  }
+
+  // Every UI path that changes category goes through here, so the outgoing
+  // service's numbers are not lost and the incoming one's are not overwritten.
+  function setBackend(value) {
+    if (value === root.backend) return
+    root.saveActiveState()
+    if (root.backend === "ollama") root.ollamaTuning = Profiles.snapshot(root)
+    root.backend = value
+    root.lastBackend = value
+    root.restoreActiveState()
+  }
+
+  // An adopted server or a distribution unit is not ours to signal. Routers
+  // are always ours now; ollama keeps the takeover path.
   readonly property bool canTakeOver: root.running && root.adopted && !root.ownsUnit &&
                                       root.backendSpec.systemUnit !== undefined
 
   property bool hasSystemdRun: false
   readonly property string unitName: Backends.unitName(root.moduleName, root.backend)
-  readonly property string procMarker: Backends.procMarker(root.moduleName, root.backend)
 
-  // Set once the capability probe has reported, so the backend list and the
-  // restart comparison never act on binaries that simply are not known yet.
+  // Set once the capability probe has reported, so the backend list never acts
+  // on binaries that simply are not known yet.
   property bool capabilitiesProbed: false
 
   // Backends with a binary on this machine; the only ones the Backend
@@ -948,117 +1049,48 @@ Panel {
     if (!root.capabilitiesProbed || !root.settingsLoaded) return
     if (root.running || root.starting) return
     var ids = root.installedBackends.map(function(b) { return b.id })
-    if (ids.indexOf(root.backend) === -1) root.backend = ids[0]
+    if (ids.indexOf(root.backend) === -1) root.setBackend(ids[0])
   }
 
-  // ---- Restart on change ----
-  //
-  // Model and tuning are launch flags, so applying a change means restarting
-  // the server -- nothing runs alongside it. A changed page turns Stop into
-  // Restart: it waits until no slot is processing (Force skips the wait),
-  // saves the prompt cache, stops the unit, starts it with the new flags and
-  // restores the cache. Clients get refused connections while the model
-  // loads.
-  //
-  // With kvPersistence on, the KV cache is saved on stop, on restart and once
-  // the server goes idle after a generation, and restored as soon as a start
-  // answers /health: re-reading a long prompt is what makes a restart cost
-  // minutes, not loading the weights. llama.cpp only.
-  property bool kvPersistence: true
-  // The server outlives the shell on purpose: it is started detached, and the
-  // next panel re-adopts it through /proc. Not a setting any more -- a shell
-  // restart that took the model down with it was never what anyone wanted.
-  readonly property string slotKvScript: pluginDir + "/slot_kv.py"
-  function kvPrefix(model) {
-    return Backends.supports(root.backend, "slotKv") ? Backends.slotPrefix(model) : ""
-  }
-
-  // argv of the running server, read from /proc -- the only place its launch
-  // line survives a shell restart -- and compared with what the page would
-  // launch now.
-  property var runningArgs: []
-  // Resolved path of the running binary, so a change of build restarts too --
-  // argv[0] is the process marker, not the binary.
-  property string runningExe: ""
-  // ollama takes no argv, so its launch environment is fingerprinted instead.
-  property string runningConfigHash: ""
-  // "draining" while a restart waits for running requests, "" otherwise.
-  property string restartPhase: ""
-  property int restartIdleTicks: 0
-  // Set by a restart so the stop it goes through starts the server again.
-  property bool restartAfterStop: false
-  // Stop was pressed while the debounced autosave was writing the cache.
-  property bool stopAfterAutosave: false
+  // Nothing is pending any more: tuning edits write the model's command and
+  // reload only that model, so there is no whole-server restart to offer.
+  readonly property bool configChanged: false
+  readonly property bool switching: false
+  readonly property string switchPhase: ""
   property bool slotsBusy: false
   property int slotsProcessing: 0
   property real slotsSeenAtMs: 0
-  readonly property bool switching: root.running && root.restartPhase !== ""
-  readonly property string switchPhase: root.switching ? root.restartPhase : ""
-  // Waits for everything the argv depends on to be detected -- otherwise an
-  // adopted server reads as changed until the hardware probe lands.
-  readonly property bool configChanged: root.running && root.ownsUnit && !root.switching &&
-    root.settingsLoaded && root.capabilitiesProbed &&
-    (root.backend === "ollama"
-      ? !root.catalogueLoading && root.runningConfigHash !== "" && root.ollamaConfigHash() !== root.runningConfigHash
-      : (root.backend === "llamacpp" || root.backend === "systemone") &&
-        root.runningArgs.length > 1 && root.buildsProbed && root.hardware !== null &&
-        !root.catalogueLoading &&
-        (JSON.stringify(root.currentLaunchArgs().slice(1)) !== JSON.stringify(root.runningArgs.slice(1)) ||
-         (root.backend === "systemone"
-           ? root.runningExe !== "" && root.activeSystemoneExe !== "" &&
-             root.activeSystemoneExe !== root.runningExe
-           : root.runningExe !== "" && root.resolvedBuild !== null &&
-             root.resolvedBuild.real !== root.runningExe)))
-
-  // Extra args are stored as semicolon-separated fragments ("--temp 0.5; --foo");
-  // System One takes an argv token list, so parse each fragment first.
-  function extraArgTokens() {
-    var pieces = Model.splitExtraArgs(root.extraArgs)
-    var out = []
-    for (var i = 0; i < pieces.length; i++) out = out.concat(Model.parseArgs(pieces[i]))
-    return out
-  }
-
-  // What the page would launch now. The running argv is compared with this;
-  // both llama.cpp and System One use the same /proc reader.
-  function currentLaunchArgs() {
-    if (root.backend === "systemone")
-      return Backends.systemoneLaunchArgs(
-        root.activeSystemoneBinary, root.systemoneModel, root.host, root.port,
-        expandPath(root.slotSaveDir),
-        {
-          ngl: root.gpuLayers,
-          cacheTypeK: root.cacheTypeK,
-          cacheTypeV: root.cacheTypeV,
-          loadMode: root.loadMode,
-          threads: root.threads,
-          cpuMoe: root.cpuMoe,
-          nCpuMoe: root.nCpuMoe,
-          parallel: root.parallel,
-          systemoneCtx: root.systemoneCtx,
-          extraPieces: root.extraArgTokens(),
-          propOverridden: root.propOverridden
-        })
-    return root.buildLlamaArgs()
-  }
+  property string restartPhase: ""
+  property int restartIdleTicks: 0
+  property bool restartAfterStop: false
+  property bool stopAfterAutosave: false
+  property var runningArgs: []
+  property string runningExe: ""
+  property string runningConfigHash: ""
 
   // ---- Metrics ----
 
   property real tokensPerSec: 0
   property real ppPercent: 0
   property real ppTokensPerSec: 0
-  // Set once a logged ingestion progress line arrives for the current prompt,
-  // cleared when that prompt finishes. While set, the /slots poll leaves pp
-  // numbers alone: the log's are measured, the poll's are derived from a
-  // counter that sits still for a whole batch. A time window used to decide
-  // this, but at ubatch 2048 a batch takes longer than the window, so the
-  // bar fell back to a rateless poll percentage between log lines.
   property bool ppFromLog: false
   property bool ppActive: false
   property var lastDecodeSample: null
   property var lastPromptSample: null
   property bool showMetric: true
   property string loadedModelInfo: ""
+  // Recent tg samples for the bar's hover sparkline. Replaced, not mutated,
+  // so the Canvas repaints.
+  property var rateHistory: []
+  function pushRate(value) {
+    var next = root.rateHistory.slice()
+    next.push(Number(value) || 0)
+    if (next.length > 60) next = next.slice(next.length - 60)
+    root.rateHistory = next
+  }
+
+  // What the router currently has loaded, in the config's ids.
+  property string loadedModelId: ""
 
   property string lastLogLine: ""
   // The log is a ListModel so a new line appends one delegate instead of
@@ -1089,7 +1121,8 @@ Panel {
   property var modelDirCounts: ({})
   // Waits for detection so the first step never flashes "not installed" for
   // a binary the probe simply has not reported yet.
-  readonly property bool showingSetup: root.settingsLoaded && root.capabilitiesProbed && !root.setupDone
+  readonly property bool showingSetup: root.settingsLoaded && root.capabilitiesProbed &&
+                                       !root.setupDone && !root.showingMigration
   // Reuses the setup overlay after first run, so folders and forks can be
   // added later without hand-editing shell.json. Kept separate from
   // `setupDone` so closing settings does not bring first-run setup back.
@@ -1495,37 +1528,136 @@ Panel {
     return "'" + String(s).replace(/'/g, "'\\''") + "'"
   }
 
-  // ---- Per-model tuning profiles ----
+  // ---- Per-model tuning ----
   //
-  // Everything on the Tuning page is stored per model. A profile is created
-  // the first time that model's tuning is edited; without one the model runs
-  // on the backend's neutral defaults (what llama.cpp starts with).
-  //
-  // The live properties above stay the single source of truth for a launch:
-  // selecting a model writes its profile onto them, and editing them writes
-  // back. Nothing reads a profile at launch time, so there is no second path
-  // the launch line could come from.
-  property var profiles: ({})
-
-  // Set while a profile is being written onto the live properties. Every
-  // change handler fires during that, and without the guard the apply would be
-  // read as an edit -- creating a profile for a model merely selected, and
-  // capturing the outgoing model's values into it.
+  // A model's tuning is its `cmd` in the router config. Selecting a model
+  // parses that command onto the live properties; editing any of them writes
+  // the command back and reloads that model in place. The config is the one
+  // store: the old per-model profile object is only read by the migration.
   property bool applyingTuning: false
+  property bool configDirty: false
+  // Flags this model's build rejected while its command was composed. The
+  // Tuning page marks the rows; set here because the config is the launch line.
+  property var ignoredFlags: []
+  readonly property bool hasProfile: root.managedEntryFor(root.backend, root.launchModel) !== null
 
-  // The model this backend would launch, with its own tuning if it has one.
-  readonly property bool hasProfile: Profiles.has(root.profiles, root.backend, root.launchModel)
+  function configViewFor(id) {
+    return id === "systemone" ? systemoneConfigFile : mainConfigFile
+  }
+  function configTextFor(id) {
+    if (id !== "llamacpp" && id !== "systemone") return ""
+    var view = root.configViewFor(id)
+    return view ? String(view.text() || "") : ""
+  }
+  function setConfigText(id, text) {
+    var view = root.configViewFor(id)
+    if (!view) return
+    view.setText(text)
+    root.configRevision++
+  }
+  function managedInText(text, path) {
+    if (path === "") return null
+    var parsed = LlamaSwap.parseConfig(String(text || ""))
+    for (var i = 0; i < parsed.models.length; i++) {
+      var m = parsed.models[i]
+      if (m.managedPath === path) return m
+    }
+    return null
+  }
+  function foreignInText(text, path) {
+    var parsed = LlamaSwap.parseConfig(String(text || ""))
+    for (var i = 0; i < parsed.models.length; i++) {
+      var m = parsed.models[i]
+      if (m.managedPath === "" && m.modelPath === path) return m
+    }
+    return null
+  }
+  function managedEntryFor(id, path) {
+    return root.managedInText(root.configTextFor(id), path)
+  }
+  function foreignEntryFor(id, path) {
+    return root.foreignInText(root.configTextFor(id), path)
+  }
+  function envText(list) {
+    var out = []
+    for (var i = 0; i < (list || []).length; i++) {
+      var text = String(list[i])
+      var eq = text.indexOf("=")
+      var name = eq >= 0 ? text.slice(0, eq) : text
+      var value = eq >= 0 ? text.slice(eq + 1) : ""
+      out.push(name + "=" + root.shellQuote(value))
+    }
+    return out.join(" ")
+  }
+  function buildForTuning(id, tuning) {
+    var chosen = String(tuning && tuning.llamaBuild ? tuning.llamaBuild : "")
+    if (id === "systemone") {
+      if (chosen !== "") {
+        var pinned = Backends.findBuild(root.llamaBuilds, chosen)
+        return { binary: pinned ? pinned.path : chosen, build: pinned }
+      }
+      return { binary: root.activeSystemoneBinary,
+               build: Backends.findBuild(root.llamaBuilds, root.activeSystemoneBinary) }
+    }
+    if (chosen !== "") {
+      var found = Backends.findBuild(root.llamaBuilds, chosen)
+      return { binary: found ? found.path : chosen, build: found }
+    }
+    var auto = Backends.resolveBuild(root.llamaBuilds, "", tuning.cacheTypeK, tuning.cacheTypeV)
+    return { binary: auto ? auto.path : root.llamaBinary, build: auto }
+  }
+  function cmdForTuning(id, path, tuning) {
+    var resolved = root.buildForTuning(id, tuning)
+    var command = LlamaSwap.modelCommand(resolved.binary, {
+      modelPath: path,
+      tuning: tuning,
+      build: resolved.build,
+      visionDirs: id === "systemone" ? {} : root.visionDirs,
+      mtpDirs: id === "systemone" ? {} : root.mtpDirs,
+      catalogue: root.paramCatalogue,
+      systemone: id === "systemone",
+      customParams: tuning.customParams || []
+    })
+    if (id === root.backend && path === root.currentModel())
+      root.ignoredFlags = command.ignored
+    return command
+  }
+  function liveTuning(id) {
+    var t = Profiles.snapshot(root)
+    if (id === "systemone") t.systemoneCtx = String(root.systemoneCtx)
+    return t
+  }
+  function tuningFromEntry(id, entry) {
+    var parsed = LlamaSwap.parseCmd(entry.cmd)
+    var t = parsed.tuning
+    if (id === "systemone") {
+      t.systemoneCtx = String(t.contextSize || "0")
+      t.contextSize = "0"
+    }
+    t.extraEnv = root.envText(entry.env)
+    // A cmd has no separate parameter list: unknown flags come back through
+    // extraArgs, which is what the Tuning page edits.
+    t.customParams = []
+    if (parsed.binary !== "") {
+      var build = Backends.findBuild(root.llamaBuilds, parsed.binary)
+      t.llamaBuild = build ? build.path : ""
+    }
+    return t
+  }
 
-  // A user edit to any tuning value: stores it against the model this backend
-  // would launch, creating its profile if this is the first edit.
-  //
-  // With no model selected there is nothing to key on — edits are ignored
-  // until a model is picked.
+  // A user edit to any tuning value: writes this model's command. The write is
+  // debounced, then the model is unloaded and loaded again if it is the one
+  // the router has resident.
   function touchTuning() {
     var model = root.currentModel()
     if (!root.settingsLoaded || root.applyingTuning || model === "") return
-    root.profiles = Profiles.set(root.profiles, root.backend, model, Profiles.snapshot(root))
-    root.scheduleSettingsSave()
+    if (root.backend === "ollama") {
+      root.scheduleSettingsSave()
+      return
+    }
+    if (root.migrationNeeded && !root.migrationDone) return
+    root.configDirty = true
+    configSaveTimer.restart()
   }
 
   function applyTuning(values) {
@@ -1534,19 +1666,16 @@ Panel {
     try {
       for (var i = 0; i < Profiles.FIELDS.length; i++) {
         var f = Profiles.FIELDS[i]
+        // Page layout is not per model: the config holds commands, not which
+        // rows the user removed, so those stay in settings.
+        if (Profiles.STRUCTURED.indexOf(f) !== -1) continue
         root[f] = resolved[f]
       }
-      root.hiddenBuiltins = resolved.hiddenBuiltins
-      root.shownOptionals = resolved.shownOptionals
-      root.builtinStash = resolved.builtinStash
-      root.customParams = resolved.customParams
-      // A page that no longer has the sub-tab the previous model's parameters
-      // reached would otherwise render blank.
+      if (root.backend === "systemone")
+        root.systemoneCtx = String(resolved.systemoneCtx === undefined ? "0" : resolved.systemoneCtx)
+      root.customParams = resolved.customParams || []
       root.tuningPage = 0
       root.addParamOpen = false
-      // A profile can name a cache type this binary cannot honour -- it may
-      // have been tuned while the alternate binary was configured, or copied
-      // from another machine.
       root.sanitizeSettings()
     } finally {
       root.applyingTuning = false
@@ -1558,9 +1687,21 @@ Panel {
   function applyTuningForSelection() {
     if (!root.settingsLoaded || root.applyingTuning) return
     var model = root.currentModel()
-    var profile = Profiles.get(root.profiles, root.backend, model)
-    root.applyTuning(profile !== null ? profile : Profiles.resolve(null))
-    // A profile written before arguments were split still carries a line.
+    if (root.backend === "ollama") {
+      // ollama tuning is still flat in settings; keep it across a category
+      // switch rather than replacing it with the router's tuning.
+      if (root.ollamaTuning !== null) root.applyTuning(root.ollamaTuning)
+      return
+    }
+    if (model === "") {
+      root.applyTuning(Profiles.resolve(null))
+      return
+    }
+    // Before the config exists there is nothing to read: an upgrade keeps the
+    // flat tuning it loaded until the migration writes the real commands.
+    if (root.configTextFor(root.backend).trim() === "" && root.oldSettings !== null) return
+    var entry = root.managedEntryFor(root.backend, model)
+    root.applyTuning(entry ? root.tuningFromEntry(root.backend, entry) : LlamaSwap.defaults())
     root.splitPastedArgs()
     root.autoSpecType(model)
   }
@@ -1577,13 +1718,152 @@ Panel {
     root.specType = "draft-mtp"
   }
 
-  // Drops this model's profile and goes back to the neutral defaults.
-  // The next edit starts a fresh profile from them.
+  // Drops this model's tuning and goes back to the neutral defaults.
   function clearProfile() {
     if (!root.hasProfile) return
-    root.profiles = Profiles.remove(root.profiles, root.backend, root.launchModel)
-    root.applyTuning(Profiles.resolve(null))
-    root.scheduleSettingsSave()
+    var id = root.backend
+    var model = root.launchModel
+    var text = root.configTextFor(id)
+    var entry = root.managedEntryFor(id, model)
+    var tuning = LlamaSwap.defaults()
+    if (id === "systemone") tuning.systemoneCtx = "0"
+    var command = root.cmdForTuning(id, model, tuning)
+    var written = LlamaSwap.setManagedModel(text, {
+      path: model, id: entry ? entry.id : LlamaSwap.modelId(model, {}),
+      cmd: command.cmd, env: command.env
+    })
+    text = LlamaSwap.setPreload(written.text, [written.id])
+    root.setConfigText(id, text)
+    root.applyTuning(tuning)
+    root.reloadLoadedModel()
+  }
+
+  // Models this router should carry. The main router takes the whole scan so
+  // the picker can load any of them; System One takes only its own directory
+  // (or its one picked decision model), never the chat store.
+  function scanPathsFor(id) {
+    var out = []
+    function add(path) {
+      var p = String(path || "")
+      if (p === "" || out.indexOf(p) !== -1) return
+      if (!/\.gguf$/i.test(p)) return
+      out.push(p)
+    }
+    if (id === "llamacpp") {
+      for (var i = 0; i < root.modelOptions.length; i++) add(root.modelOptions[i].value)
+      add(root.selectedModel)
+    } else {
+      if (root.configuredSystemoneModelsDir !== "") {
+        for (var j = 0; j < root.systemoneModelOptions.length; j++) add(root.systemoneModelOptions[j].value)
+      }
+      add(root.systemoneModel)
+    }
+    return out
+  }
+  function preloadPathFor(id) {
+    return String(id === "systemone" ? root.systemoneModel : root.selectedModel)
+  }
+
+  // The config with every model this router should serve and the selection in
+  // the startup preload list. Existing managed commands are left exactly as
+  // they are; only missing models are added.
+  function ensureConfig(id) {
+    if (id !== "llamacpp" && id !== "systemone") return ""
+    var existing = root.configTextFor(id)
+    var paths = root.scanPathsFor(id)
+    var preload = root.preloadPathFor(id)
+    var text = existing
+    var used = {}
+    var additions = []
+
+    if (text.trim() === "") {
+      text = LlamaSwap.createConfig({ startPort: root.serviceStartPort(id) })
+    } else {
+      var parsed = LlamaSwap.parseConfig(text)
+      for (var p = 0; p < parsed.models.length; p++) used[parsed.models[p].id] = true
+    }
+
+    for (var i = 0; i < paths.length; i++) {
+      var path = paths[i]
+      if (root.managedInText(text, path) !== null) continue
+      if (root.foreignInText(text, path) !== null) continue
+      var tuning = LlamaSwap.defaults()
+      if (id === "systemone") tuning.systemoneCtx = "0"
+      var command = root.cmdForTuning(id, path, tuning)
+      additions.push({
+        path: path,
+        id: LlamaSwap.modelId(path, used),
+        cmd: command.cmd,
+        env: command.env
+      })
+      used[additions[additions.length - 1].id] = true
+    }
+
+    if (additions.length > 0) {
+      // On a fresh file build the whole list at once so the blank lines land
+      // the same way createConfig writes them.
+      if (existing.trim() === "") {
+        text = LlamaSwap.createConfig({
+          startPort: root.serviceStartPort(id),
+          models: additions,
+          preload: []
+        })
+      } else {
+        for (var a = 0; a < additions.length; a++)
+          text = LlamaSwap.setManagedModel(text, additions[a]).text
+      }
+    }
+
+    var selected = root.managedInText(text, preload)
+    if (selected !== null) text = LlamaSwap.setPreload(text, [selected.id])
+    if (text !== existing) root.setConfigText(id, text)
+    return text
+  }
+
+  // Writes the live tuning as this model's command, then queues a reload if
+  // the router currently has that model resident.
+  function flushConfigTuning() {
+    if (!root.configDirty) return
+    root.configDirty = false
+    var id = root.backend
+    if (id === "ollama" || !root.settingsLoaded) return
+    var model = root.currentModel()
+    if (model === "") return
+    var text = root.ensureConfig(id)
+    if (root.foreignEntryFor(id, model) !== null) {
+      root.lastError = "This model's command is hand-written in " + root.serviceConfigPath(id) +
+        "; edit it there instead."
+      return
+    }
+    var entry = root.managedEntryFor(id, model)
+    var tuning = root.liveTuning(id)
+    var command = root.cmdForTuning(id, model, tuning)
+    var written = LlamaSwap.setManagedModel(text, {
+      path: model,
+      id: entry ? entry.id : LlamaSwap.modelId(model, {}),
+      cmd: command.cmd,
+      env: command.env
+    })
+    text = LlamaSwap.setPreload(written.text, [written.id])
+    root.setConfigText(id, text)
+    if (root.running && root.runningModel === model) configReloadTimer.restart()
+  }
+
+  // Unloads and loads the resident model so llama-swap re-reads its command.
+  // The unit is deliberately not restarted: other models and the router stay.
+  function reloadLoadedModel() {
+    if (root.backend === "ollama" || root.loadedModelId === "" || !root.running) return
+    var id = root.loadedModelId
+    root.starting = true
+    root.startingElapsed = 0
+    startingTimer.restart()
+    reloadProc.command = ["bash", "-lc",
+      "curl -s -m 10 -X POST " + root.shellQuote(LlamaSwap.unloadUrl(root.host, root.port, id)) +
+      " >/dev/null 2>&1; " +
+      "curl -s -m 1800 " + root.shellQuote(LlamaSwap.loadUrl(root.host, root.port, id)) +
+      " >/dev/null 2>&1"]
+    reloadProc.running = false
+    reloadProc.running = true
   }
 
 
@@ -1594,6 +1874,36 @@ Panel {
   readonly property string settingsDir: expandPath("~/.local/state/omarchy/io.github.syjohnm.local-ai-server/")
   readonly property string settingsPath: settingsDir + "settings.json"
   property bool settingsLoaded: false
+
+  // llama-swap owns the model command lines. The two routers get one file
+  // each so their child-port ranges never collide; ollama keeps no file.
+  readonly property string mainConfigPath: settingsDir + "config.yaml"
+  readonly property string systemoneConfigPath: settingsDir + "systemone.yaml"
+  readonly property string migrationReportPath: settingsDir + "migration-report.txt"
+  readonly property string unitDir: expandPath("~/.config/systemd/user/")
+  function serviceUnit(id) {
+    return id === "ollama" ? Backends.unitName(root.moduleName, "ollama")
+         : id === "systemone" ? Backends.unitName(root.moduleName, "systemone")
+         : Backends.unitName(root.moduleName, "llamacpp")
+  }
+  function serviceUnitPath(id) { return root.unitDir + root.serviceUnit(id) + ".service" }
+  function serviceConfigPath(id) {
+    return id === "systemone" ? root.systemoneConfigPath
+         : id === "llamacpp" ? root.mainConfigPath : ""
+  }
+  function serviceStartPort(id) { return id === "systemone" ? 5900 : 5800 }
+  // id -> true. A service with this on is enabled in systemd, so it comes back
+  // at login even while the shell is not running.
+  property var startOnLogin: ({})
+  function loginOn(id) { return root.startOnLogin[id] === true }
+
+  // Bumped whenever a config file is read or written, so bindings that inspect
+  // its text (hasProfile, the tuning page) re-evaluate.
+  property int configRevision: 0
+  property var oldSettings: null
+  property bool migrationNeeded: false
+  property bool migrationDone: false
+  property bool showingMigration: false
 
   readonly property string slotSaveDir: settingsDir + "slots/"
 
@@ -1660,8 +1970,13 @@ Panel {
       if (typeof parsed.extraEnv === "string") root.extraEnv = parsed.extraEnv
       if (typeof parsed.llamaBuild === "string") root.llamaBuild = parsed.llamaBuild
       if (typeof parsed.keepAlive === "string") root.keepAlive = parsed.keepAlive
-      if (typeof parsed.kvPersistence === "boolean") root.kvPersistence = parsed.kvPersistence
       if (typeof parsed.systemoneCtx === "string") root.systemoneCtx = parsed.systemoneCtx
+      if (parsed.startOnLogin && typeof parsed.startOnLogin === "object") {
+        var login = {}
+        for (var li in parsed.startOnLogin)
+          if (Backends.ids().indexOf(li) !== -1 && parsed.startOnLogin[li] === true) login[li] = true
+        root.startOnLogin = login
+      }
 
       // ids this build knows: a row renamed or dropped between versions would
       // otherwise stay hidden with nothing able to bring it back.
@@ -1704,24 +2019,44 @@ Panel {
         root.customParams = restored
       }
     }
-    // Profiles are read after the flat values, which double as the migration
-    // source: a settings file written before profiles existed carries one
-    // tuning set, and it belongs to the model that file names.
-    var restoredProfiles = Profiles.fromSettings(parsed, Profiles.snapshot(root))
-    root.profiles = restoredProfiles.profiles
-    // Before the Model page could pick a System One model, that backend's
-    // profile was keyed by the chat selection. Move it onto the decision model.
-    root.profiles = Profiles.rekey(root.profiles, "systemone", root.selectedModel, root.systemoneModel)
-
+    // The old object is kept for the one-shot migration: it carries the flat
+    // tuning and the per-model profiles the router configs are built from.
+    root.oldSettings = parsed
+    root.migrationNeeded = Migration.needsMigration(parsed)
     root.sanitizeSettings()
     root.settingsLoaded = true
-    // The flat values on disk are the ones last live, which for a model with a
-    // profile is that profile -- but not for a file hand-edited to name a
-    // different model, so the selection has the last word.
+    // Configs and units need the detected binaries and builds; afterReady
+    // waits for those probes rather than writing paths that are not there.
+    root.afterReady()
+  }
+
+  readonly property bool readyForConfig:
+    root.settingsLoaded && root.capabilitiesProbed && root.buildsProbed
+  property bool servicesReady: false
+  onReadyForConfigChanged: if (root.readyForConfig) root.afterReady()
+
+  function afterReady() {
+    if (!root.readyForConfig) return
+    if (root.servicesReady) {
+      root.applyTuningForSelection()
+      return
+    }
+    root.servicesReady = true
+    mainConfigFile.reload()
+    systemoneConfigFile.reload()
+    if (root.migrationNeeded && !root.migrationDone) {
+      root.prepareMigration()
+      return
+    }
+    root.ensureConfig("llamacpp")
+    root.ensureConfig("systemone")
+    root.writeUnit("llamacpp")
+    root.writeUnit("systemone")
+    root.writeUnit("ollama")
     root.applyTuningForSelection()
     root.ensureInstalledBackend()
     if (root.configuredSystemoneModelsDir !== "") root.refreshSystemoneModels()
-    root.adoptRunningServer()
+    servicePollTimer.restart()
   }
 
   // Drops values the current configuration cannot actually honour.
@@ -1754,8 +2089,10 @@ Panel {
   }
 
   function flushSettings() {
+    if (root.migrationNeeded && !root.migrationDone) return
     settingsFile.setText(JSON.stringify({
-      version: 3,
+      version: 4,
+      configVersion: Migration.CONFIG_VERSION,
       setupDone: root.setupDone,
       backend: root.backend,
       host: root.host, backendPorts: root.backendPorts,
@@ -1773,15 +2110,10 @@ Panel {
       systemoneModel: root.systemoneModel,
       extraArgs: root.extraArgs, keepAlive: root.keepAlive, extraEnv: root.extraEnv,
       llamaBuild: root.llamaBuild,
-      kvPersistence: root.kvPersistence,
       systemoneCtx: root.systemoneCtx,
+      startOnLogin: root.startOnLogin,
       hiddenBuiltins: root.hiddenBuiltins, shownOptionals: root.shownOptionals,
-      customParams: root.customParams,
-
-      // The tuning above is also what the selected model's profile holds; it
-      // is written flat as well so a build without profiles still reads the
-      // values the user last had live.
-      profiles: root.profiles
+      customParams: root.customParams
     }, null, 2) + "\n")
   }
 
@@ -1832,27 +2164,19 @@ Panel {
   }
 
   onBackendChanged: {
-    root.selectedModel = ""
-    root.modelOptions = []
-    // Warnings are per launch line; do not carry the old backend's flags into
-    // the new one's tuning page.
+    root.lastBackend = root.backend
+    // A model path means nothing to ollama and a tag means nothing to
+    // llama.cpp, so each category keeps its own selection.
+    if (root.backend === "ollama") root.selectedModel = ""
     root.ignoredFlags = []
-    // Parameters are backend-specific: llama.cpp flags mean nothing to ollama
-    // and vice versa, so both the catalogue and the user's additions reset --
-    // as does the rest of the tuning, which comes back from the backend's
-    // neutral defaults rather than carrying the other backend's numbers across.
-    root.applyTuning(Profiles.resolve(null))
     root.paramCatalogue = []
-    // An open picker would sit there listing the previous backend's flags
-    // until the new catalogue arrived.
     root.addParamOpen = false
     root.scheduleSettingsSave()
     root.refreshModels()
     root.refreshCatalogue()
-    // The new backend has its own model's profile to restore; for llama.cpp
-    // the selection is empty here, so this is still the neutral default.
     root.applyTuningForSelection()
-    root.adoptRunningServer()
+    root.refreshServiceStatus()
+    if (root.servicesReady) servicePollTimer.restart()
   }
 
   // The catalogue describes one specific binary, so it is rebuilt whenever the
@@ -1902,13 +2226,17 @@ Panel {
   onMmprojOffloadChanged: root.touchTuning()
   onSelectedModelChanged: {
     // System One retunes from its own selection, not from the chat model's.
-    if (root.backend !== "systemone") root.applyTuningForSelection()
+    if (root.backend !== "systemone") {
+      root.applyTuningForSelection()
+      root.selectPreload()
+    }
     root.scheduleSettingsSave()
     if (root.selectedModel !== "") root.revealModel(root.selectedModel)
   }
   onSystemoneModelChanged: {
     if (root.backend === "systemone") {
       root.applyTuningForSelection()
+      root.selectPreload()
       if (root.systemoneModel !== "") root.revealModel(root.systemoneModel)
     }
     root.scheduleSettingsSave()
@@ -1924,7 +2252,7 @@ Panel {
   onParamCatalogueChanged: root.splitPastedArgs()
   onKeepAliveChanged: root.touchTuning()
   onExtraEnvChanged: root.touchTuning()
-  onKvPersistenceChanged: root.scheduleSettingsSave()
+  onStartOnLoginChanged: root.scheduleSettingsSave()
 
   Process {
     id: ensureSettingsDirProc
@@ -1949,6 +2277,48 @@ Panel {
     interval: 200
     repeat: false
     onTriggered: root.flushSettings()
+  }
+
+  // The two router configs. watchChanges is on so a hand edit shows up in the
+  // Tuning page; the plugin itself only ever rewrites marked blocks.
+  FileView {
+    id: mainConfigFile
+    path: root.mainConfigPath
+    watchChanges: true
+    atomicWrites: true
+    printErrors: false
+    onFileChanged: root.configRevision++
+  }
+
+  FileView {
+    id: systemoneConfigFile
+    path: root.systemoneConfigPath
+    watchChanges: true
+    atomicWrites: true
+    printErrors: false
+    onFileChanged: root.configRevision++
+  }
+
+  // Units are generated, not edited: writing the same text again is harmless.
+  FileView { id: unitMainFile; path: root.serviceUnitPath("llamacpp"); atomicWrites: true; printErrors: false }
+  FileView { id: unitSys1File; path: root.serviceUnitPath("systemone"); atomicWrites: true; printErrors: false }
+  FileView { id: unitOllamaFile; path: root.serviceUnitPath("ollama"); atomicWrites: true; printErrors: false }
+  FileView { id: migrationReportFile; path: root.migrationReportPath; atomicWrites: true; printErrors: false }
+
+  // Tuning edits are debounced into the config; the router needs a moment to
+  // notice the watched file before the model is reloaded.
+  Timer {
+    id: configSaveTimer
+    interval: 600
+    repeat: false
+    onTriggered: root.flushConfigTuning()
+  }
+
+  Timer {
+    id: configReloadTimer
+    interval: 1200
+    repeat: false
+    onTriggered: root.reloadLoadedModel()
   }
 
   Component.onCompleted: {
@@ -2060,13 +2430,14 @@ Panel {
   IpcHandler {
     target: "local-ai-server"
 
-    function start(): void { if (!root.running && !root.starting && !root.stopping) root.startServer() }
-    function stop(): void { if ((root.running || root.starting) && !root.stopping) root.stopServer() }
-    // Applies a changed model or tuning the same way the Restart button does;
-    // called again while it waits for running requests, it forces (Force).
+    function start(): void { if (!root.running && !root.starting && !root.stopping) root.startService(root.backend) }
+    function stop(): void { if ((root.running || root.starting) && !root.stopping) root.stopService(root.backend) }
+    // Reloads the resident model so its config is re-read; starts the service
+    // when it is not up.
     function restart(): void {
-      if (root.switching) root.forceSwitch()
-      else if (root.configChanged) root.switchServer()
+      if (!root.running) root.startService(root.backend)
+      else if (root.loadedModelId !== "") root.reloadLoadedModel()
+      else root.loadSelectedModel()
     }
     function model(path: string): void { root.selectActiveModel(path) }
     function page(name: string): void {
@@ -2079,11 +2450,18 @@ Panel {
     }
     function settings(): void { root.openSettings(); root.open() }
     function setup(): void { root.startSetup(); root.open() }
+    function migrate(dryRun: bool): string {
+      root.prepareMigration()
+      if (dryRun) return root.migrationReport
+      root.runMigration(false)
+      return "Migration started: " + (root.migrationReport !== "" ? root.migrationReport : "running")
+    }
     function status(): string {
       return JSON.stringify({
         running: root.running, starting: root.starting, stopping: root.stopping,
-        restarting: root.switching, changesPending: root.configChanged,
-        backend: root.backend, model: root.runningModel, selected: root.launchModel,
+        online: root.loginOn(root.backend),
+        backend: root.backend, model: root.runningModel, loaded: root.loadedModelId,
+        selected: root.launchModel,
         build: root.backend === "llamacpp" ? Backends.buildLabel(root.resolvedBuild) : "",
         endpoint: root.host + ":" + root.port,
         pp: root.ppTokensPerSec, tg: root.tokensPerSec
@@ -2107,6 +2485,9 @@ Panel {
       "for b in " + Backends.ollamaBinaryCandidates(Quickshell.env("HOME")).map(root.shellQuote).join(" ") + "; do " +
       "  [ -x \"$b\" ] && { echo \"ollama=$b\"; break; }; done; " +
       "command -v ollama >/dev/null 2>&1 && echo \"ollamapath=$(command -v ollama)\"; " +
+      "for b in ~/.local/bin/llama-swap /usr/local/bin/llama-swap /usr/bin/llama-swap /opt/llama-swap/llama-swap; do " +
+      "  [ -x \"$b\" ] && { echo \"swappath=$b\"; break; }; done; " +
+      "command -v llama-swap >/dev/null 2>&1 && echo \"swapcmd=$(command -v llama-swap)\"; " +
       "for d in " + Backends.ggufSearchDirs(Quickshell.env("HOME")).map(root.shellQuote).join(" ") + "; do " +
       "  [ -d \"$d\" ] && echo \"dir=$d\"; done"]
     stdout: StdioCollector {
@@ -2125,6 +2506,8 @@ Panel {
           else if (key === "llamapath" && root.detectedLlamaBinary === "") root.detectedLlamaBinary = value
           else if (key === "ollama" && root.detectedOllamaBinary === "") root.detectedOllamaBinary = value
           else if (key === "ollamapath" && root.detectedOllamaBinary === "") root.detectedOllamaBinary = value
+          else if (key === "swappath" && root.detectedLlamaSwapBinary === "") root.detectedLlamaSwapBinary = value
+          else if (key === "swapcmd" && root.detectedLlamaSwapBinary === "") root.detectedLlamaSwapBinary = value
           else if (key === "dir") dirs.push(value)
         }
         root.detectedModelDirs = dirs
@@ -2684,95 +3067,294 @@ Panel {
     }
   }
 
-  // ---- Server lifecycle ----
+  // ---- Service lifecycle ----
+  //
+  // llama-swap owns the llama-server children; this panel owns the router's
+  // systemd user unit. Start/stop is `systemctl --user`, "start on login" is
+  // `enable`, and what is loaded comes from the router's /running. ollama keeps
+  // its own unit and API; it never goes through llama-swap.
+
+  property var unitStates: ({})
+  property var migrationPlan: null
+  property string migrationReport: ""
+  property bool migrationRunning: false
+  property bool migrationStartFresh: false
+  property string migrationError: ""
+  property string migrationBackupDir: ""
+
+  function serviceIsRouter(id) { return id === "llamacpp" || id === "systemone" }
+  function servicePort(id) {
+    var stored = root.backendPorts[id]
+    return String(stored !== undefined && String(stored).trim() !== "" ? stored : Backends.get(id).defaultPort)
+  }
+  function serviceHealthUrl(id) { return Backends.healthUrl(id, root.host, root.servicePort(id)) }
+  function serviceUnitState(id) { return String(root.unitStates[id] || "") }
+
+  // ---- Units ----
+  //
+  // A persistent unit, not systemd-run: only a real unit can be enabled, and
+  // "start on login" is what keeps the router independent of the shell.
+  function ollamaUnitText() {
+    var launch = root.ollamaLaunchSpec()
+    var env = root.ollamaLaunchEnv(launch)
+    var lines = [
+      "[Unit]",
+      "Description=Local AI Server (ollama)",
+      "After=network.target",
+      "",
+      "[Service]",
+      "Type=simple",
+      "ExecStart=" + launch.argv.map(LlamaSwap.systemdQuote).join(" "),
+      "Restart=on-failure",
+      "RestartSec=5"
+    ]
+    var keys = Object.keys(env).sort()
+    for (var i = 0; i < keys.length; i++)
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(keys[i]))
+        lines.push("Environment=" + LlamaSwap.systemdQuote(keys[i] + "=" + env[keys[i]]))
+    lines.push("", "[Install]", "WantedBy=default.target")
+    return lines.join("\n") + "\n"
+  }
+
+  function unitViewFor(id) {
+    return id === "systemone" ? unitSys1File : id === "ollama" ? unitOllamaFile : unitMainFile
+  }
+
+  function writeUnit(id) {
+    var view = root.unitViewFor(id)
+    if (!view) return
+    if (id === "ollama") {
+      view.setText(root.ollamaUnitText())
+      return
+    }
+    view.setText(LlamaSwap.unitFile({
+      binary: root.llamaSwapBinary !== "" ? root.llamaSwapBinary : "llama-swap",
+      configPath: root.serviceConfigPath(id),
+      host: root.host,
+      port: root.servicePort(id),
+      unitName: root.serviceUnit(id),
+      label: Backends.get(id).label,
+      workDir: root.settingsDir
+    }))
+  }
+
+  function unitCommand(id, action) {
+    var unit = root.serviceUnit(id)
+    if (action === "start")
+      return ["bash", "-lc", "systemctl --user daemon-reload; " +
+        "systemctl --user reset-failed " + root.shellQuote(unit) + " 2>/dev/null; " +
+        "systemctl --user start " + root.shellQuote(unit)]
+    if (action === "stop")
+      return ["systemctl", "--user", "stop", unit]
+    if (action === "enable")
+      return ["systemctl", "--user", "enable", unit]
+    return ["systemctl", "--user", "disable", unit]
+  }
+
+  function setStartOnLogin(id, on) {
+    var map = {}
+    for (var key in root.startOnLogin) map[key] = root.startOnLogin[key]
+    map[id] = !!on
+    root.startOnLogin = map
+    root.writeUnit(id)
+    serviceCommandProc.action = on ? "enable" : "disable"
+    serviceCommandProc.serviceId = id
+    serviceCommandProc.command = root.unitCommand(id, serviceCommandProc.action)
+    serviceCommandProc.running = false
+    serviceCommandProc.running = true
+  }
+
+  // ---- Start / stop ----
 
   function toggleServer() {
     if (root.stopping) return
-    if (root.running || root.starting) stopServer()
-    else startServer()
+    if (root.running || root.starting) root.stopService(root.backend)
+    else root.startService(root.backend)
+  }
+  function stopServer() { root.stopService(root.backend) }
+
+  function startService(id) {
+    if (root.stopping || root.starting) return
+    if (!root.readyForConfig) {
+      root.lastError = "Still detecting llama.cpp builds — try again in a moment."
+      return
+    }
+    if (root.serviceIsRouter(id)) {
+      if (root.llamaSwapBinary === "") {
+        root.lastError = "llama-swap not found — install llama-swap v262 or newer and set its path in Settings."
+        return
+      }
+      root.ensureConfig(id)
+      var wanted = root.preloadPathFor(id)
+      if (wanted !== "" && root.managedEntryFor(id, wanted) === null) {
+        root.lastError = "The selected model is not in " + root.serviceConfigPath(id) +
+          " — pick it again or add it to the config."
+        return
+      }
+    } else if (root.ollamaBinary === "") {
+      root.lastError = "ollama binary not found — set it in plugin settings"
+      return
+    }
+    root.lastError = ""
+    root.expectedStop = false
+    root.adopted = false
+    root.ownsUnit = true
+    if (id === root.backend) {
+      root.starting = true
+      root.startingElapsed = 0
+      startingTimer.restart()
+    }
+    root.writeUnit(id)
+    serviceCommandProc.action = "start"
+    serviceCommandProc.serviceId = id
+    serviceCommandProc.command = root.unitCommand(id, "start")
+    serviceCommandProc.running = false
+    serviceCommandProc.running = true
+    servicePollTimer.restart()
   }
 
-  // Best-effort cleanup of a server this widget started but lost track of.
-  // Matched on the per-instance marker, so it never touches an unrelated
-  // server or another widget's.
-  function killOrphans() {
-    if (root.hasSystemdRun && root.ownsUnit)
-      Quickshell.execDetached(["systemctl", "--user", "stop", root.unitName])
-    else
-      Quickshell.execDetached(["pkill", "-f", root.procMarker])
-  }
-
-  // A detached server outlives this widget on purpose, so a fresh instance
-  // must reclaim it rather than showing a stale "Stopped". Health is checked
-  // before claiming, so a dead marker process never reads as running.
-  function adoptRunningServer() {
-    if (root.running || root.starting) return
-    if (!root.host || !root.port) return
-    adoptHealthProc.command = [
-      "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "1",
-      Backends.healthUrl(root.backend, root.host, root.port)
-    ]
-    adoptHealthProc.running = false
-    adoptHealthProc.running = true
+  function stopService(id) {
+    if (root.stopping) return
+    if (!root.running && !root.starting) return
+    if (!root.canStop && id === root.backend) {
+      root.lastError = "This server was not started by this widget, so it cannot be stopped from here."
+      return
+    }
+    root.expectedStop = true
+    root.stopping = true
+    serviceCommandProc.action = "stop"
+    serviceCommandProc.serviceId = id
+    serviceCommandProc.command = root.unitCommand(id, "stop")
+    serviceCommandProc.running = false
+    serviceCommandProc.running = true
   }
 
   Process {
-    id: adoptHealthProc
+    id: serviceCommandProc
+    property string action: ""
+    property string serviceId: ""
+    onExited: function(exitCode) {
+      var id = serviceCommandProc.serviceId
+      if (serviceCommandProc.action === "start") {
+        if (exitCode !== 0) {
+          if (id === root.backend) {
+            root.starting = false
+            startingTimer.stop()
+            root.lastError = "Could not start " + Backends.get(id).label + " (systemctl code " + exitCode + ")"
+          }
+        }
+        if (id === root.backend) servicePollTimer.restart()
+        return
+      }
+      if (serviceCommandProc.action === "stop") {
+        root.expectedStop = false
+        root.stopping = false
+        if (id !== root.backend) {
+          root.setServiceState(id, { running: false, starting: false, stopping: false })
+          return
+        }
+        root.running = false
+        root.starting = false
+        root.resetMetrics()
+        root.stopMetrics()
+        root.runHook("stopped")
+        return
+      }
+      // enable / disable: a failure leaves the old login setting visibly wrong,
+      // so say so rather than silently disagreeing with systemd.
+      if (exitCode !== 0)
+        root.lastError = "Could not " + serviceCommandProc.action + " " + root.serviceUnit(id) + "."
+    }
+  }
+
+  // One poll for the three units plus the active service's health. is-active
+  // answers for a unit that is starting as well, which is what keeps the panel
+  // from calling a slow model load a stop.
+  Timer {
+    id: servicePollTimer
+    interval: 1500
+    repeat: true
+    onTriggered: if (!serviceStatusProc.running) serviceStatusProc.running = true
+  }
+
+  Process {
+    id: serviceStatusProc
+    command: ["bash", "-lc",
+      "systemctl --user is-active " + root.shellQuote(root.serviceUnit("llamacpp")) + " 2>/dev/null; " +
+      "systemctl --user is-active " + root.shellQuote(root.serviceUnit("systemone")) + " 2>/dev/null; " +
+      "systemctl --user is-active " + root.shellQuote(root.serviceUnit("ollama")) + " 2>/dev/null; " +
+      "curl -s -o /dev/null -w '%{http_code}' -m 1 " + root.shellQuote(root.serviceHealthUrl(root.backend))]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (root.running || root.starting) return
-        if (text.trim() !== "200") return
-        root.running = true
-        root.adopted = true
-        root.healthUrl = Backends.healthUrl(root.backend, root.host, root.port)
-        root.runHook("started")
-        // Determine whether this is our own transient unit (stoppable) or an
-        // externally managed server such as a root-owned ollama.service.
-        //
-        // Metrics deliberately wait for the answer: which journal to follow
-        // depends on it, and starting first meant tailing the system unit --
-        // inactive whenever the server is one we own -- so throughput silently
-        // never appeared.
-        // systemd is not always available: the fallback launch uses setsid,
-        // and systemctl would call that server external, disabling Stop.
-        // The per-instance marker is the same one killOrphans uses.
-        unitOwnerProc.command = root.hasSystemdRun
-          ? ["systemctl", "--user", "is-active", root.unitName]
-          : ["bash", "-c", "pgrep -f -- \"^$1 \" >/dev/null && echo active || echo inactive",
-             "_", root.procMarker]
-        unitOwnerProc.running = false
-        unitOwnerProc.running = true
+        var lines = String(text || "").split("\n")
+        var states = {}
+        var i = 0
+        var ids = ["llamacpp", "systemone", "ollama"]
+        for (var n = 0; n < ids.length; n++) {
+          while (i < lines.length && String(lines[i]).trim() === "") i++
+          states[ids[n]] = i < lines.length ? String(lines[i]).trim() : ""
+          i++
+        }
+        while (i < lines.length && String(lines[i]).trim() === "") i++
+        var health = i < lines.length ? String(lines[i]).trim() : ""
+        root.unitStates = states
+        root.applyActiveServiceState(health === "200", states[root.backend] || "")
       }
     }
   }
 
+  // ollama is the one service a distribution may already run as a root system
+  // unit. Taking it over means stopping that unit (polkit asks) and starting
+  // ours; nothing here touches a system unit for the two routers.
+  function takeOver() {
+    if (root.takingOver || !root.backendSpec.systemUnit) return
+    root.takingOver = true
+    root.lastError = ""
+    root.stopMetrics()
+    takeoverProc.command = Backends.takeoverStopCommand(root.backendSpec.systemUnit)
+    takeoverProc.running = false
+    takeoverProc.running = true
+  }
+
   Process {
-    id: unitOwnerProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.ownsUnit = text.trim() === "active"
-        // ollama has no argv to read; assume the unit was launched from the
-        // settings on disk, which is what the panel just loaded.
-        if (root.ownsUnit && root.backend === "ollama") root.runningConfigHash = root.ollamaConfigHash()
-        // Not ours: find out whether the distribution's system unit is what
-        // is holding the port, and where it keeps its models.
-        if (!root.ownsUnit && root.backendSpec.systemUnit) root.probeSystemUnit()
-        if (root.ownsUnit) root.readRunningArgs()
-        // Ownership is now known, so the right journal can be followed.
-        if (root.running) root.startMetrics()
+    id: takeoverProc
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.takingOver = false
+        root.lastError = "Could not stop the system service (authentication declined)."
+        return
       }
+      root.running = false
+      root.adopted = false
+      root.systemUnitActive = false
+      portWaitProc.command = ["bash", "-lc",
+        "for i in $(seq 1 40); do " +
+        "  curl -s -o /dev/null -m 1 " + root.shellQuote(Backends.healthUrl("ollama", root.host, root.port)) +
+        " || exit 0; sleep 0.25; done; exit 1"]
+      portWaitProc.running = false
+      portWaitProc.running = true
+    }
+  }
+
+  Process {
+    id: portWaitProc
+    onExited: function(exitCode) {
+      root.takingOver = false
+      if (exitCode !== 0) {
+        root.lastError = "System service stopped but the port is still busy."
+        return
+      }
+      root.startService("ollama")
     }
   }
 
   function probeSystemUnit() {
     var unit = root.backendSpec.systemUnit
-    if (!unit) return
+    if (!unit || systemUnitProc.running) return
     systemUnitProc.command = ["bash", "-lc",
       "systemctl is-active " + root.shellQuote(unit) + " 2>/dev/null; " +
       "systemctl show " + root.shellQuote(unit) + " -p Environment --no-pager 2>/dev/null"]
-    systemUnitProc.running = false
     systemUnitProc.running = true
   }
 
@@ -2788,750 +3370,363 @@ Panel {
     }
   }
 
-  // Replaces an externally managed server with one this widget controls.
-  //
-  // The system unit runs as root, so stopping it raises a polkit prompt --
-  // that prompt is the user authorising the takeover, which is why this is a
-  // deliberate action rather than something Start does silently.
-  function takeOver() {
-    if (root.takingOver) return
-    var unit = root.backendSpec.systemUnit
-    if (!unit) return
-    root.takingOver = true
-    root.lastError = ""
-    root.stopMetrics()
-    takeoverProc.command = Backends.takeoverStopCommand(unit)
-    takeoverProc.running = false
-    takeoverProc.running = true
-  }
-
-  Process {
-    id: takeoverProc
-    onExited: function(exitCode) {
-      if (exitCode !== 0) {
-        // Authentication declined or unavailable: nothing was stopped, so the
-        // existing server is still there. Fall back to watching it.
-        root.takingOver = false
-        root.lastError = "Could not stop the system service (authentication declined)."
+  function applyActiveServiceState(healthy, unitState) {
+    if (healthy) {
+      var first = !root.running
+      root.adopted = unitState !== "active"
+      root.ownsUnit = unitState === "active"
+      if (root.adopted && root.backend === "ollama" && root.systemModelsDir === "")
+        root.probeSystemUnit()
+      root.running = true
+      root.startingElapsed = 0
+      root.lastError = ""
+      if (root.starting) {
+        root.starting = false
+        startingTimer.stop()
+      }
+      if (first) {
+        root.runHook("started")
         root.startMetrics()
-        return
       }
-      // The port does not free the instant systemctl returns; launching too
-      // early fails to bind. Wait for it to actually go quiet.
-      root.running = false
-      root.adopted = false
-      root.systemUnitActive = false
-      portWaitProc.command = ["bash", "-lc",
-        "for i in $(seq 1 40); do " +
-        "  curl -s -o /dev/null -m 1 " + root.shellQuote(Backends.healthUrl(root.backend, root.host, root.port)) +
-        " || exit 0; sleep 0.25; done; exit 1"]
-      portWaitProc.running = false
-      portWaitProc.running = true
+      if (root.serviceIsRouter(root.backend) && !root.loadedModelId && !runningPollProc.running)
+        runningPollTimer.restart()
+      return
+    }
+
+    if (unitState === "active" || unitState === "activating" || unitState === "reloading") {
+      if (!root.running) {
+        root.starting = true
+        if (!startingTimer.running) {
+          root.startingElapsed = 0
+          startingTimer.restart()
+        }
+      }
+      return
+    }
+
+    if (!root.running && !root.starting) return
+    if (root.stopping || root.expectedStop) return
+    var detail = root.lifecycleErrorLine()
+    root.lastError = (root.starting ? "Service failed to start" : "Service stopped") +
+      (unitState === "failed" ? " (crashed)" : "") + (detail ? ": " + detail : "")
+    root.running = false
+    root.starting = false
+    startingTimer.stop()
+    root.resetMetrics()
+    root.stopMetrics()
+    root.runHook("stopped")
+  }
+
+  function refreshServiceStatus() {
+    if (!root.servicesReady) return
+    if (!serviceStatusProc.running) serviceStatusProc.running = true
+  }
+
+  // ---- Loaded model ----
+
+  function modelPathForId(id, modelId) {
+    var parsed = LlamaSwap.parseConfig(root.configTextFor(id))
+    for (var i = 0; i < parsed.models.length; i++)
+      if (parsed.models[i].id === modelId)
+        return parsed.models[i].managedPath || parsed.models[i].modelPath
+    return ""
+  }
+
+  Timer {
+    id: runningPollTimer
+    interval: 1200
+    repeat: true
+    onTriggered: {
+      if (!root.running || !root.serviceIsRouter(root.backend) || runningPollProc.running) return
+      runningPollProc.command = ["curl", "-s", "-m", "2", LlamaSwap.runningUrl(root.host, root.port)]
+      runningPollProc.running = true
     }
   }
 
   Process {
-    id: portWaitProc
-    onExited: function(exitCode) {
-      root.takingOver = false
-      if (exitCode !== 0) {
-        root.lastError = "System service stopped but the port is still busy."
-        return
-      }
-      root.startServer()
+    id: runningPollProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleRunningResponse(text)
     }
   }
 
-  function startServer() {
-    if (root.backend !== "ollama" && !root.launchModel) {
-      root.lastError = "Pick a model first"
+  function handleRunningResponse(text) {
+    if (!root.serviceIsRouter(root.backend)) return
+    var list = LlamaSwap.parseRunning(text)
+    if (list.length === 0) {
+      if (root.loadedModelId !== "") {
+        root.loadedModelId = ""
+        root.runningModel = ""
+        root.loadedModelInfo = ""
+        root.starting = false
+        journalProc.running = false
+      }
       return
     }
-    if (root.activeBinary === "") {
-      root.lastError = root.backendSpec.label + " binary not found — set it in plugin settings"
-      return
+    var entry = list[0]
+    for (var i = 0; i < list.length; i++) if (list[i].state === "ready") { entry = list[i]; break }
+    var changed = root.loadedModelId !== entry.model
+    root.loadedModelId = entry.model
+    var path = root.modelPathForId(root.backend, entry.model)
+    if (path !== "") root.runningModel = path
+    root.loadedModelInfo = entry.model
+    if (entry.state === "ready" && root.starting) {
+      root.starting = false
+      root.startingElapsed = 0
+      startingTimer.stop()
     }
-    if (serverProc.running || root.stopping || startSweepProc.running) return
-    root.lastError = ""
-    // Count the pre-launch sweep as starting too: Stop pressed in this window
-    // must not be ignored while the sweep is still running.
+    if (changed || !journalProc.running) root.followModelLogs()
+  }
+
+  // Unloads then loads one model through the router, so its cmd is re-read.
+  // The unit is deliberately not restarted: other models and the router stay.
+  function reloadModel(id, previous) {
+    if (!root.serviceIsRouter(root.backend) || !root.running || id === "") return
     root.starting = true
-    root.expectedStop = false
-    // Sweep for a stale instance synchronously before launching. killOrphans
-    // is fire-and-forget, and the new process carries the same marker the
-    // sweep hunts for, so a late-arriving pkill could kill the process just
-    // started. Chaining through onExited guarantees the sweep finished first.
-    startSweepProc.command = root.hasSystemdRun
-      ? ["systemctl", "--user", "stop", root.unitName]
-      : ["pkill", "-f", root.procMarker]
-    startSweepProc.running = false
-    startSweepProc.running = true
+    root.startingElapsed = 0
+    startingTimer.restart()
+    var script = ""
+    if (previous !== undefined && previous !== "" && previous !== id)
+      script += "curl -s -m 10 -X POST " +
+        root.shellQuote(LlamaSwap.unloadUrl(root.host, root.port, previous)) + " >/dev/null 2>&1; "
+    script += "curl -s -m 10 -X POST " +
+      root.shellQuote(LlamaSwap.unloadUrl(root.host, root.port, id)) + " >/dev/null 2>&1; "
+    script += "curl -s -m 1800 " +
+      root.shellQuote(LlamaSwap.loadUrl(root.host, root.port, id)) + " >/dev/null 2>&1"
+    reloadProc.command = ["bash", "-lc", script]
+    reloadProc.running = false
+    reloadProc.running = true
+  }
+
+  function reloadLoadedModel() {
+    if (root.loadedModelId === "") return
+    root.reloadModel(root.loadedModelId)
+  }
+
+  function loadSelectedModel() {
+    if (!root.running || !root.serviceIsRouter(root.backend) || root.migrationNeeded) return
+    var path = root.preloadPathFor(root.backend)
+    if (path === "") return
+    var entry = root.managedEntryFor(root.backend, path)
+    if (entry === null) return
+    if (entry.id === root.loadedModelId && !root.starting) return
+    root.reloadModel(entry.id, root.loadedModelId)
+  }
+
+  // Picking a model while the router runs loads it. Debounced: browsing the
+  // picker must not load every model it passes over.
+  Timer {
+    id: modelSelectTimer
+    interval: 1200
+    repeat: false
+    onTriggered: root.loadSelectedModel()
   }
 
   Process {
-    id: startSweepProc
-    onExited: {
-      // A stop that arrived during the sweep wins over the launch.
-      if (root.stopping || root.expectedStop) return
-      root.launchServerProcess()
+    id: reloadProc
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim() !== "") root.handleServerLine(text) }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.starting = false
+        startingTimer.stop()
+        root.lastError = "Could not load " + (root.loadedModelId || "the selected model") +
+          " (router returned an error; see the log)."
+      }
     }
   }
 
-  // A flag this build does not describe is left out of argv but remembered, so
-  // the tuning page can say it was ignored.
-  property var ignoredFlags: []
-  // Which flags a built-in control emitted for this launch. The custom-parameter
-  // backstop uses this map rather than searching argv, where a *value* could
-  // equal a flag name and cause a false skip.
-  property var emittedFlags: ({})
-
-  function emitFlag(build, flag, value, args) {
-    if (Backends.supportsFlag(build, flag)) {
-      // Boolean flags carry no value; an empty argv entry is an error to
-      // llama-server, not "use the default".
-      args.push(flag)
-      if (String(value) !== "") args.push(String(value))
-      root.emittedFlags[flag] = true
-      return true
+  function selectPreload() {
+    var id = root.backend
+    if (!root.serviceIsRouter(id) || !root.readyForConfig || root.migrationNeeded) return
+    var text = root.ensureConfig(id)
+    var path = root.preloadPathFor(id)
+    var entry = root.managedInText(text, path)
+    if (entry !== null) {
+      var next = LlamaSwap.setPreload(text, [entry.id])
+      if (next !== text) root.setConfigText(id, next)
     }
-    if (ignoredFlags.indexOf(flag) === -1) ignoredFlags.push(flag)
-    return false
+    if (root.running) modelSelectTimer.restart()
   }
 
-  // Builds the llama-server argv. Kept as a function returning the array so
-  // the composition is testable by eye and the launch path stays one line.
-  function buildLlamaArgs() {
-    var ngl = parseInt(root.gpuLayers, 10)
-    ignoredFlags = []
-    root.emittedFlags = {}
-    var currentBuild = root.resolvedBuild
+  // ---- Config files ----
 
-    if (!isFinite(ngl)) ngl = 0
-    // -1 is llama.cpp's "fit as many layers as VRAM allows" sentinel, not a
-    // layer count, so it is passed through unclamped.
-    if (ngl !== -1) ngl = Math.max(0, Math.min(999, ngl))
-
-    var args = [
-      root.launchLlamaBinary,
-      "--model", root.selectedModel,
-      "--host", root.host,
-      "--port", String(root.port),
-      "--slot-save-path", expandPath(root.slotSaveDir),
-      // Prometheus endpoint, so Stats can read totals the /slots view does
-      // not carry.
-      "--metrics"
-    ]
-
-    // Every flag a built-in control owns is emitted only while no added
-    // parameter has taken it over. Emitting both is how a launch line ended up
-    // carrying two "--load-mode mmap": llama.cpp keeps the last occurrence, so
-    // the duplicate is silent -- the control still shows its own value while
-    // the server runs on the other one.
-    if (root.resolvedBuild && root.backend === "llamacpp") {
-      if (!root.propOverridden("gpuLayers")) emitFlag(root.resolvedBuild, "--gpu-layers", ngl, args)
-      if (!root.propOverridden("cacheTypeK")) emitFlag(root.resolvedBuild, "--cache-type-k", root.cacheTypeK, args)
-      if (!root.propOverridden("cacheTypeV")) emitFlag(root.resolvedBuild, "--cache-type-v", root.cacheTypeV, args)
-      if (!root.propOverridden("flashAttn")) emitFlag(root.resolvedBuild, "--flash-attn", root.flashAttn, args)
-      if (!root.propOverridden("loadMode")) emitFlag(root.resolvedBuild, "--load-mode", root.loadMode, args)
-    }
-
-    // Vision projector. "auto" reproduces what the plugin always did -- use
-    // the projector sitting next to the model -- but says so in a row instead
-    // of only in the launch line, and the other two modes are what that guess
-    // was missing: a directory holding a projector for a different model, and
-    // a card with room to offload the tower after all.
-    // An added parameter for any one of the three takes the whole row, the
-    // same way the MoE pair works: which projector to load and whether to
-    // offload it are one decision, and leaving half of it to a control the
-    // page no longer shows is exactly the invisible state the row exists to
-    // prevent.
-    var visionOwned = root.propOverridden("mmprojMode") ||
-                      root.propOverridden("mmprojPath") ||
-                      root.propOverridden("mmprojOffload")
-    if (!visionOwned) {
-      if (root.mmprojMode === "off") {
-        args.push("--no-mmproj")
-      } else if (root.mmprojActive) {
-        args.push("--mmproj", expandPath(root.resolvedMmproj))
-        // GPU offload is llama.cpp's default but rarely fits alongside the
-        // main model's layers, and the failure mode is an allocation abort
-        // rather than a clean error -- so the plugin default stays "off".
-        if (root.mmprojOffload === "on") {
-          if (!root.resolvedBuild || root.backend !== "llamacpp" ||
-            Backends.supportsFlag(root.resolvedBuild, "--mmproj-offload"))
-            args.push("--mmproj-offload")
-        } else if (!root.resolvedBuild || root.backend !== "llamacpp" ||
-                   Backends.supportsFlag(root.resolvedBuild, "--no-mmproj-offload")) {
-          args.push("--no-mmproj-offload")
-        }
-      }
-    }
-
-    // External MTP draft, the same idea as the projector above: a file named
-    // like a draft beside the model, never a picker entry. It is passed only
-    // while the spec type uses it -- --model-draft alone loads the weights and
-    // decodes nothing with them. A hand-added --model-draft keeps the last
-    // word on which file is loaded.
-    var mtpOwned = false
-    for (var d = 0; d < root.customParams.length; d++)
-      if (root.customParams[d].key === "--model-draft") mtpOwned = true
-    if (!mtpOwned && root.mtpDraftActive) {
-      if (!root.resolvedBuild || root.backend !== "llamacpp" ||
-          Backends.supportsFlag(root.resolvedBuild, "--model-draft")) {
-        args.push("--model-draft", expandPath(root.detectedMtp))
-        root.emittedFlags["--model-draft"] = true
-      } else if (ignoredFlags.indexOf("--model-draft") === -1) {
-        ignoredFlags.push("--model-draft")
-      }
-    }
-
-    if (root.resolvedBuild && root.backend === "llamacpp") {
-      // Parallel, reasoning, threads, MoE, context, batch, cache, temp
-      if (!root.propOverridden("parallel") && String(root.parallel).trim() !== "")
-        emitFlag(root.resolvedBuild, "--parallel", String(root.parallel).trim(), args)
-
-      if (!root.propOverridden("reasoningPreserve")) {
-        if (root.reasoningPreserve === "on") emitFlag(root.resolvedBuild, "--reasoning-preserve", "", args)
-        else if (root.reasoningPreserve === "off") emitFlag(root.resolvedBuild, "--no-reasoning-preserve", "", args)
-      }
-
-      var threadCount = parseInt(root.threads, 10)
-      if (!root.propOverridden("threads") && isFinite(threadCount) && threadCount > 0)
-        emitFlag(root.resolvedBuild, "--threads", String(threadCount), args)
-
-      // MoE flags are mutually exclusive in llama.cpp
-      if (!root.propOverridden("nCpuMoe") && !root.propOverridden("cpuMoe")) {
-        var nCpuMoeTrimmed = String(root.nCpuMoe).trim()
-        if (nCpuMoeTrimmed !== "") emitFlag(root.resolvedBuild, "--n-cpu-moe", nCpuMoeTrimmed, args)
-        else if (root.cpuMoe) emitFlag(root.resolvedBuild, "--cpu-moe", "", args)
-      }
-
-      if (!root.propOverridden("noRepack") && root.noRepack)
-        emitFlag(root.resolvedBuild, "--no-repack", "", args)
-      if (!root.propOverridden("specType") && root.specType !== "none")
-        emitFlag(root.resolvedBuild, "--spec-type", root.specType, args)
-
-      var ctxSize = parseInt(root.contextSize, 10)
-      if (!root.propOverridden("contextSize") && isFinite(ctxSize) && ctxSize > 0)
-        emitFlag(root.resolvedBuild, "--ctx-size", String(ctxSize), args)
-      var batch = parseInt(root.batchSize, 10)
-      if (!root.propOverridden("batchSize") && isFinite(batch) && batch > 0)
-        emitFlag(root.resolvedBuild, "--batch-size", String(batch), args)
-      var ubatch = parseInt(root.ubatchSize, 10)
-      if (!root.propOverridden("ubatchSize") && isFinite(ubatch) && ubatch > 0)
-        emitFlag(root.resolvedBuild, "--ubatch-size", String(ubatch), args)
-      if (!root.propOverridden("cacheRam") && String(root.cacheRam).trim() !== "")
-        emitFlag(root.resolvedBuild, "--cache-ram", String(root.cacheRam).trim(), args)
-      if (!root.propOverridden("temperature") && String(root.temperature).trim() !== "")
-        emitFlag(root.resolvedBuild, "--temp", String(root.temperature).trim(), args)
-    }
-    // User-added parameters. Appended before the free-form extra args so a
-    // hand-written flag still gets the last word on any duplicate.
-    //
-    // A flag a built-in still emitted is skipped rather than appended twice.
-    // The override guards above are what normally prevent that; this stays as
-    // the backstop for a flag no ownership entry covers -- an alias a future
-    // llama.cpp build adds, or a settings file from a version that reserved
-    // the flag instead of yielding it.
-    for (var c = 0; c < root.customParams.length; c++) {
-      var entry = root.customParams[c]
-      if (root.emittedFlags[entry.key]) {
-        console.warn("local-ai-server: skipping", entry.key,
-                     "-- already set by a built-in control")
-        continue
-      }
-      // A flag this build's --help does not describe still has to be passed:
-      // it may come from an alternate binary, or from a line pasted before the
-      // catalogue loaded. Without the stand-in the row rendered and the launch
-      // line silently omitted it.
-      var spec = Params.find(root.paramCatalogue, entry.key) ||
-                 Params.fallbackSpec(entry.key, entry.type)
-      args = args.concat(Params.toArgv(spec, entry.value))
-    }
-
-    var extraPieces = Model.splitExtraArgs(root.extraArgs)
-    for (var p = 0; p < extraPieces.length; p++) args = args.concat(Model.parseArgs(extraPieces[p]))
-    return args
+  function ensureUnitDir() {
+    Quickshell.execDetached(["mkdir", "-p", root.unitDir])
   }
 
-  // The shell script that starts the backend, listening on the public
-  // endpoint.
-  function ollamaLaunchSpec() {
-    return Backends.ollamaLaunch({
-      binary: root.ollamaBinary,
+  // Migration ------------------------------------------------------------
+
+  function prepareMigration() {
+    if (!root.migrationNeeded || root.migrationDone) return
+    var scan = root.scanning ? null : {
+      models: root.modelOptions.map(function(o) { return o.value }),
+      visionDirs: root.visionDirs,
+      mtpDirs: root.mtpDirs
+    }
+    var systemoneScan = null
+    if (root.configuredSystemoneModelsDir !== "")
+      systemoneScan = { models: root.systemoneModelOptions.map(function(o) { return o.value }) }
+    var ports = {
+      main: root.servicePort("llamacpp"),
+      systemone: root.servicePort("systemone"),
+      ollama: root.servicePort("ollama")
+    }
+    root.migrationPlan = Migration.plan({
+      settings: root.oldSettings,
+      builds: root.llamaBuilds,
+      catalogue: root.paramCatalogue,
+      scan: scan,
+      systemoneScan: systemoneScan,
+      existingMain: root.configTextFor("llamacpp"),
+      existingSystemone: root.configTextFor("systemone"),
+      mainBinary: root.configuredLlamaBinary !== "" ? root.llamaBinary : "",
+      systemoneBinary: root.configuredSystemoneBinary !== "" ? root.activeSystemoneBinary : "",
+      systemoneModelsDir: root.configuredSystemoneModelsDir,
       host: root.host,
-      port: String(root.port),
-      keepAlive: String(root.keepAlive).trim(),
-      numParallel: root.propOverridden("parallel") ? "" : String(root.parallel).trim(),
-      // The shared Tuning controls, so they actually reach ollama rather
-      // than being rendered and silently ignored.
-      contextSize: root.contextSize,
-      cacheType: root.cacheTypeK,
-      flashAttn: root.flashAttn,
-      // modelsDir is the GGUF search path, not necessarily an ollama store.
-      // Passing it here made ollama serve an empty store on a normal
-      // llama.cpp setup; a custom store belongs in the env-vars row.
-      modelsDir: root.resolvedOllamaStore !== "" ? root.resolvedOllamaStore : root.systemModelsDir
+      ports: ports,
+      paths: { main: root.mainConfigPath, systemone: root.systemoneConfigPath },
+      slotsDir: root.slotSaveDir
     })
+    root.migrationReport = root.migrationPlan.report
+    root.showingMigration = true
   }
 
-  function ollamaLaunchEnv(launch) {
-    launch = launch || root.ollamaLaunchSpec()
-    // ollama is configured through the environment, so user-added parameters
-    // become additional assignments rather than argv.
-    for (var c = 0; c < root.customParams.length; c++) {
-      var spec = Params.find(root.paramCatalogue, root.customParams[c].key) ||
-                 Params.fallbackSpec(root.customParams[c].key, root.customParams[c].type)
-      var entry = Params.toEnvEntry(spec, root.customParams[c].value)
-      if (entry) launch.env[entry.name] = entry.value
+  function runMigration(startFresh) {
+    if (root.migrationRunning) return
+    if (!startFresh && root.migrationPlan === null) root.prepareMigration()
+    if (!startFresh && root.migrationPlan === null) return
+    root.migrationRunning = true
+    root.migrationStartFresh = !!startFresh
+    root.migrationError = ""
+    root.migrationBackupDir = root.settingsDir + "migration-backup-" + Date.now()
+    var files = [
+      root.settingsPath,
+      root.mainConfigPath,
+      root.systemoneConfigPath,
+      root.serviceUnitPath("llamacpp"),
+      root.serviceUnitPath("systemone"),
+      root.serviceUnitPath("ollama")
+    ]
+    var script = "mkdir -p " + root.shellQuote(root.migrationBackupDir) + "; "
+    for (var i = 0; i < files.length; i++)
+      script += "if [ -e " + root.shellQuote(files[i]) + " ]; then cp -a " +
+        root.shellQuote(files[i]) + " " + root.shellQuote(root.migrationBackupDir) + "/; fi; "
+    migrationBackupProc.command = ["bash", "-lc", script]
+    migrationBackupProc.running = false
+    migrationBackupProc.running = true
+  }
+
+  Process {
+    id: migrationBackupProc
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.migrationRunning = false
+        root.migrationError = "Could not write the backup in " + root.migrationBackupDir
+        root.showingMigration = true
+        return
+      }
+      root.writeMigrationFiles()
     }
-    for (var ev = 0; ev < root.parsedEnv.env.length; ev++)
-      launch.env[root.parsedEnv.env[ev].name] = root.parsedEnv.env[ev].value
-    return launch.env
   }
 
-  // Stable fingerprint of what ollama would be launched with. The env map is
-  // sorted so key order does not look like a change.
-  function ollamaConfigHash() {
-    var env = root.ollamaLaunchEnv()
-    var keys = Object.keys(env).sort()
-    var parts = [root.ollamaBinary]
-    for (var i = 0; i < keys.length; i++) parts.push(keys[i] + "=" + env[keys[i]])
-    return parts.join("\n")
-  }
-
-  function buildBackendScript() {
-    var script = ""
-    if (root.backend === "ollama") {
-      var launch = root.ollamaLaunchSpec()
-      var env = root.ollamaLaunchEnv(launch)
-      script = Backends.envPrefix(env, root.shellQuote) + " " +
-        "exec -a " + root.procMarker + " " + launch.argv.map(root.shellQuote).join(" ")
-    } else if (root.backend === "systemone") {
-      var soArgs = Backends.systemoneLaunchArgs(
-        root.activeSystemoneBinary,
-        root.launchModel,
-        root.host,
-        root.port,
-        expandPath(root.slotSaveDir),
-        {
-          ngl: root.gpuLayers,
-          cacheTypeK: root.cacheTypeK,
-          cacheTypeV: root.cacheTypeV,
-          loadMode: root.loadMode,
-          threads: root.threads,
-          cpuMoe: root.cpuMoe,
-          nCpuMoe: root.nCpuMoe,
-          parallel: root.parallel,
-          systemoneCtx: root.systemoneCtx,
-          extraPieces: root.extraArgTokens(),
-          propOverridden: root.propOverridden
-        }
-      )
-      var cudaEnv = Hardware.isCuda(root.hardware)
-        ? "GGML_CUDA_REGISTER_HOST=1 GGML_CUDA_DISABLE_GRAPHS=1 " : ""
-      var userEnv = root.envScriptPrefix()
-      script = "mkdir -p " + root.shellQuote(expandPath(root.slotSaveDir)) + "; " +
-        cudaEnv + (userEnv !== "" ? userEnv + " " : "") +
-        "exec -a " + root.procMarker + " " + soArgs.map(root.shellQuote).join(" ")
-    } else {
-
-      // These two work around NVIDIA-specific faults and mean nothing on
-      // other backends, so they are applied only when an NVIDIA GPU was
-      // actually detected rather than injected unconditionally:
-      //   GGML_CUDA_REGISTER_HOST pins CPU-resident weights for DMA transfer.
-      //   GGML_CUDA_DISABLE_GRAPHS avoids CUDA graph capture, which assumes
-      //   stable tensor addresses that hybrid CPU/GPU offload can violate.
-      var cudaEnv = Hardware.isCuda(root.hardware)
-        ? "GGML_CUDA_REGISTER_HOST=1 GGML_CUDA_DISABLE_GRAPHS=1 " : ""
-      var userEnv = root.envScriptPrefix()
-      var args = root.buildLlamaArgs()
-      script = "mkdir -p " + root.shellQuote(expandPath(root.slotSaveDir)) + "; " +
-        cudaEnv + (userEnv !== "" ? userEnv + " " : "") + "exec -a " + root.procMarker + " " + args.map(root.shellQuote).join(" ")
+  function writeMigrationFiles() {
+    var mainText = ""
+    var systemoneText = ""
+    if (!root.migrationStartFresh) {
+      mainText = root.migrationPlan.main.text
+      systemoneText = root.migrationPlan.systemone.text
+      migrationReportFile.setText(root.migrationPlan.report)
     }
+    root.setConfigText("llamacpp", mainText)
+    root.setConfigText("systemone", systemoneText)
+
+    if (root.llamaSwapBinary === "" || (mainText.trim() === "" && systemoneText.trim() === "")) {
+      root.finishMigration()
+      return
+    }
+    var script = "set -e; "
+    if (mainText.trim() !== "")
+      script += root.shellQuote(root.llamaSwapBinary) + " -config " +
+        root.shellQuote(root.mainConfigPath) + " -validate; "
+    if (systemoneText.trim() !== "")
+      script += root.shellQuote(root.llamaSwapBinary) + " -config " +
+        root.shellQuote(root.systemoneConfigPath) + " -validate"
+    migrationValidateProc.command = ["bash", "-lc", script]
+    migrationValidateProc.running = false
+    migrationValidateProc.running = true
+  }
+
+  Process {
+    id: migrationValidateProc
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim() !== "") root.migrationValidateError = text.trim() }
+    property string migrationValidateError: ""
+    onExited: function(exitCode) {
+      if (exitCode === 0) {
+        root.finishMigration()
+        return
+      }
+      var detail = migrationValidateProc.migrationValidateError
+      migrationRestoreProc.command = ["bash", "-lc", root.restoreMigrationScript()]
+      migrationRestoreProc.running = false
+      migrationRestoreProc.running = true
+      root.migrationError = "llama-swap rejected the generated config" + (detail ? ": " + detail : ".")
+    }
+  }
+
+  Process {
+    id: migrationRestoreProc
+    onExited: {
+      root.migrationRunning = false
+      root.showingMigration = true
+      root.applyTuningForSelection()
+    }
+  }
+
+  function restoreMigrationScript() {
+    function restore(from, to) {
+      return "if [ -e " + root.shellQuote(root.migrationBackupDir + "/" + from) + " ]; then cp -a " +
+        root.shellQuote(root.migrationBackupDir + "/" + from) + " " + root.shellQuote(to) + "; else rm -f " +
+        root.shellQuote(to) + "; fi; "
+    }
+    var script = restore(root.settingsPath.split("/").pop(), root.settingsPath)
+    script += restore(root.mainConfigPath.split("/").pop(), root.mainConfigPath)
+    script += restore(root.systemoneConfigPath.split("/").pop(), root.systemoneConfigPath)
     return script
   }
 
-  function launchServerProcess() {
-    var script = root.buildBackendScript()
-
-    // Detach so the server outlives `omarchy restart shell`, which runs
-    // `quickshell kill`. A systemd transient unit is preferred over bare
-    // setsid because it also routes output to journald, which is what lets
-    // throughput still be read after this widget is torn down and rebuilt.
-    serverProc.command = Backends.detachedCommand(root.hasSystemdRun, root.unitName, script)
-    root.ownsUnit = root.hasSystemdRun
-    root.runningModel = root.launchModel
-    root.runningConfigHash = root.backend === "ollama" ? root.ollamaConfigHash() : ""
-    root.adopted = false
-    root.starting = true
-    root.expectedStop = false
-    root.lastLogLine = ""
-    logModel.clear()
-    root.logRevision++
-    root.startingElapsed = 0
-    root.healthUrl = Backends.healthUrl(root.backend, root.host, root.port)
-    startingTimer.restart()
-    healthPollTimer.restart()
-    serverProc.running = true
-
-    // Follow the unit's journal from launch, not from first health -- a
-    // detached server writes there, while serverProc only ever carries
-    // systemd-run's one-line confirmation. Without this a server that dies
-    // during model load produces no visible log at all.
-    if (root.hasSystemdRun) {
-      // Zero backlog: the unit is starting now, so there is no history to
-      // seed, and a tail would replay the previous run's shutdown.
-      root.followJournal(0)
-      unitWatchTimer.restart()
-    }
-  }
-
-  // Tails whichever journal holds the running server's output into the log
-  // view. One entry point for every path -- launch, adoption, metrics -- so
-  // the log can no longer be attached on some of them and forgotten on the
-  // others. Backends.journalCommand decides the source from ownership.
-  function followJournal(tailLines) {
-    var command = Backends.journalCommand(root.backend, root.unitName, root.ownsUnit, tailLines)
-    if (!command) {
-      // A server started by hand outside systemd: nothing to follow. Recorded
-      // so the log view can say that instead of showing a blank page.
-      root.logsSource = "none"
-      journalProc.running = false
-      return
-    }
-    root.logsSource = root.ownsUnit ? "user" : "system"
-    journalProc.command = command
-    journalProc.running = false
-    journalProc.running = true
-  }
-
-  // systemd-run returns as soon as the unit is queued, so serverProc exiting
-  // says nothing about the server. The unit's own state is the only thing that
-  // reports a crash -- without watching it, a server that aborts during model
-  // load leaves the panel showing "Starting…" until the user gives up.
-  Timer {
-    id: unitWatchTimer
-    interval: 1500
-    repeat: true
-    onTriggered: if ((root.starting || root.running) && !unitStateProc.running)
-                   unitStateProc.running = true
-  }
-
-  Process {
-    id: unitStateProc
-    command: ["systemctl", "--user", "is-active", root.unitName]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var state = String(text || "").trim()
-        if (state === "active" || state === "activating" || state === "") return
-        // "failed", "inactive": the unit is gone. Report why, using the last
-        // meaningful line the journal produced.
-        root.reportUnitStopped(state)
-      }
-    }
-  }
-
-  function reportUnitStopped(state) {
-    if (root.expectedStop || root.stopping) return
-    if (!root.starting && !root.running) return
-    startingTimer.stop()
-    healthPollTimer.stop()
-    unitWatchTimer.stop()
-    root.stopMetrics()
-    var detail = root.lastErrorLine()
-    root.lastError = (root.starting ? "Server failed to start" : "Server stopped") +
-      (state === "failed" ? " (crashed)" : "") + (detail ? ": " + detail : "")
-    root.runHook("stopped")
-    root.starting = false
-    root.running = false
-    root.clearRestartState()
-    root.resetMetrics()
-  }
-
-  function clearRestartState() {
-    root.runningArgs = []
-    root.runningExe = ""
-    root.runningConfigHash = ""
-    root.restartPhase = ""
-    restartDrainTimer.stop()
-  }
-
-  // Log triage lives in Model.js so it can be tested against real captured
-  // crash output; this is the one caller.
-  function logLinesArray() {
-    var out = []
-    for (var i = 0; i < logModel.count; i++) out.push(logModel.get(i).line)
-    return out
-  }
-  function lifecycleErrorLine() {
-    return Model.pickErrorLine(root.logLinesArray(), root.lastLogLine)
-  }
-  function lastErrorLine() { return root.lifecycleErrorLine() }
-
-  // ---- Restart lifecycle ----
-
-  // Waits for running requests to finish, then restarts with the page's
-  // current flags. Returns at once; restartDrainTimer does the waiting.
-  function switchServer() {
-    if (!root.configChanged) return
-    root.lastError = ""
-    root.restartIdleTicks = 0
-    // ollama has no /slots; waiting for a fresh poll would never finish.
-    if (root.backendSpec.metricsMode !== "slots") {
-      root.handleServerLine("[restart] requested: " + Model.baseName(root.launchModel) +
-                            " — restarting (no slot drain for this backend)")
-      root.finishRestart()
-      return
-    }
-    root.restartPhase = "draining"
-    root.handleServerLine("[restart] requested: " + Model.baseName(root.launchModel) +
-                          " — waiting for running requests to finish")
-    restartDrainTimer.restart()
-  }
-
-  // Stops waiting for requests still running. They are cut off, which is the
-  // point: a generation that never ends would otherwise block the restart.
-  function forceSwitch() {
-    if (root.restartPhase === "draining") root.finishRestart()
-  }
-
-  // Idle means two fresh /slots polls in a row with nothing processing; the
-  // metrics poll already fetches /slots, so this only reads its result.
-  Timer {
-    id: restartDrainTimer
-    interval: 500
-    repeat: true
-    onTriggered: {
-      if (root.restartPhase !== "draining" || !root.running) { stop(); root.restartPhase = ""; return }
-      var fresh = Date.now() - root.slotsSeenAtMs < 1500
-      root.restartIdleTicks = fresh && !root.slotsBusy ? root.restartIdleTicks + 1 : 0
-      if (root.restartIdleTicks >= 2) root.finishRestart()
-    }
-  }
-
-  // Goes through the ordinary stop, so the prompt cache is saved exactly as
-  // it is on Stop; finishStop starts the server again.
-  function finishRestart() {
-    restartDrainTimer.stop()
-    root.restartPhase = ""
-    root.handleServerLine("[restart] stopping, then starting with the new configuration")
-    root.restartAfterStop = true
-    root.stopServer()
-  }
-
-  function readRunningArgs() {
-    // ollama has no per-launch argv to compare; its restart hash is separate.
-    if (root.backend === "ollama") {
-      root.runningArgs = []
-      root.runningExe = ""
-      return
-    }
-    runningArgsProc.running = false
-    runningArgsProc.running = true
-  }
-
-  Process {
-    id: runningArgsProc
-    // systemd first, then the marker for the setsid fallback; without the
-    // fallback a non-systemd server had no argv and never offered Restart.
-    command: ["bash", "-c",
-      "pid=$(systemctl --user show -p MainPID --value " + root.shellQuote(root.unitName) + " 2>/dev/null); " +
-      "[ -n \"$pid\" ] && [ \"$pid\" != 0 ] || pid=$(pgrep -f -- \"^" + root.procMarker + " \" | head -n1); " +
-      "[ -n \"$pid\" ] && [ \"$pid\" != 0 ] && readlink /proc/$pid/exe && tr '\\0' '\\n' < /proc/$pid/cmdline"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        if (!root.running) return
-        var args = String(text || "").split("\n")
-        if (args.length && args[args.length - 1] === "") args.pop()
-        // First line is the binary; a build rebuilt since launch reads
-        // "... (deleted)", which is still the same path.
-        root.runningExe = args.length ? args.shift().replace(/ \(deleted\)$/, "") : ""
-        root.runningArgs = args
-        var i = args.indexOf("--model")
-        if (root.runningModel === "" && i !== -1 && i + 1 < args.length) root.runningModel = args[i + 1]
-      }
-    }
-  }
-
-  // Saves every slot's KV cache under the running model's name. Always ends in
-  // onDone, whether or not anything was saved -- a cache that cannot be written
-  // only costs the next start a cold prompt.
-  function slotKvCommand(action, model) {
-    return ["python3", root.slotKvScript, action,
-            "--url", Backends.baseUrl(root.host, root.port),
-            "--dir", expandPath(root.slotSaveDir),
-            "--prefix", root.kvPrefix(model)]
-  }
-
-  readonly property bool savesSlots: root.kvPersistence && Backends.supports(root.backend, "slotKv")
-
-  function stopServer() {
-    var model = root.runningModel !== "" ? root.runningModel : root.launchModel
-    var plan = Model.stopPlan(root.running, root.starting, root.canStop,
-                              root.savesSlots, model, serverProc.running)
-    if (plan === "blocked") {
-      // An adopted root-owned service or a hand-started server: nothing here
-      // can stop it, so do not hide it and do not fire the stopped hook.
-      root.restartAfterStop = false
-      root.lastError = "This server was not started by this widget, so it cannot be stopped from here."
-      return
-    }
-
-    root.starting = false
-    startingTimer.stop()
-    healthPollTimer.stop()
-    slotsPollTimer.stop()
-    slotAutosaveTimer.stop()
-    stopMetrics()
-
-    // Stop pressed while the pre-launch sweep is still running: let the
-    // sweep finish the cleanup it already started, but onExited must not
-    // launch afterwards.
-    if (startSweepProc.running) {
-      root.expectedStop = true
-      root.restartAfterStop = false
-      root.stopping = false
-      return
-    }
-
-    // An autosave already writing the same files must finish before the stop
-    // save starts; two writers to the same .tmp name can lose the cache.
-    if (slotAutosaveProc.running) {
-      root.expectedStop = true
-      root.stopping = true
-      root.stopAfterAutosave = true
-      return
-    }
-
-    if (plan === "save") {
-      // Dump the KV cache before stopping, so the next start does not
-      // reprocess the whole prompt. The stop itself runs from the save's
-      // completion.
-      root.expectedStop = true
-      root.stopping = true
-      slotSaveProc.command = root.slotKvCommand("save", model)
-      slotSaveProc.running = false
-      slotSaveProc.running = true
-    } else if (plan === "stop") {
-      // The detached wrapper exits as soon as the unit is created, so during
-      // model load serverProc.running is already false while the unit is very
-      // much alive. starting has to count as "something to stop".
-      root.expectedStop = true
-      root.stopping = true
-      root.finishStop()
-    } else {
-      root.restartAfterStop = false
-    }
-  }
-
-  // A detached launch returns immediately, so serverProc exiting says nothing
-  // about the server. Stopping the unit/marker explicitly is what actually
-  // ends it.
-  function finishStop() {
-    serverProc.running = false
-    root.stopAfterAutosave = false
-    root.killOrphans()
-    root.clearRestartState()
-    root.runHook("stopped")
-    root.running = false
-    root.stopping = false
-    root.adopted = false
-    root.resetMetrics()
-    if (root.restartAfterStop) {
-      root.restartAfterStop = false
-      // startServer sweeps the old unit synchronously before launching.
-      root.startServer()
-    }
-  }
-
-  function resetMetrics() {
-    root.runningModel = ""
-    root.tokensPerSec = 0
-    root.ppActive = false
-    root.ppPercent = 0
-    root.ppTokensPerSec = 0
-    root.ppFromLog = false
-    root.lastDecodeSample = null
-    root.lastPromptSample = null
-    root.loadedModelInfo = ""
-  }
-
-  // The shell tears this panel down on restart or plugin removal. The server
-  // is deliberately left running to be re-adopted; the last debounced edit
-  // is not, so flush it before the FileView goes away.
-  Component.onDestruction: {
-    settingsSaveTimer.stop()
-    if (root.settingsLoaded) root.flushSettings()
-    journalProc.running = false
-  }
-
-  // Loading a large model over mmap from cold cache legitimately takes
-  // minutes, so this is generous -- it exists to end an indefinite "Starting…"
-  // when nothing is ever going to answer, not to bound normal startup.
-  readonly property int startupTimeoutSec: 600
-
-
-  Timer {
-    id: startingTimer
-    interval: 1000
-    repeat: true
-    onTriggered: {
-      root.startingElapsed += 1
-      if (root.starting && root.startingElapsed >= root.startupTimeoutSec) {
-        startingTimer.stop()
-        healthPollTimer.stop()
-        unitWatchTimer.stop()
-        root.stopMetrics()
-        var detail = root.lifecycleErrorLine()
-        root.lastError = "Gave up waiting after " + root.startupTimeoutSec + "s" +
-          (detail ? ": " + detail : " — no response on " + root.healthUrl)
-        root.starting = false
-      }
-    }
-  }
-
-  // Both servers open their port before the model is loaded, so liveness is
-  // polled on the endpoint that only answers once it is ready to serve.
-  Timer {
-    id: healthPollTimer
-    interval: 800
-    repeat: true
-    onTriggered: if (!healthProc.running) healthProc.running = true
-  }
-
-  Process {
-    id: healthProc
-    command: ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "1", root.healthUrl]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        if (root.starting && text.trim() === "200") {
-          root.starting = false
-          root.running = true
-          startingTimer.stop()
-          healthPollTimer.stop()
-          root.restoreSlots()
-          // What Restart compares the page against.
-          root.readRunningArgs()
-          root.runHook("started")
-          root.lastDecodeSample = null
-          root.startMetrics()
-        }
-      }
-    }
+  function finishMigration() {
+    // A migration is the user's confirmation: the old transient units are
+    // stopped here, before the persistent unit takes the same name.
+    Quickshell.execDetached(["systemctl", "--user", "stop",
+      Backends.unitName(root.moduleName, "llamacpp"),
+      Backends.unitName(root.moduleName, "systemone")])
+    root.migrationNeeded = false
+    root.migrationDone = true
+    root.oldSettings = null
+    root.migrationRunning = false
+    root.showingMigration = false
+    root.ensureUnitDir()
+    root.writeUnit("llamacpp")
+    root.writeUnit("systemone")
+    root.writeUnit("ollama")
+    root.ensureConfig("llamacpp")
+    root.ensureConfig("systemone")
+    root.applyTuningForSelection()
+    root.flushSettings()
+    if (root.configuredSystemoneModelsDir !== "") root.refreshSystemoneModels()
+    servicePollTimer.restart()
   }
 
   // ---- Hooks ----
   //
   // Runs `omarchy hook local-ai-server <started|stopped> <json>` -- every
-  // script in ~/.config/omarchy/hooks/local-ai-server.d/ -- whenever a server
-  // comes up (launched or found running) and when it goes away. The plugin
-  // itself writes no one else's configuration; pointing a coding agent at
-  // the live endpoint is what a hook is for. The JSON describes what is being
-  // served; see README "Hooks".
+  // script in ~/.config/omarchy/hooks/local-ai-server.d/ -- whenever a service
+  // comes up and when it goes away. The plugin itself writes no one else's
+  // configuration; pointing a coding agent at the live endpoint is what a hook
+  // is for. The JSON describes what is being served; see README "Hooks".
   function servedModelEntry(path, label) {
     var probed = root.modelCaps[path] || {}
     var geometry = root.modelGeometry[path] || null
@@ -3557,10 +3752,12 @@ Panel {
       }
       return out
     }
-    // Every model in the store, not only the loaded one (README "Hooks").
-    var options = root.backend === "systemone" ? root.systemoneModelOptions : root.modelOptions
-    for (var j = 0; j < options.length; j++)
-      out.push(root.servedModelEntry(options[j].value, options[j].label))
+    // Every model in the config, not only the loaded one (README "Hooks").
+    var parsed = LlamaSwap.parseConfig(root.configTextFor(root.backend))
+    for (var m = 0; m < parsed.models.length; m++) {
+      var path = parsed.models[m].managedPath || parsed.models[m].modelPath
+      if (path !== "") out.push(root.servedModelEntry(path, ""))
+    }
     var loaded = root.runningModel !== "" ? root.runningModel : root.launchModel
     if (loaded === "") return out
     var listed = false
@@ -3591,50 +3788,77 @@ Panel {
 
   // ---- Metrics ----
 
-  // Two sources, chosen by backend:
-  //   "slots" -- llama.cpp's /slots endpoint, polled for a live pp% sweep and
-  //     a running tg rate derived from the decode-count delta.
-  //   "log"   -- ollama, which exposes no equivalent endpoint, so the timing
-  //     lines its embedded llama.cpp writes on request completion are
-  //     followed in journald. Same parser, coarser resolution: totals per
-  //     request instead of a live sweep.
   function startMetrics() {
-    if (root.backendSpec.metricsMode === "slots") slotsPollTimer.restart()
-    if (root.backendSpec.metricsMode === "log") psPollTimer.restart()
-    // The journal is the log view's only source, so it is followed for every
-    // backend -- not just the ones that also read throughput out of it. This
-    // is the adoption path: a llama.cpp server adopted from a previous widget
-    // instance takes metrics from /slots and used to attach nothing here, so
-    // its log stayed empty for as long as the widget ran.
-    if (!journalProc.running) root.followJournal(200)
+    if (root.backend === "ollama") {
+      psPollTimer.restart()
+      root.followJournal(200)
+      return
+    }
+    runningPollTimer.restart()
+    if (root.loadedModelId !== "") root.followModelLogs()
   }
 
   function stopMetrics() {
-    slotsPollTimer.stop()
+    runningPollTimer.stop()
     psPollTimer.stop()
-    unitWatchTimer.stop()
     journalProc.running = false
     root.logsSource = ""
   }
 
-  Timer {
-    id: slotsPollTimer
-    interval: 250
-    repeat: true
-    onTriggered: if (root.running && !slotsProc.running) slotsProc.running = true
+  function resetMetrics() {
+    root.runningModel = ""
+    root.loadedModelId = ""
+    root.tokensPerSec = 0
+    root.ppActive = false
+    root.ppPercent = 0
+    root.ppTokensPerSec = 0
+    root.ppFromLog = false
+    root.lastDecodeSample = null
+    root.lastPromptSample = null
+    root.loadedModelInfo = ""
+    root.rateHistory = []
+  }
+
+  // Router output comes from its per-model log stream; ollama keeps journald.
+  function followModelLogs() {
+    if (root.backend === "ollama") {
+      root.followJournal(200)
+      return
+    }
+    if (root.loadedModelId === "") return
+    if (journalProc.running && journalProc.streamId === root.loadedModelId) return
+    journalProc.running = false
+    journalProc.streamId = root.loadedModelId
+    journalProc.command = ["curl", "-N", "-s", "--max-time", "86400",
+      LlamaSwap.logsUrl(root.host, root.port, root.loadedModelId, true)]
+    root.logsSource = "router"
+    journalProc.running = true
+  }
+
+  function followJournal(tailLines) {
+    var command = Backends.journalCommand(root.backend, root.serviceUnit(root.backend), root.ownsUnit, tailLines)
+    if (!command) {
+      root.logsSource = "none"
+      journalProc.running = false
+      return
+    }
+    root.logsSource = root.ownsUnit ? "user" : "system"
+    journalProc.streamId = ""
+    journalProc.command = command
+    journalProc.running = false
+    journalProc.running = true
   }
 
   Process {
-    id: slotsProc
-    command: ["curl", "-s", "-m", "1", Backends.loadedModelsUrl("llamacpp", root.host, root.port)]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.handleSlotsResponse(text)
+    id: journalProc
+    property string streamId: ""
+    stdout: SplitParser { onRead: function(line) { root.handleServerLine(line) } }
+    stderr: SplitParser { onRead: function(line) { root.handleServerLine(line) } }
+    onExited: {
+      if (root.logsSource === "router" && root.running) root.logsSource = ""
     }
   }
 
-  // ollama has no live progress endpoint; /api/ps at a slow cadence is enough
-  // to show which model is resident and how it is split across GPU and CPU.
   Timer {
     id: psPollTimer
     interval: 2000
@@ -3658,79 +3882,9 @@ Panel {
         var pct = total > 0 ? Math.round((gpu / total) * 100) : 0
         root.loadedModelInfo = String(m.name || "") +
           (total > 0 ? "  " + (total / 1073741824).toFixed(1) + "GB · " + pct + "% GPU" : "")
+        root.loadedModelId = String(m.name || "")
+        root.runningModel = String(m.name || "")
       }
-    }
-  }
-
-  Process {
-    id: journalProc
-    stdout: SplitParser { onRead: function(line) { root.handleServerLine(line) } }
-    stderr: SplitParser { onRead: function(line) { root.handleServerLine(line) } }
-  }
-
-  function handleSlotsResponse(text) {
-    var body = String(text || "").trim()
-    if (body === "") return
-    var data
-    try { data = JSON.parse(body) } catch (e) { return }
-    if (!Array.isArray(data) || data.length === 0) return
-
-    var slot = data[0]
-    for (var i = 0; i < data.length; i++) {
-      if (data[i].is_processing) { slot = data[i]; break }
-    }
-
-    var processing = !!slot.is_processing
-    var busy = 0
-    for (var b = 0; b < data.length; b++) if (data[b].is_processing) busy++
-    root.slotsProcessing = busy
-    root.slotsBusy = processing
-    root.slotsSeenAtMs = Date.now()
-    var nPromptTotal = slot.n_prompt_tokens || 0
-    var nPromptDone = (slot.n_prompt_tokens_processed || 0) + (slot.n_prompt_tokens_cache || 0)
-    var nextTok = slot.next_token && slot.next_token[0]
-    var nDecoded = (nextTok && nextTok.n_decoded) || 0
-
-    if (processing && nDecoded === 0 && nPromptTotal > 0) {
-      var ppNow = Date.now()
-      if (root.ppFromLog) {
-        // The log is driving these numbers; only the active flag is taken
-        // from the poll, so ingestion still ends when the slot says so.
-        root.ppActive = true
-        root.lastDecodeSample = null
-        return
-      }
-      // Keyed on total as well as count, so a new request with a different
-      // prompt length never diffs against the tail of the previous one.
-      if (root.lastPromptSample && root.lastPromptSample.total === nPromptTotal &&
-          nPromptDone >= root.lastPromptSample.n) {
-        var ppDtSec = (ppNow - root.lastPromptSample.t) / 1000
-        var ppDn = nPromptDone - root.lastPromptSample.n
-        if (ppDtSec > 0.05 && ppDn > 0) root.ppTokensPerSec = ppDn / ppDtSec
-      } else {
-        root.ppTokensPerSec = 0
-      }
-      root.lastPromptSample = { n: nPromptDone, t: ppNow, total: nPromptTotal }
-      root.ppActive = true
-      root.ppPercent = Math.min(100, (nPromptDone / nPromptTotal) * 100)
-      root.lastDecodeSample = null
-      return
-    }
-
-    root.ppActive = false
-    root.ppFromLog = false
-    root.lastPromptSample = null
-
-    if (processing && nDecoded > 0) {
-      var now = Date.now()
-      if (root.lastDecodeSample && nDecoded >= root.lastDecodeSample.n) {
-        var dtSec = (now - root.lastDecodeSample.t) / 1000
-        var dn = nDecoded - root.lastDecodeSample.n
-        if (dtSec > 0.05 && dn > 0) root.tokensPerSec = dn / dtSec
-      }
-      root.lastDecodeSample = { n: nDecoded, t: now }
-    } else {
-      root.lastDecodeSample = null
     }
   }
 
@@ -3744,10 +3898,6 @@ Panel {
       root.logRevision++
     }
 
-    // Live ingestion progress, when the build logs it. Both numbers come
-    // measured, so they win over the /slots derivation, which reports a
-    // percentage with no rate whenever n_prompt_tokens_processed sits still
-    // between polls -- which is what a long prompt looks like on this build.
     var progress = Model.parsePromptProgressLine(text)
     if (progress) {
       root.ppActive = true
@@ -3762,103 +3912,55 @@ Panel {
     var timing = Model.parseTimingLine(text)
     if (!timing) return
     if (timing.kind === "pp") {
-      // No live sweep is available from a log line -- the number arrives only
-      // once the prompt is fully processed -- so the rate is shown without a
-      // percentage. metricText renders that shape correctly.
       root.ppTokensPerSec = timing.tps
       root.ppActive = false
     } else {
       root.tokensPerSec = timing.tps
-      // A completed generation means the KV cache grew a turn; save it once
-      // the server goes quiet, so a crash loses at most the last turn.
-      if (root.savesSlots) slotAutosaveTimer.restart()
+      root.pushRate(timing.tps)
     }
   }
 
-  // ---- Slot KV persistence (llama.cpp only) ----
-
-  // Runs as soon as a start answers /health. Requests arriving meanwhile are
-  // served cold; a restore takes seconds, re-reading the prompt minutes.
-  function restoreSlots() {
-    if (!root.savesSlots || root.runningModel === "") return
-    slotRestoreProc.command = root.slotKvCommand("restore", root.runningModel)
-    slotRestoreProc.running = false
-    slotRestoreProc.running = true
+  // Log triage lives in Model.js so it can be tested against real captured
+  // crash output; this is the one caller.
+  function logLinesArray() {
+    var out = []
+    for (var i = 0; i < logModel.count; i++) out.push(logModel.get(i).line)
+    return out
   }
-
-  Process {
-    id: slotRestoreProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.handleServerLine("[slot] " + (text.trim() || "restore: no output"))
-    }
+  function lifecycleErrorLine() {
+    return Model.pickErrorLine(root.logLinesArray(), root.lastLogLine)
   }
+  function lastErrorLine() { return root.lifecycleErrorLine() }
 
-  Process {
-    id: slotSaveProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.handleServerLine("[slot] " + (text.trim() || "save: no output"))
-    }
-    // On exit rather than on output, so the stop goes ahead even when the
-    // save printed nothing or python3 is missing.
-    onExited: root.finishStop()
-  }
+  // Loading a large model over mmap from cold cache legitimately takes
+  // minutes, so this is generous -- it exists to end an indefinite "Starting…"
+  // when nothing is ever going to answer, not to bound normal startup.
+  readonly property int startupTimeoutSec: 600
 
-  // Debounced: an agent loop finishes a generation every few seconds, and
-  // each save writes the whole cache. Saving once things go quiet costs one
-  // write per burst instead of one per turn.
   Timer {
-    id: slotAutosaveTimer
-    // One minute of quiet, not twenty seconds. An agent that makes a request
-    // every 25 s used to trigger a full cache write every 25 s; at 60 s it
-    // waits for a real gap, and Stop/Restart still save unconditionally.
-    interval: 60000
+    id: startingTimer
+    interval: 1000
+    repeat: true
     onTriggered: {
-      if (!root.running || root.stopping || !root.savesSlots || root.runningModel === "") return
-      if (root.slotsBusy) { restart(); return }
-      if (slotSaveProc.running || slotAutosaveProc.running) return
-      slotAutosaveProc.command = root.slotKvCommand("save", root.runningModel)
-      slotAutosaveProc.running = true
-    }
-  }
-
-  Process {
-    id: slotAutosaveProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.handleServerLine("[slot] autosave: " + text.trim())
-    }
-    onExited: {
-      if (!root.stopAfterAutosave) return
-      root.stopAfterAutosave = false
-      // The autosave just wrote the cache; go straight to the stop rather
-      // than saving the same slots a second time.
-      root.finishStop()
-    }
-  }
-
-  Process {
-    id: serverProc
-    stdout: SplitParser { onRead: function(line) { root.handleServerLine(line) } }
-    stderr: SplitParser { onRead: function(line) { root.handleServerLine(line) } }
-    onExited: function(exitCode) {
-      // With a detached launch this fires as soon as the wrapper returns, so
-      // it reports the spawn's outcome, not the server's. A nonzero code here
-      // means the server never started.
-      if (!root.expectedStop && exitCode !== 0) {
+      root.startingElapsed += 1
+      if (root.starting && root.startingElapsed >= root.startupTimeoutSec) {
         startingTimer.stop()
-        healthPollTimer.stop()
-        root.stopMetrics()
-        root.lastError = root.backendSpec.label + " failed to start (code " + exitCode + ")" +
-          (root.lastLogLine ? ": " + root.lastLogLine : "")
+        var detail = root.lifecycleErrorLine()
+        root.lastError = "Gave up waiting after " + root.startupTimeoutSec + "s" +
+          (detail ? ": " + detail : " — no response on " + root.healthUrl)
         root.starting = false
-        root.running = false
-        root.resetMetrics()
       }
-      root.expectedStop = false
-      root.stopping = false
     }
+  }
+
+  // The shell tears this panel down on restart or plugin removal. Services are
+  // deliberately left running to be adopted; the last debounced edit is not,
+  // so flush it before the FileView goes away.
+  Component.onDestruction: {
+    settingsSaveTimer.stop()
+    configSaveTimer.stop()
+    if (root.settingsLoaded) root.flushSettings()
+    journalProc.running = false
   }
 
   onOpenedChanged: if (opened) {
@@ -3868,10 +3970,8 @@ Panel {
     if (!root.activeScanning &&
         (root.activeModelOptions.length === 0 || Date.now() - root.lastModelScanAt > 60000))
       refreshModels()
-    if (!root.running) root.adoptRunningServer()
-    // A hot reload keeps `running` without adopting again, so the running
-    // argv is looked up here as well.
-    else if (root.ownsUnit && root.runningArgs.length === 0) root.readRunningArgs()
+    root.refreshServiceStatus()
+    if (root.running && root.serviceIsRouter(root.backend)) runningPollTimer.restart()
   }
 
   // ---- Bar widget ----
@@ -3879,16 +3979,37 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  // Hover popup: graphical brief showing running status, active model,
+  // prompt/decode speed and real-time sparkline.
+  property bool barHovered: buttonHover.hovered
+  readonly property bool showBriefPopup: (root.barHovered || briefPopup.containsMouse) && !root.opened
+
+  Timer {
+    id: briefPopupTimer
+    interval: 350
+    running: root.showBriefPopup && !briefPopup.open
+    onTriggered: if (root.showBriefPopup && !root.opened) briefPopup.open = true
+  }
+
+  Timer {
+    id: briefPopupCloseTimer
+    interval: 200
+    running: !root.showBriefPopup && briefPopup.open
+    onTriggered: if (!root.showBriefPopup) briefPopup.open = false
+  }
+
+  onOpenedChanged: if (opened) briefPopup.open = false
+
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    readonly property string switchState: root.switchPhase
+    readonly property string switchState: ""
     text: Model.barSwitchText(
       Model.barText(Model.BAR_ICON,
                     root.running, root.showMetric, root.ppActive,
                     root.ppPercent, root.tokensPerSec, root.ppTokensPerSec),
-      switchState, root.configChanged)
+      switchState, false)
     active: root.running || root.starting
     // The live number already says the server is up; an accent colour on top
     // would be the only coloured mark in the bar.
@@ -3896,16 +4017,227 @@ Panel {
     fontFamily: root.bar.fontFamily
     fontSize: Style.font.bodySmall
     opacity: root.starting ? 0.6 : 1.0
-    tooltipText: {
-      if (switchState !== "") return Model.barSwitchTooltip(switchState, root.slotsProcessing)
-      if (!root.running) return ""
-      return root.backendSpec.label +
-        (root.configChanged ? " · changes pending — open the panel and press Restart" : "") +
-        " · " + (root.showMetric ? "Right-click: hide tokens/s" : "Right-click: show tokens/s")
-    }
+    tooltipText: ""
     onPressed: function(b) {
       if (b === Qt.RightButton) root.showMetric = !root.showMetric
       else root.toggle()
+    }
+
+    HoverHandler {
+      id: buttonHover
+    }
+  }
+
+  PopupCard {
+    id: briefPopup
+    anchorItem: button
+    bar: root.bar
+    owner: root
+    triggerMode: "hover"
+    contentWidth: fittedContentWidth(Style.space(260))
+    contentHeight: fittedContentHeight(briefLayout.implicitHeight)
+
+    ColumnLayout {
+      id: briefLayout
+      anchors.fill: parent
+      spacing: Style.space(6)
+
+      // Title & primary status header
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(6)
+
+        Rectangle {
+          width: 8
+          height: 8
+          radius: 4
+          color: root.running ? Commons.Color.accent : (root.starting ? Commons.Color.warning : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.3))
+        }
+
+        Text {
+          text: root.backendSpec.label
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+        }
+
+        Item { Layout.fillWidth: true }
+
+        Text {
+          text: root.starting ? "Starting…" : (root.running ? "Active" : "Stopped")
+          color: root.running ? Commons.Color.accent : root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          opacity: 0.8
+        }
+      }
+
+      // Loaded model
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(4)
+
+        Text {
+          text: "Model:"
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          opacity: 0.6
+        }
+
+        Text {
+          Layout.fillWidth: true
+          text: {
+            if (root.loadedModelId !== "") return root.loadedModelId
+            if (root.runningModel !== "") return Model.baseName(root.runningModel).replace(/\.gguf$/i, "")
+            return "None resident"
+          }
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: root.loadedModelId !== "" || root.runningModel !== ""
+          elide: Text.ElideMiddle
+        }
+      }
+
+      // Live metrics: Prompt processing & Token Generation
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(12)
+        visible: root.running
+
+        ColumnLayout {
+          spacing: 1
+          Text {
+            text: "Generation"
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            opacity: 0.6
+          }
+          Text {
+            text: root.tokensPerSec > 0 ? root.tokensPerSec.toFixed(1) + " tk/s" : "idle"
+            color: root.tokensPerSec > 0 ? Commons.Color.accent : root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: root.tokensPerSec > 0
+          }
+        }
+
+        ColumnLayout {
+          spacing: 1
+          Text {
+            text: "Prompt eval"
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            opacity: 0.6
+          }
+          Text {
+            text: root.ppActive
+              ? (root.ppPercent > 0 ? root.ppPercent + "%" : "evaluating…")
+              : (root.ppTokensPerSec > 0 ? root.ppTokensPerSec.toFixed(1) + " tk/s" : "idle")
+            color: (root.ppActive || root.ppTokensPerSec > 0) ? Commons.Color.accent : root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: root.ppActive || root.ppTokensPerSec > 0
+          }
+        }
+      }
+
+      // Graphical speed sparkline (recent token generation rate)
+      Canvas {
+        id: sparkCanvas
+        Layout.fillWidth: true
+        implicitHeight: Style.space(32)
+        visible: root.running
+
+        property var history: root.rateHistory
+
+        onHistoryChanged: requestPaint()
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+
+        onPaint: {
+          var ctx = getContext("2d")
+          ctx.clearRect(0, 0, width, height)
+          var list = root.rateHistory || []
+          if (list.length === 0) return
+
+          // Find peak for scaling (at least 10 tk/s floor)
+          var maxVal = 10
+          for (var i = 0; i < list.length; i++) {
+            if (list[i] > maxVal) maxVal = list[i]
+          }
+
+          var step = width / Math.max(1, list.length - 1)
+          var accent = Commons.Color.accent
+
+          // Area fill
+          ctx.beginPath()
+          ctx.moveTo(0, height)
+          for (var j = 0; j < list.length; j++) {
+            var val = list[j]
+            var x = j * step
+            var y = height - (val / maxVal) * (height - 4) - 2
+            if (j === 0) ctx.lineTo(x, y)
+            else ctx.lineTo(x, y)
+          }
+          ctx.lineTo(width, height)
+          ctx.closePath()
+          ctx.fillStyle = Qt.rgba(accent.r, accent.g, accent.b, 0.15)
+          ctx.fill()
+
+          // Line stroke
+          ctx.beginPath()
+          for (var k = 0; k < list.length; k++) {
+            var valK = list[k]
+            var xK = k * step
+            var yK = height - (valK / maxVal) * (height - 4) - 2
+            if (k === 0) ctx.moveTo(xK, yK)
+            else ctx.lineTo(xK, yK)
+          }
+          ctx.strokeStyle = accent
+          ctx.lineWidth = 1.5
+          ctx.stroke()
+        }
+      }
+
+      // Status indicator for all services
+      PanelSeparator { Layout.fillWidth: true; visible: root.running }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(8)
+
+        Repeater {
+          model: [
+            { id: "llamacpp", label: "Router" },
+            { id: "systemone", label: "Sys 1" },
+            { id: "ollama", label: "Ollama" }
+          ]
+
+          RowLayout {
+            spacing: Style.space(4)
+            readonly property bool isUp: modelData.id === root.backend ? root.running : (root.unitStates[modelData.id] === "active")
+
+            Rectangle {
+              width: 6
+              height: 6
+              radius: 3
+              color: isUp ? Commons.Color.accent : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.25)
+            }
+            Text {
+              text: modelData.label
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              opacity: isUp ? 0.85 : 0.4
+            }
+          }
+        }
+      }
     }
   }
 
@@ -3961,7 +4293,7 @@ Panel {
             spacing: 0
             Text {
               text: Model.statusLabel(root.running, root.starting, root.startingElapsed,
-                                      root.switchPhase,
+                                      "",
                                       root.slotsProcessing) +
                     " · " + root.backendSpec.label +
                     (root.adopted && !root.ownsUnit ? " · external" : "")
@@ -3990,37 +4322,17 @@ Panel {
             text: {
               if (root.takingOver) return "…"
               if (root.canTakeOver) return "Take over"
-              if (root.switching) return "Force"
-              if (root.configChanged) return "Restart"
               return root.starting || root.running ? "Stop" : "Start"
             }
             enabled: !root.stopping && !root.takingOver &&
                      (root.canTakeOver || root.starting || !root.running || root.canStop)
-            tooltipText: {
-              if (root.canTakeOver) return "Stop the system service and run an instance this widget controls"
-              if (root.switching)
-                return "Restart now, cutting off the requests still running"
-              if (root.configChanged)
-                return "Restart with the new model and tuning — running requests finish first" +
-                       (root.savesSlots ? ", the prompt cache is kept" : "") +
-                       "; clients are refused while it loads"
-              return ""
-            }
+            tooltipText: root.canTakeOver
+              ? "Stop the system service and run an instance this widget controls"
+              : (root.running ? "Stop the " + root.backendSpec.label + " service" : "")
             onClicked: {
               if (root.canTakeOver) root.takeOver()
-              else if (root.switching) root.forceSwitch()
-              else if (root.configChanged) root.switchServer()
               else root.toggleServer()
             }
-          }
-
-          // Stop stays reachable while the main button is Restart or Force.
-          Button {
-            visible: root.configChanged || root.switching
-            text: "■"
-            tooltipText: "Stop the server"
-            enabled: !root.stopping && root.canStop
-            onClicked: root.stopServer()
           }
         }
 
@@ -4879,12 +5191,137 @@ Panel {
             Item { Layout.fillWidth: true }
 
             TextAction {
+              visible: !root.showingSetup
+              text: "Re-run migration"
+              onClicked: {
+                root.closeSettings()
+                root.prepareMigration()
+                root.showingMigration = true
+              }
+            }
+
+            TextAction {
               active: true
               text: root.showingSetup ? "Finish" : "Done"
               onClicked: {
                 if (root.showingSetup) root.finishSetup()
                 else root.closeSettings()
               }
+            }
+          }
+        }
+
+        // ---- Migration dialog overlay ----
+        ColumnLayout {
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          visible: root.showingMigration && !root.showingLogs
+          spacing: Style.space(8)
+
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: Style.space(8)
+
+            Text {
+              text: "Migrate to Router"
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: root.fontSizeSubtitle
+              font.bold: true
+            }
+
+            Text {
+              Layout.fillWidth: true
+              text: "...................................................................................................."
+              color: root.bar.foreground
+              opacity: 0.15
+              elide: Text.ElideRight
+              font.family: root.bar.fontFamily
+              font.pixelSize: root.fontSize
+            }
+
+            Text {
+              text: "v4"
+              color: Commons.Color.accent
+              font.family: root.bar.fontFamily
+              font.pixelSize: root.fontSizeSmall
+              font.bold: true
+            }
+          }
+
+          Text {
+            Layout.fillWidth: true
+            text: "This version migrates settings to llama-swap config files (config.yaml and systemone.yaml) with independent persistent background services."
+            color: root.bar.foreground
+            opacity: 0.8
+            wrapMode: Text.WordWrap
+            font.family: root.bar.fontFamily
+            font.pixelSize: root.fontSizeSmall
+          }
+
+          // Migration report / summary box
+          Rectangle {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+            border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.15)
+            border.width: 1
+            radius: 4
+
+            Flickable {
+              anchors.fill: parent
+              anchors.margins: Style.space(6)
+              contentWidth: width
+              contentHeight: reportText.implicitHeight
+              clip: true
+
+              Text {
+                id: reportText
+                width: parent.width
+                text: root.migrationReport !== "" ? root.migrationReport : "Ready to migrate existing settings and models."
+                color: root.bar.foreground
+                opacity: 0.9
+                wrapMode: Text.WrapAnywhere
+                font.family: "monospace"
+                font.pixelSize: Style.font.caption
+              }
+            }
+          }
+
+          Text {
+            Layout.fillWidth: true
+            visible: root.migrationError !== ""
+            text: root.migrationError
+            color: Commons.Color.urgent
+            wrapMode: Text.WordWrap
+            font.family: root.bar.fontFamily
+            font.pixelSize: root.fontSizeSmall
+          }
+
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: Style.space(12)
+
+            TextAction {
+              text: "Start fresh"
+              enabled: !root.migrationRunning
+              onClicked: root.runMigration(true)
+            }
+
+            Item { Layout.fillWidth: true }
+
+            TextAction {
+              text: "Cancel"
+              visible: root.migrationDone || !root.migrationNeeded
+              enabled: !root.migrationRunning
+              onClicked: root.showingMigration = false
+            }
+
+            TextAction {
+              active: true
+              text: root.migrationRunning ? "Migrating…" : "Migrate"
+              enabled: !root.migrationRunning
+              onClicked: root.runMigration(false)
             }
           }
         }
@@ -4901,7 +5338,7 @@ Panel {
         Item {
           Layout.fillWidth: true
           Layout.fillHeight: true
-          visible: !root.showingLogs && !root.showingSetup && !root.showingSettings
+          visible: !root.showingLogs && !root.showingSetup && !root.showingSettings && !root.showingMigration
           clip: true
 
           // Server ------------------------------------------------------
@@ -5100,6 +5537,62 @@ Panel {
                     : "Address the server listens on — host:port, e.g. 127.0.0.1:8080."
                 }
               }
+
+              // Start on login toggle
+              Rectangle {
+                id: loginRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
+                color: loginHover.hovered
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+
+                  Text {
+                    text: "Start on login"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSize
+                    opacity: 0.85
+                  }
+
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSize
+                  }
+
+                  Text {
+                    text: root.loginOn(root.backend) ? "on" : "off"
+                    color: root.loginOn(root.backend) ? Commons.Color.accent : root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSize
+                    opacity: root.loginOn(root.backend) ? 1.0 : 0.6
+                  }
+                }
+
+                HoverHandler { id: loginHover; cursorShape: Qt.PointingHandCursor }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.setStartOnLogin(root.backend, !root.loginOn(root.backend))
+                }
+                PanelToolTip {
+                  visible: loginHover.hovered
+                  fontSize: root.fontSize
+                  text: "Enable the " + root.backendSpec.label + " user systemd service to start when you log in."
+                }
+              }
             }
 
 
@@ -5128,61 +5621,6 @@ Panel {
               font.pixelSize: root.fontSize
             }
 
-
-            // Same dotted row as the tuning page, so the one switch on this
-            // page does not read as a different kind of control.
-            Rectangle {
-              Layout.fillWidth: true
-              implicitHeight: 26
-              radius: 3
-              visible: Backends.supports(root.backend, "slotKv")
-              color: kvPersistenceHover.hovered
-                ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
-                : "transparent"
-
-              RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: Style.space(4)
-                anchors.rightMargin: Style.space(4)
-                spacing: Style.space(4)
-
-                Text {
-                  text: "Keep prompt cache"
-                  color: root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
-                  opacity: 0.85
-                }
-                Text {
-                  Layout.fillWidth: true
-                  text: "...................................................................................................."
-                  color: root.bar.foreground
-                  opacity: 0.15
-                  elide: Text.ElideRight
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
-                }
-                Text {
-                  text: root.kvPersistence ? "on" : "off"
-                  color: root.kvPersistence ? Commons.Color.accent : root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
-                  opacity: root.kvPersistence ? 1.0 : 0.6
-                }
-              }
-
-              HoverHandler { id: kvPersistenceHover; cursorShape: Qt.PointingHandCursor }
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.kvPersistence = !root.kvPersistence
-              }
-              PanelToolTip {
-                visible: kvPersistenceHover.hovered
-                fontSize: root.fontSize
-                text: "Save the prompt (KV) cache on stop, restart and when idle; restore it at start"
-              }
-            }
 
             Text {
               Layout.fillWidth: true
@@ -7953,7 +8391,7 @@ Panel {
         RowLayout {
           Layout.fillWidth: true
           spacing: Style.space(12)
-          visible: !root.showingSetup && !root.showingSettings
+          visible: !root.showingSetup && !root.showingSettings && !root.showingMigration
 
           TextAction {
             text: root.showingLogs ? "Hide log" : "Show log"
