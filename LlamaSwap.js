@@ -15,12 +15,24 @@
 //
 // Pure logic: no QML, no I/O. Panel.qml writes the files and talks to the API.
 
-var _req = (function() {
-  try { return eval("require") } catch (e) { return null }
-})()
-var Model = _req ? _req("./Model.js") : null
-var Params = _req ? _req("./Params.js") : null
-var Backends = _req ? _req("./Backends.js") : null
+// Node (tests) resolves dependencies with require; QML has none, so
+// Panel.qml injects its own imports through setDeps().
+var Model = null
+var Params = null
+var Backends = null
+try {
+  var _req = eval("require")
+  Model = _req("./Model.js")
+  Params = _req("./Params.js")
+  Backends = _req("./Backends.js")
+} catch (e) {}
+
+function setDeps(deps) {
+  deps = deps || {}
+  if (deps.Model) Model = deps.Model
+  if (deps.Params) Params = deps.Params
+  if (deps.Backends) Backends = deps.Backends
+}
 
 // ---- Defaults ----
 

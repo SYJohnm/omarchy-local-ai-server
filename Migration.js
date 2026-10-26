@@ -10,12 +10,24 @@
 // Migration reuses the same block writer and argv builder the Tuning page uses,
 // so a migrated model and an edited one cannot drift apart.
 
-var _req = (function() {
-  try { return eval("require") } catch (e) { return null }
-})()
-var LS = _req ? _req("./LlamaSwap.js") : null
-var Profiles = _req ? _req("./Profiles.js") : null
-var Backends = _req ? _req("./Backends.js") : null
+// Dependencies: Node (tests) resolves them with require. Quickshell's QML
+// engine has no require, so Panel.qml hands in its own imports via setDeps().
+var LS = null
+var Profiles = null
+var Backends = null
+try {
+  var _req = eval("require")
+  LS = _req("./LlamaSwap.js")
+  Profiles = _req("./Profiles.js")
+  Backends = _req("./Backends.js")
+} catch (e) {}
+
+function setDeps(deps) {
+  deps = deps || {}
+  if (deps.LS) LS = deps.LS
+  if (deps.Profiles) Profiles = deps.Profiles
+  if (deps.Backends) Backends = deps.Backends
+}
 
 var CONFIG_VERSION = 4
 var MAIN_START_PORT = 5800

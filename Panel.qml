@@ -27,6 +27,11 @@ import "Migration.js" as Migration
 // pp% sweep, while ollama only reports totals once a request completes.
 Panel {
   id: root
+  readonly property bool _depsReady: {
+    LlamaSwap.setDeps({ Model: Model, Params: Params, Backends: Backends })
+    Migration.setDeps({ LS: LlamaSwap, Profiles: Profiles, Backends: Backends })
+    return true
+  }
   moduleName: "io.github.syjohnm.local-ai-server"
   ipcTarget: "io.github.syjohnm.local-ai-server"
 
@@ -3077,6 +3082,17 @@ Panel {
   //
   // A persistent unit, not systemd-run: only a real unit can be enabled, and
   // "start on login" is what keeps the router independent of the shell.
+  function ollamaLaunchSpec() {
+    return Backends.ollamaLaunch({
+      binary: root.ollamaBinary,
+      host: root.host,
+      port: root.servicePort("ollama")
+    })
+  }
+  function ollamaLaunchEnv(launch) {
+    launch = launch || root.ollamaLaunchSpec()
+    return launch.env
+  }
   function ollamaUnitText() {
     var launch = root.ollamaLaunchSpec()
     var env = root.ollamaLaunchEnv(launch)
@@ -3555,6 +3571,7 @@ Panel {
       systemone: root.servicePort("systemone"),
       ollama: root.servicePort("ollama")
     }
+    Migration.setDeps({ LS: LlamaSwap, Profiles: Profiles, Backends: Backends })
     root.migrationPlan = Migration.plan({
       settings: root.oldSettings,
       builds: root.llamaBuilds,
