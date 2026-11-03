@@ -36,25 +36,37 @@ from concurrent.futures import ThreadPoolExecutor
 
 HOME = os.path.expanduser("~")
 
+# Fork releases sometimes rename the server binary. Both names speak the same
+# CLI; describe() still runs --version/--help before accepting one.
+SERVER_NAMES = ("llama-server", "beellama-server")
+
 FIXED = [
     HOME + "/llama.cpp/build/bin/llama-server",
     HOME + "/.local/bin/llama-server",
+    HOME + "/.local/bin/beellama-server",
     "/usr/bin/llama-server",
     "/usr/local/bin/llama-server",
     "/opt/llama.cpp/bin/llama-server",
 ]
 
-# Checkouts built in place. One and two levels under $HOME cover ~/llama.cpp,
-# ~/forks/ik_llama.cpp, ~/src/whatever; build/bin/Release is the MSVC-style
-# layout some CMake presets produce even on Linux.
-GLOBS = [
-    HOME + "/*/build/bin/llama-server",
-    HOME + "/*/*/build/bin/llama-server",
-    HOME + "/*/build/bin/Release/llama-server",
-    HOME + "/*/build-*/bin/llama-server",
-    "/opt/*/bin/llama-server",
-    "/opt/*/build/bin/llama-server",
-]
+# Checkouts built in place, plus extracted release archives. One and two levels
+# under $HOME cover ~/llama.cpp, ~/forks/ik_llama.cpp, ~/src/whatever;
+# build/bin/Release is the MSVC-style layout some CMake presets produce even on
+# Linux. Downloads/*/* is the usual shape of a distro tarball
+# (llama-b1234-bin-.../llama-b1234/llama-server) and was previously invisible.
+GLOBS = []
+for _name in SERVER_NAMES:
+    GLOBS += [
+        HOME + "/*/build/bin/" + _name,
+        HOME + "/*/*/build/bin/" + _name,
+        HOME + "/*/build/bin/Release/" + _name,
+        HOME + "/*/build-*/bin/" + _name,
+        HOME + "/Downloads/*/" + _name,
+        HOME + "/Downloads/*/*/" + _name,
+        HOME + "/Applications/*/" + _name,
+        "/opt/*/bin/" + _name,
+        "/opt/*/build/bin/" + _name,
+    ]
 
 GPU_LIBS = [("cuda", "CUDA"), ("hip", "ROCm"), ("vulkan", "Vulkan"),
             ("sycl", "SYCL"), ("metal", "Metal"), ("opencl", "OpenCL")]
@@ -72,12 +84,19 @@ def trusted(path):
 
 
 def llama_checkout(path):
-    # Globbed builds must also live in a llama-named checkout ("llama.cpp",
-    # "ik_llama.cpp", "llama-cpp-turboquant-cuda"): a stray repo that happens
-    # to ship a build/bin/llama-server is not run just for existing.
+    # Globbed builds must also live in a llama-named checkout or release
+    # directory ("llama.cpp", "ik_llama.cpp", "llama-b1234-bin-...",
+    # "BeellamaCpp"): a stray repo that happens to ship a server binary is not
+    # run just for existing. Extracted releases have no build/ segment, so the
+    # directory holding the binary is the name to judge.
     parts = os.path.realpath(path).split(os.sep)
-    root = parts[parts.index("build") - 1] if "build" in parts[1:] else ""
-    return "llama" in root.lower()
+    if "build" in parts[1:]:
+        root = parts[parts.index("build") - 1]
+    elif len(parts) >= 2:
+        root = parts[-2]
+    else:
+        root = ""
+    return "llama" in root.lower() or "beellama" in root.lower()
 
 
 def candidates(extra):
@@ -191,6 +210,13 @@ def describe(path):
     if version_out is None:
         return None
     m = re.search(r"version:\s*(\S+)\s*\(build\s+(\d+),\s*commit\s+([0-9a-f]+)\)", version_out)
+    help_out = run([path, "--help"]) or ""
+    flag_list = flags(help_out)
+    # A wrong-architecture binary can be run through a binfmt handler that
+    # prints its own error and still exits 0. It has no llama.cpp version and
+    # no llama.cpp flags; do not offer it as a build.
+    if not m and not flag_list:
+        return None
     root = git_root(path)
     remote = repo_name(git(root, "remote", "get-url", "origin")) if root else ""
     if remote.lower() in ("ggml-org/llama.cpp", "ggerganov/llama.cpp"):
@@ -201,10 +227,16 @@ def describe(path):
         fork = "llama.cpp (system package)"
     else:
         # A build without its checkout: name it after the directory it was
-        # built in, which is usually the project's.
+        # built in (or the release directory), which is usually the project's.
         parts = os.path.realpath(path).split(os.sep)
-        fork = parts[parts.index("build") - 1] if "build" in parts[1:] else "llama-server"
-    help_out = run([path, "--help"]) or ""
+        if "build" in parts[1:]:
+            fork = parts[parts.index("build") - 1]
+        elif len(parts) >= 2:
+            fork = parts[-2]
+        else:
+            fork = "llama-server"
+        if "beellama" in fork.lower():
+            fork = "beellama"
     return {
         "path": path,
         "real": os.path.realpath(path),
@@ -216,17 +248,44 @@ def describe(path):
         "date": git(root, "log", "-1", "--format=%cs") if root else "",
         "gpu": gpu_backend(path),
         "cacheTypes": cache_types(help_out),
-        "flags": flags(help_out),
+        "flags": flag_list,
     }
 
 
 def main():
-    paths = candidates(sys.argv[1:])
+    extras = [os.path.expanduser(p) for p in sys.argv[1:] if p]
+    paths = candidates(extras)
     # A build that hangs on --version (broken driver, slow mount) must not hold
     # the others: describe them together and keep candidate order.
     with ThreadPoolExecutor(max_workers=4) as pool:
         described = list(pool.map(describe, paths))
     builds = [info for info in described if info]
+
+    # A configured path that is missing, or exists but is not a runnable
+    # llama-server (wrong architecture, broken download), must be visible:
+    # silently dropping it is why a stale "Add fork" path looked like the
+    # plugin simply refused to detect the fork.
+    seen = {b["real"] for b in builds}
+    for path in extras:
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        exists = os.path.isfile(path) and os.access(path, os.X_OK)
+        builds.append({
+            "path": path,
+            "real": real,
+            "fork": "missing" if not exists else "unsupported",
+            "repo": "",
+            "version": "",
+            "build": "",
+            "commit": "",
+            "date": "",
+            "gpu": "",
+            "cacheTypes": [],
+            "flags": [],
+            "missing": True,
+        })
     print(json.dumps(builds))
 
 

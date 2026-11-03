@@ -82,11 +82,15 @@ Selected model, tuning values, host and port are runtime state in
 ## Models and builds
 
 Many people run more than one `llama-server` (upstream, a fork, the package).
-`llama_builds.py` finds them all — install paths, `PATH`, and checkouts with a
-`build/bin/` under `~` — and identifies each by remote, commit, date and GPU
-backend, plus the flags its `--help` accepts. With more than one build the
-Model and Server pages show a **Build** picker; **Auto** (the default) takes
-the first build that serves the model's tuning.
+`llama_builds.py` finds them all — install paths, `PATH`, checkouts with a
+`build/bin/` under `~`, and extracted release archives such as
+`~/Downloads/llama-b1234-bin-.../llama-b1234/llama-server`. A fork that names
+its server `beellama-server` is accepted too. Each build is identified by
+remote, commit, date and GPU backend, plus the flags its `--help` accepts.
+With more than one build the Model and Server pages show a **Build** picker;
+**Auto** (the default) takes the first build that serves the model's tuning.
+A configured fork path that no longer exists (or is not a runnable
+llama-server) is listed as **missing** instead of being dropped silently.
 
 The **Model** page follows the active backend: with System One selected it lists
 and selects that backend's decision models (its own directory when

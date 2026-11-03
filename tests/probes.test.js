@@ -104,3 +104,46 @@ test("llama_builds emits both long and short flags from --help", () => {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("llama_builds finds an extracted prebuilt release under ~/Downloads", () => {
+  const home = tmpdir()
+  try {
+    const release = path.join(home, "Downloads", "llama-test-bin", "llama-test")
+    fs.mkdirSync(release, { recursive: true })
+    const fake = path.join(release, "llama-server")
+    fs.writeFileSync(fake, [
+      "#!/bin/sh",
+      'case "$1" in',
+      '  --version) echo "version: 9.9 (build 42, commit abcdef0)" ;;',
+      '  --help) printf "%s\\n" "-c, --ctx-size N    context size" ;;',
+      "esac",
+      ""
+    ].join("\n"))
+    fs.chmodSync(fake, 0o755)
+
+    const builds = JSON.parse(execFileSync("python3", [BUILDS], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home }
+    }))
+    const build = builds.find((b) => b.path === fake)
+    assert.ok(build, "prebuilt release was not discovered: " + JSON.stringify(builds))
+    assert.strictEqual(build.fork, "llama-test")
+    assert.ok(build.flags.includes("--ctx-size"))
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("a configured fork path that disappeared is reported as missing", () => {
+  const dir = tmpdir()
+  try {
+    const gone = path.join(dir, "gone", "llama-server")
+    const builds = JSON.parse(execFileSync("python3", [BUILDS, gone], { encoding: "utf8" }))
+    const entry = builds.find((b) => b.path === gone)
+    assert.ok(entry, "missing configured path was silently dropped")
+    assert.strictEqual(entry.missing, true)
+    assert.strictEqual(entry.fork, "missing")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
