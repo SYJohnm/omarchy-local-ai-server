@@ -201,7 +201,12 @@ The relay is not enabled at login by default. `ipc call local-ai-server repair`
 observes `LoadState`, `ActiveState`, `UnitFileState` and the health endpoint,
 then applies `Service.plan()`: rewrite/reload a missing or stale unit, reset a
 failed one, start/stop/restart to match the persisted desired state, and leave
-a healthy service alone.
+a healthy service alone. A relay that was running when the shell restarted is
+resumed once settings and the build probe are ready.
+
+**Settings → Backend → Launch mode** switches between **Router** (the relay) and
+**Direct** (the old one-model llama-server launcher) while the server is
+stopped. The status header shows `router` when the relay owns the port.
 
 ## Scripting
 

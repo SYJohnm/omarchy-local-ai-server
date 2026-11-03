@@ -938,7 +938,9 @@ Panel {
   // llama.cpp runs behind the native-router relay; ollama/systemone keep the
   // direct launch path. The relay unit has its own name so a stale direct unit
   // can never be mistaken for it.
-  readonly property bool routerMode: root.backend === "llamacpp"
+  readonly property bool directLaunch: setting("directLaunch", false)
+  readonly property bool routerMode: root.backend === "llamacpp" && !root.directLaunch
+  property bool autoResumeTried: false
   // The state the service should be in, independent of what is observed right
   // now. Survives a restart so repair can bring a crashed unit back.
   property bool routerDesired: false
@@ -1806,6 +1808,7 @@ Panel {
     root.sanitizeSettings()
     root.settingsLoaded = true
     root.scheduleSettingsSave()
+    root.maybeAutoResume()
     // The flat values on disk are the ones last live, which for a model with a
     // profile is that profile -- but not for a file hand-edited to name a
     // different model, so the selection has the last word.
@@ -1987,8 +1990,13 @@ Panel {
     // fall back rather than launch into a flag the binary rejects.
     root.sanitizeSettings()
   }
-  onBuildsProbedChanged: if (root.buildsProbed && root.settingsLoaded && !root.applyingTuning)
-    root.applyTuningForSelection()
+  onBuildsProbedChanged: {
+    if (root.buildsProbed && root.settingsLoaded && !root.applyingTuning)
+      root.applyTuningForSelection()
+    root.maybeAutoResume()
+  }
+  onCapabilitiesProbedChanged: root.maybeAutoResume()
+  onModelOptionsChanged: root.maybeAutoResume()
   onCacheRamChanged: root.touchTuning()
   onTemperatureChanged: root.touchTuning()
   onCpuMoeChanged: root.touchTuning()
@@ -3180,6 +3188,37 @@ Panel {
     routerServiceProbe.running = true
   }
 
+  // A service that was wanted before the shell restarted should come back
+  // once settings, capabilities and the build probe are ready. One attempt per
+  // widget instance; repair remains available if it fails.
+  function maybeAutoResume() {
+    if (root.autoResumeTried || !root.routerMode || !root.routerDesired) return
+    if (!root.settingsLoaded || !root.capabilitiesProbed || !root.buildsProbed) return
+    if (root.modelOptions.length === 0 && root.pendingModelFiles.length === 0) return
+    if (root.running || root.starting || routerCtlProc.running || routerServiceProbe.running) return
+    autoResumeTimer.restart()
+  }
+
+  Timer {
+    id: autoResumeTimer
+    interval: 1500
+    repeat: false
+    onTriggered: {
+      if (root.autoResumeTried || !root.routerMode || !root.routerDesired) return
+      if (!root.settingsLoaded || !root.capabilitiesProbed || !root.buildsProbed) return
+      if (root.running || root.starting || routerCtlProc.running || routerServiceProbe.running) return
+      root.autoResumeTried = true
+      root.repairRouter()
+    }
+  }
+
+  function toggleLaunchMode() {
+    if (root.backend !== "llamacpp" || root.running || root.starting) return
+    root.routerDesired = false
+    root.setWidgetSetting("directLaunch", !root.directLaunch)
+    root.autoResumeTried = false
+  }
+
   function applyRouterRepair(raw) {
     var map = {}
     var lines = String(raw || "").split("\n")
@@ -3203,9 +3242,14 @@ Panel {
       endpoint: { responsive: health !== "000", healthy: health === "200" }
     })
     if (plan.actions.length === 0) {
-      if (root.routerDesired && health === "200") {
+      if (root.routerDesired && health === "200" && !root.running) {
         root.running = true
         root.starting = false
+        root.ownsUnit = true
+        if (root.runningModel === "") root.runningModel = root.launchModel
+        root.readRunningArgs()
+        root.runHook("started")
+        root.startMetrics()
       }
       return
     }
@@ -4460,6 +4504,7 @@ Panel {
                                       root.switchPhase,
                                       root.slotsProcessing) +
                     " · " + root.backendSpec.label +
+                    (root.routerMode ? " · router" : "") +
                     (root.adopted && !root.ownsUnit ? " · external" : "")
               color: root.bar.foreground
               font.family: root.bar.fontFamily
@@ -4811,6 +4856,65 @@ Panel {
                     }
                   }
                 }
+              }
+            }
+
+            // Launch mode: native router relay or the direct one-model
+            // llama-server path. Disabled while running so the stop path stays
+            // the one that owns the current process.
+            Rectangle {
+              id: settingsLaunchRow
+              Layout.fillWidth: true
+              implicitHeight: 26
+              radius: 3
+              visible: root.backend === "llamacpp"
+              color: settingsLaunchHover.hovered
+                ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                : "transparent"
+
+              RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(4)
+                anchors.rightMargin: Style.space(4)
+                spacing: Style.space(4)
+
+                Text {
+                  text: "Launch mode"
+                  color: root.bar.foreground
+                  opacity: 0.8
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSize
+                }
+                Text {
+                  Layout.fillWidth: true
+                  text: "...................................................................................................."
+                  color: root.bar.foreground
+                  opacity: 0.15
+                  elide: Text.ElideRight
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSize
+                }
+                Text {
+                  text: root.routerMode ? "Router" : "Direct"
+                  color: root.bar.foreground
+                  opacity: (root.running || root.starting) ? 0.45 : 0.85
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSize
+                }
+              }
+
+              HoverHandler { id: settingsLaunchHover; cursorShape: Qt.PointingHandCursor }
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                enabled: !root.running && !root.starting
+                onClicked: root.toggleLaunchMode()
+              }
+              PanelToolTip {
+                visible: settingsLaunchHover.hovered
+                text: root.running || root.starting
+                  ? "Stop the server to change the launch mode."
+                  : "Router: one relay, one router per build. Direct: one llama-server for the selected model."
               }
             }
 

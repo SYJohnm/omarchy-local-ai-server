@@ -156,6 +156,6 @@ the code is changed and the test suite still passes.
 
 ## Remaining for the release
 
-- [ ] Auto-resume a `routerDesired=true` service after a shell restart.
-- [ ] Router-mode indicator + explicit fallback to the direct launcher.
+- [x] Auto-resume a `routerDesired=true` service after a shell restart.
+- [x] Router-mode indicator + explicit fallback to the direct launcher.
 - [ ] Merge `feat/native-router` into `main`; decide the `origin/main` force-push.
