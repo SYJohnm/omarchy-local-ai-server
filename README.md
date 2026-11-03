@@ -176,10 +176,24 @@ it on its own — the header marks it **external** and Stop is disabled. **Take
 over** stops the system service (polkit asks), starts an instance the widget
 controls, and serves the same model store.
 
+## Native router (llama.cpp)
+
+llama.cpp models are served through the native `llama-server` router: the
+widget starts one relay (a persistent systemd user unit) on the public port,
+and the relay keeps one router per build. A model switch inside a build is
+handled by the router; a switch to a model from another build drains the
+running requests, replaces the router, and keeps the public port open.
+
+The relay is not enabled at login by default. `ipc call local-ai-server repair`
+rewrites the unit, runs `daemon-reload`, clears a failed state and starts (or
+restarts) it, so a missing/stale/failed unit can be repaired from a script or
+the menu.
+
 ## Scripting
 
 ```bash
 qs -p /usr/share/omarchy/shell ipc call local-ai-server status   # JSON: running, model, build, pp/tg
+qs -p /usr/share/omarchy/shell ipc call local-ai-server repair   # heal the relay unit/state
 qs -p /usr/share/omarchy/shell ipc call local-ai-server start
 qs -p /usr/share/omarchy/shell ipc call local-ai-server stop
 qs -p /usr/share/omarchy/shell ipc call local-ai-server model /path/to/model.gguf

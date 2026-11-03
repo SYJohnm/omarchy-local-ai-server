@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-RELAY = str(HERE / "relay.py")
+RELAY = os.environ.get("RELAY", str(HERE / "relay.py"))
 FAKE = str(HERE / "fake_router.py")
 
 MAIN_MODELS = ["/models/main-a.gguf", "/models/main-b.gguf"]

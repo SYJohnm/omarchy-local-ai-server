@@ -12,6 +12,7 @@ import "Backends.js" as Backends
 import "Hardware.js" as Hardware
 import "Params.js" as Params
 import "Profiles.js" as Profiles
+import "Router.js" as Router
 
 // Local AI server manager.
 //
@@ -933,6 +934,17 @@ Panel {
 
   property bool hasSystemdRun: false
   readonly property string unitName: Backends.unitName(root.moduleName, root.backend)
+  // llama.cpp runs behind the native-router relay; ollama/systemone keep the
+  // direct launch path. The relay unit has its own name so a stale direct unit
+  // can never be mistaken for it.
+  readonly property bool routerMode: root.backend === "llamacpp"
+  readonly property string unitDir: expandPath("~/.config/systemd/user/")
+  readonly property string routerUnitName: root.unitName + "-router"
+  readonly property string routerUnitPath: root.unitDir + root.routerUnitName + ".service"
+  readonly property string routerConfigPath: root.settingsDir + "router.json"
+  readonly property string routerStateDir: root.settingsDir + "router/"
+  readonly property string routerRelayPath: root.pluginDir + "/router/relay.py"
+  readonly property string activeUnitName: root.routerMode ? root.routerUnitName : root.unitName
   readonly property string procMarker: Backends.procMarker(root.moduleName, root.backend)
 
   // Set once the capability probe has reported, so the backend list and the
@@ -1984,6 +1996,22 @@ Panel {
   }
 
   FileView {
+    id: routerConfigFile
+    path: root.routerConfigPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+  }
+
+  FileView {
+    id: routerUnitFile
+    path: root.routerUnitPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+  }
+
+  FileView {
     id: settingsFile
     path: root.settingsPath
     watchChanges: false
@@ -2156,6 +2184,7 @@ Panel {
     target: "local-ai-server"
 
     function start(): void { if (!root.running && !root.starting && !root.stopping) root.startServer() }
+    function repair(): void { root.repairRouter() }
     function stop(): void { if ((root.running || root.starting) && !root.stopping) root.stopServer() }
     // Applies a changed model or tuning the same way the Restart button does;
     // called again while it waits for running requests, it forces (Force).
@@ -2841,7 +2870,7 @@ Panel {
         // and systemctl would call that server external, disabling Stop.
         // The per-instance marker is the same one killOrphans uses.
         unitOwnerProc.command = root.hasSystemdRun
-          ? ["systemctl", "--user", "is-active", root.unitName]
+          ? ["systemctl", "--user", "is-active", root.activeUnitName]
           : ["bash", "-c", "pgrep -f -- \"^$1 \" >/dev/null && echo active || echo inactive",
              "_", root.procMarker]
         unitOwnerProc.running = false
@@ -2945,7 +2974,175 @@ Panel {
     }
   }
 
+  // ---- Native router relay ----
+
+  // The relay lists every scanned model; only the selected one carries the
+  // tuned launch line for now. Other models keep the build their profile
+  // resolves to and run with the build/schema defaults.
+  function routerModels() {
+    var out = []
+    var seen = {}
+    // Before the capability scan finishes modelOptions is empty; the raw scan
+    // results are still usable, and a start pressed early should not produce a
+    // one-model relay.
+    var options = (root.modelOptions && root.modelOptions.length > 0)
+      ? root.modelOptions : (root.pendingModelFiles || [])
+    for (var i = 0; i < options.length; i++) {
+      var path = String((options[i] && options[i].value !== undefined) ? options[i].value : options[i])
+      if (path === "" || seen[path]) continue
+      var profile = Profiles.get(root.profiles, "llamacpp", path)
+      var tuning = Profiles.resolve(profile || {})
+      var build = Backends.resolveBuild(root.llamaBuilds, tuning.llamaBuild,
+                                        tuning.cacheTypeK, tuning.cacheTypeV)
+      if (!build) continue
+      seen[path] = true
+      out.push({ path: path, build: build.path,
+                 args: path === root.launchModel ? root.buildLlamaArgs() : [] })
+    }
+    if (root.launchModel !== "" && !seen[root.launchModel] && root.resolvedBuild) {
+      out.push({ path: root.launchModel, build: root.resolvedBuild.path, args: root.buildLlamaArgs() })
+    }
+    return out
+  }
+
+  function routerEnv() {
+    var env = {}
+    var parsed = root.parsedEnv
+    for (var i = 0; i < parsed.env.length; i++) env[parsed.env[i].name] = parsed.env[i].value
+    return env
+  }
+
+  function writeRouterFiles() {
+    try {
+      var models = root.routerModels()
+      if (models.length === 0) {
+        root.lastError = "No model has a usable llama.cpp build for the router."
+        return false
+      }
+      var internalBase = (root.port >= 5800 && root.port < 6800) ? root.port + 1000 : 5800
+      var built = Router.build({
+        host: root.host, port: root.port, stateDir: root.routerStateDir,
+        defaultModel: root.launchModel !== "" ? root.launchModel : models[0].path,
+        models: models, env: root.routerEnv(), internalPortBase: internalBase
+      })
+      routerConfigFile.setText(JSON.stringify(built.config, null, 2) + "\n")
+      routerUnitFile.setText(Router.unitFile({
+        relayPath: root.routerRelayPath,
+        configPath: root.routerConfigPath,
+        stateDir: root.routerStateDir,
+        workDir: String(root.settingsDir).replace(/\/+$/, "")
+      }))
+      return true
+    } catch (e) {
+      root.lastError = "Router config: " + String(e)
+      return false
+    }
+  }
+
+  function startRouter() {
+    if (routerCtlProc.running || root.stopping) return
+    if (root.running || root.starting) { root.restartRouter(); return }
+    if (!root.writeRouterFiles()) return
+    root.lastError = ""
+    root.expectedStop = false
+    root.starting = true
+    root.stopping = false
+    root.running = false
+    root.adopted = false
+    root.ownsUnit = true
+    root.startingElapsed = 0
+    root.healthUrl = "http://" + root.host + ":" + root.port + "/health"
+    routerCtlProc.action = "start"
+    routerCtlProc.command = ["bash", "-lc",
+      "mkdir -p -m 700 " + root.shellQuote(root.routerStateDir) + " " + root.shellQuote(root.unitDir) + "; " +
+      "systemctl --user daemon-reload; " +
+      "systemctl --user reset-failed " + root.shellQuote(root.routerUnitName) + " 2>/dev/null; " +
+      "systemctl --user start " + root.shellQuote(root.routerUnitName)]
+    routerCtlProc.running = false
+    routerCtlProc.running = true
+  }
+
+  function stopRouter() {
+    if (routerCtlProc.running) return
+    if (!root.running && !root.starting) return
+    root.expectedStop = true
+    root.stopping = true
+    root.starting = false
+    root.running = false
+    startingTimer.stop()
+    healthPollTimer.stop()
+    root.stopMetrics()
+    routerCtlProc.action = "stop"
+    routerCtlProc.command = ["systemctl", "--user", "stop", root.routerUnitName]
+    routerCtlProc.running = false
+    routerCtlProc.running = true
+  }
+
+  // Idempotent self-heal for the menu/scripts: a stopped relay is started
+  // (rewriting the unit, daemon-reload, reset-failed, enable), a running one is
+  // restarted with the current config.
+  function repairRouter() {
+    if (routerCtlProc.running) return
+    root.startRouter()
+  }
+
+  function restartRouter() {
+    if (routerCtlProc.running) return
+    if (!root.writeRouterFiles()) return
+    root.lastError = ""
+    root.expectedStop = false
+    root.starting = true
+    root.stopping = false
+    root.running = false
+    root.startingElapsed = 0
+    root.healthUrl = "http://" + root.host + ":" + root.port + "/health"
+    routerCtlProc.action = "restart"
+    routerCtlProc.command = ["bash", "-lc",
+      "mkdir -p -m 700 " + root.shellQuote(root.routerStateDir) + " " + root.shellQuote(root.unitDir) + "; " +
+      "systemctl --user daemon-reload; " +
+      "systemctl --user reset-failed " + root.shellQuote(root.routerUnitName) + " 2>/dev/null; " +
+      "systemctl --user restart " + root.shellQuote(root.routerUnitName)]
+    routerCtlProc.running = false
+    routerCtlProc.running = true
+  }
+
+  Process {
+    id: routerCtlProc
+    property string action: ""
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.starting = false
+        root.stopping = false
+        root.running = false
+        root.lastError = "Router service " + routerCtlProc.action + " failed (systemctl " + exitCode + ")."
+        return
+      }
+      if (routerCtlProc.action === "stop") {
+        root.expectedStop = false
+        root.stopping = false
+        root.starting = false
+        root.running = false
+        root.clearRestartState()
+        root.runHook("stopped")
+        root.resetMetrics()
+        return
+      }
+      // start / restart accepted: wait for the relay health endpoint.
+      root.runningModel = root.launchModel
+      root.runningArgs = root.currentLaunchArgs()
+      root.runningExe = root.resolvedBuild ? (root.resolvedBuild.real || root.resolvedBuild.path || "") : ""
+      root.starting = true
+      root.startingElapsed = 0
+      root.healthUrl = "http://" + root.host + ":" + root.port + "/health"
+      startingTimer.restart()
+      healthPollTimer.restart()
+      root.followJournal(0)
+      unitWatchTimer.restart()
+    }
+  }
+
   function startServer() {
+    if (root.routerMode) { root.startRouter(); return }
     if (root.backend !== "ollama" && !root.launchModel) {
       root.lastError = "Pick a model first"
       return
@@ -3295,7 +3492,7 @@ Panel {
   // the log can no longer be attached on some of them and forgotten on the
   // others. Backends.journalCommand decides the source from ownership.
   function followJournal(tailLines) {
-    var command = Backends.journalCommand(root.backend, root.unitName, root.ownsUnit, tailLines)
+    var command = Backends.journalCommand(root.backend, root.activeUnitName, root.ownsUnit, tailLines)
     if (!command) {
       // A server started by hand outside systemd: nothing to follow. Recorded
       // so the log view can say that instead of showing a blank page.
@@ -3323,7 +3520,7 @@ Panel {
 
   Process {
     id: unitStateProc
-    command: ["systemctl", "--user", "is-active", root.unitName]
+    command: ["systemctl", "--user", "is-active", root.activeUnitName]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -3378,6 +3575,7 @@ Panel {
   // Waits for running requests to finish, then restarts with the page's
   // current flags. Returns at once; restartDrainTimer does the waiting.
   function switchServer() {
+    if (root.routerMode) { root.restartRouter(); return }
     if (!root.configChanged) return
     root.lastError = ""
     root.restartIdleTicks = 0
@@ -3425,6 +3623,14 @@ Panel {
   }
 
   function readRunningArgs() {
+    if (root.routerMode) {
+      // The relay process argv says nothing about the selected model's launch
+      // line. Keep the line the widget generated so configChanged still
+      // detects a tuning change and offers Restart.
+      root.runningArgs = root.currentLaunchArgs()
+      root.runningExe = root.resolvedBuild ? (root.resolvedBuild.real || root.resolvedBuild.path || "") : ""
+      return
+    }
     // ollama has no per-launch argv to compare; its restart hash is separate.
     if (root.backend === "ollama") {
       root.runningArgs = []
@@ -3469,9 +3675,12 @@ Panel {
             "--prefix", root.kvPrefix(model)]
   }
 
-  readonly property bool savesSlots: root.kvPersistence && Backends.supports(root.backend, "slotKv")
+  // Slot save/restore is deliberately off in router mode until the relay
+  // gains a model selector for /slots; the relay currently owns load/unload.
+  readonly property bool savesSlots: root.kvPersistence && !root.routerMode && Backends.supports(root.backend, "slotKv")
 
   function stopServer() {
+    if (root.routerMode) { root.stopRouter(); return }
     var model = root.runningModel !== "" ? root.runningModel : root.launchModel
     var plan = Model.stopPlan(root.running, root.starting, root.canStop,
                               root.savesSlots, model, serverProc.running)
@@ -3616,7 +3825,7 @@ Panel {
           root.running = true
           startingTimer.stop()
           healthPollTimer.stop()
-          root.restoreSlots()
+          if (!root.routerMode) root.restoreSlots()
           // What Restart compares the page against.
           root.readRunningArgs()
           root.runHook("started")
@@ -3729,7 +3938,10 @@ Panel {
 
   Process {
     id: slotsProc
-    command: ["curl", "-s", "-m", "1", Backends.loadedModelsUrl("llamacpp", root.host, root.port)]
+    command: ["curl", "-s", "-m", "1",
+      Backends.loadedModelsUrl("llamacpp", root.host, root.port) +
+      (root.routerMode && root.runningModel !== ""
+        ? "?model=" + encodeURIComponent(root.runningModel) : "")]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.handleSlotsResponse(text)

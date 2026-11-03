@@ -128,3 +128,19 @@ the code is changed and the test suite still passes.
 - [ ] **Wire the planner into the relay lifecycle.** Panel observes
       `LoadState/ActiveState/UnitFileState` + endpoint health, applies the
       plan, and reports the repaired state.
+
+## Native router wiring (in progress)
+
+- [x] `Router.js` builds the relay JSON from the scanned catalogue and the
+      selected model's tuned argv (per-build grouping, ports, env, unit).
+- [x] `router/relay.py` owns the public port, writes per-build INI presets,
+      keeps one router per build and switches builds with drain.
+- [x] Panel lifecycle: persistent `*-router.service`, start/stop/restart,
+      adoption, journal, health, `repair` IPC, stale unit cleanup.
+- [x] Tests: `Router.js` (6), `Service.js` (10), relay end-to-end (4).
+- [ ] Non-selected models currently get build/default args only; extend
+      `routerModels()` to render every profile's tuning into its preset.
+- [ ] Per-build env from profiles (currently the global environment list).
+- [ ] Wire `Service.plan()` to observed `LoadState/ActiveState/UnitFileState`
+      instead of the start/restart shortcut.
+- [ ] Prompt cache through the relay (`/slots?model=` + save before unload).
