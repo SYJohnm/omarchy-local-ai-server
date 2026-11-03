@@ -33,6 +33,28 @@ import urllib.request
 SAVE_BUDGET = 60
 RESTORE_BUDGET = 120
 
+# /slots and the save/restore replies are tiny. A misconfigured or hostile
+# endpoint must not be able to make this helper read an unbounded body into
+# memory: the timeout bounds time, not bytes. Apply the same cap to HTTP error
+# bodies, which also come from the endpoint.
+MAX_RESPONSE_BYTES = 1 << 20
+
+
+def read_body(stream, headers, limit=MAX_RESPONSE_BYTES):
+    """Read at most `limit` bytes, refusing a lying/oversized Content-Length."""
+    value = headers.get("Content-Length") if headers is not None else None
+    if value is not None:
+        try:
+            length = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("invalid Content-Length")
+        if length < 0 or length > limit:
+            raise ValueError("response too large")
+    data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("response too large")
+    return data
+
 
 def call(url, method="GET", body=None, timeout=10):
     data = json.dumps(body).encode() if body is not None else None
@@ -40,10 +62,10 @@ def call(url, method="GET", body=None, timeout=10):
                                  headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, json.loads(resp.read() or b"null")
+            return resp.status, json.loads(read_body(resp, resp.headers) or b"null")
     except urllib.error.HTTPError as e:
         try:
-            return e.code, json.loads(e.read() or b"null")
+            return e.code, json.loads(read_body(e, e.headers) or b"null")
         except ValueError:
             return e.code, None
 
@@ -55,8 +77,18 @@ def slot_ids(base):
     return [s["id"] for s in data if isinstance(s, dict) and isinstance(s.get("id"), int)]
 
 
+def private_dir(path):
+    """Create the cache directory private, and repair an existing one."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
 def save(base, slot_dir, prefix):
     saved, notes = 0, []
+    private_dir(slot_dir)
     deadline = time.monotonic() + SAVE_BUDGET
     for sid in slot_ids(base):
         left = deadline - time.monotonic()
@@ -71,7 +103,14 @@ def save(base, slot_dir, prefix):
         tmp_path = os.path.join(slot_dir, tmp)
         try:
             if n > 0:
-                os.replace(tmp_path, os.path.join(slot_dir, name))
+                final_path = os.path.join(slot_dir, name)
+                os.replace(tmp_path, final_path)
+                # The server writes the file; this process narrows it again in
+                # case the launch umask was permissive.
+                try:
+                    os.chmod(final_path, 0o600)
+                except OSError:
+                    pass
                 saved += n
                 notes.append("slot %d: %d tokens" % (sid, n))
             elif os.path.exists(tmp_path):
@@ -118,6 +157,9 @@ def main():
     ap.add_argument("--prefix", required=True, help="file prefix, normally the model's file name")
     args = ap.parse_args()
 
+    # Literal prompt tokens live in the slot files; never create artifacts
+    # readable by another local user.
+    os.umask(0o077)
     base = args.url.rstrip("/")
     try:
         line = (save if args.action == "save" else restore)(base, args.dir, args.prefix)

@@ -1,0 +1,51 @@
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8080
+  },
+  "start_timeout_s": 30,
+  "stop_timeout_s": 10,
+  "drain_timeout_s": 60,
+  "default_model": "/models/qwen3-8b.gguf",
+  "routers": {
+    "main": {
+      "binary": "/home/sxy/llama.cpp/build/bin/llama-server",
+      "preset": "/tmp/spike/main.ini",
+      "port": 5801,
+      "args": [
+        "--models-max",
+        "2",
+        "--models-memory-margin",
+        "512"
+      ],
+      "env": {}
+    },
+    "turbo": {
+      "binary": "/home/sxy/llama-cpp-turboquant-cuda/build/bin/llama-server",
+      "preset": "/tmp/spike/turbo.ini",
+      "port": 5802,
+      "args": [
+        "--models-max",
+        "1",
+        "--models-memory-margin",
+        "512"
+      ],
+      "env": {}
+    }
+  },
+  "models": [
+    {
+      "id": "/models/qwen3-8b.gguf",
+      "path": "/models/qwen3-8b.gguf",
+      "build": "main",
+      "aliases": [
+        "qwen3-8b"
+      ]
+    },
+    {
+      "id": "/models/qwen3-turbo.gguf",
+      "path": "/models/qwen3-turbo.gguf",
+      "build": "turbo"
+    }
+  ]
+}

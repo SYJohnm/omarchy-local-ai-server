@@ -156,6 +156,10 @@ loading the weights is not. `slot_kv.py` does the saving through llama-server's
 `/slots` API. A cache saved under different tuning is rejected by the server
 and the start is simply cold.
 
+Slot files contain the prompt's token ids, so they are private by default: the
+cache directory is `0700`, saved files are `0600`, and detached launches run
+under `umask 077`.
+
 ## Surviving `omarchy restart shell`
 
 The server is launched detached as a transient systemd user unit

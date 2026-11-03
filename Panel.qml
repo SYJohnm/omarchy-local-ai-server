@@ -105,6 +105,9 @@ Panel {
   // Model directories found by the capability probe. Read by the Model page
   // and by model discovery; persisted rather than re-derived every load.
   property var detectedModelDirs: []
+  // Folders added by hand. modelsDir is the single selected folder from the
+  // widget settings; this list is additive and survives restarts.
+  property var extraModelDirs: []
 
 
 
@@ -150,6 +153,9 @@ Panel {
   // accepts the model's cache types. That is what the altBinary setting used
   // to do by hand for one hard-coded family of cache types.
   property var llamaBuilds: []
+  // Paths added by hand through "Add fork"; keeps every added build instead of
+  // replacing the single altBinary setting.
+  property var extraBuildPaths: []
   property bool buildsProbed: false
   property string llamaBuild: ""
   readonly property var resolvedBuild:
@@ -1703,6 +1709,38 @@ Panel {
         }
         root.customParams = restored
       }
+      if (Array.isArray(parsed.extraModelDirs)) {
+        var extraDirs = []
+        for (var ed = 0; ed < parsed.extraModelDirs.length; ed++) {
+          var edv = parsed.extraModelDirs[ed]
+          if (typeof edv === "string" && edv.trim() !== "") {
+            var edp = expandPath(edv)
+            if (extraDirs.indexOf(edp) === -1) extraDirs.push(edp)
+          }
+        }
+        root.extraModelDirs = extraDirs
+      }
+      if (Array.isArray(parsed.extraBuildPaths)) {
+        var extraPaths = []
+        for (var eb = 0; eb < parsed.extraBuildPaths.length; eb++) {
+          var ebv = parsed.extraBuildPaths[eb]
+          if (typeof ebv === "string" && ebv.trim() !== "") {
+            var ebp = expandPath(ebv)
+            if (extraPaths.indexOf(ebp) === -1) extraPaths.push(ebp)
+          }
+        }
+        root.extraBuildPaths = extraPaths
+      }
+      if (Array.isArray(parsed.detectedModelDirs))
+        root.detectedModelDirs = Backends.mergeDirs(parsed.detectedModelDirs, root.detectedModelDirs)
+      if (Array.isArray(parsed.llamaBuilds)) {
+        var savedBuilds = []
+        for (var sb = 0; sb < parsed.llamaBuilds.length; sb++) {
+          var build = parsed.llamaBuilds[sb]
+          if (build && typeof build.path === "string") savedBuilds.push(build)
+        }
+        root.llamaBuilds = Backends.mergeBuilds(savedBuilds, root.llamaBuilds)
+      }
     }
     // Profiles are read after the flat values, which double as the migration
     // source: a settings file written before profiles existed carries one
@@ -1715,6 +1753,7 @@ Panel {
 
     root.sanitizeSettings()
     root.settingsLoaded = true
+    root.scheduleSettingsSave()
     // The flat values on disk are the ones last live, which for a model with a
     // profile is that profile -- but not for a file hand-edited to name a
     // different model, so the selection has the last word.
@@ -1773,6 +1812,10 @@ Panel {
       systemoneModel: root.systemoneModel,
       extraArgs: root.extraArgs, keepAlive: root.keepAlive, extraEnv: root.extraEnv,
       llamaBuild: root.llamaBuild,
+      detectedModelDirs: root.detectedModelDirs,
+      extraModelDirs: root.extraModelDirs,
+      extraBuildPaths: root.extraBuildPaths,
+      llamaBuilds: root.llamaBuilds,
       kvPersistence: root.kvPersistence,
       systemoneCtx: root.systemoneCtx,
       hiddenBuiltins: root.hiddenBuiltins, shownOptionals: root.shownOptionals,
@@ -1925,10 +1968,18 @@ Panel {
   onKeepAliveChanged: root.touchTuning()
   onExtraEnvChanged: root.touchTuning()
   onKvPersistenceChanged: root.scheduleSettingsSave()
+  onExtraModelDirsChanged: root.scheduleSettingsSave()
+  onExtraBuildPathsChanged: root.scheduleSettingsSave()
+  onDetectedModelDirsChanged: root.scheduleSettingsSave()
+  onLlamaBuildsChanged: root.scheduleSettingsSave()
 
   Process {
     id: ensureSettingsDirProc
-    command: ["mkdir", "-p", root.settingsDir]
+    command: ["bash", "-lc",
+      "mkdir -p -m 700 " + root.shellQuote(root.settingsDir) + "; " +
+      "chmod 700 " + root.shellQuote(root.settingsDir) + "; " +
+      "mkdir -p -m 700 " + root.shellQuote(root.slotSaveDir) + "; " +
+      "chmod 700 " + root.shellQuote(root.slotSaveDir)]
     onExited: settingsFile.reload()
   }
 
@@ -2005,14 +2056,58 @@ Panel {
   // intend to download into is the common case on a machine with no models.
   function useModelsDir(path) {
     var dir = String(path || "").trim()
-    if (dir !== "") Quickshell.execDetached(["mkdir", "-p", expandPath(dir)])
+    if (dir !== "") Quickshell.execDetached(["mkdir", "-p", "-m", "700", expandPath(dir)])
     root.setWidgetSetting("modelsDir", dir)
   }
 
+  function addModelDir(path) {
+    var dir = expandPath(String(path || "").trim())
+    if (dir === "") return
+    Quickshell.execDetached(["mkdir", "-p", "-m", "700", dir])
+    var dirs = root.extraModelDirs.slice()
+    if (dirs.indexOf(dir) === -1) dirs.push(dir)
+    root.extraModelDirs = dirs
+    root.setWidgetSetting("modelsDir", dir)
+    root.refreshModels()
+  }
+
+  function removeModelDir(dir) {
+    var next = []
+    for (var i = 0; i < root.extraModelDirs.length; i++)
+      if (root.extraModelDirs[i] !== dir) next.push(root.extraModelDirs[i])
+    root.extraModelDirs = next
+    if (root.configuredModelsDir !== "" && expandPath(root.configuredModelsDir) === dir)
+      root.setWidgetSetting("modelsDir", "")
+    root.refreshModels()
+  }
+
+  function addBuildPath(path) {
+    var file = expandPath(String(path || "").trim())
+    if (file === "") return
+    var paths = root.extraBuildPaths.slice()
+    if (paths.indexOf(file) === -1) paths.push(file)
+    root.extraBuildPaths = paths
+    root.probeBuilds()
+  }
+
+  function removeBuildPath(path) {
+    var next = []
+    for (var i = 0; i < root.extraBuildPaths.length; i++)
+      if (root.extraBuildPaths[i] !== path) next.push(root.extraBuildPaths[i])
+    root.extraBuildPaths = next
+    if (root.llamaBuild === path) root.llamaBuild = ""
+    root.probeBuilds()
+  }
+
   readonly property var setupModelDirs: {
-    var dirs = root.detectedModelDirs.slice()
+    var dirs = []
     var configured = root.configuredModelsDir !== "" ? expandPath(root.configuredModelsDir) : ""
-    if (configured !== "" && dirs.indexOf(configured) === -1) dirs.unshift(configured)
+    if (configured !== "") dirs.push(configured)
+    var all = root.detectedModelDirs.concat(root.extraModelDirs)
+    for (var i = 0; i < all.length; i++) {
+      var dir = expandPath(all[i])
+      if (dir !== "" && dirs.indexOf(dir) === -1) dirs.push(dir)
+    }
     return dirs
   }
 
@@ -2127,7 +2222,8 @@ Panel {
           else if (key === "ollamapath" && root.detectedOllamaBinary === "") root.detectedOllamaBinary = value
           else if (key === "dir") dirs.push(value)
         }
-        root.detectedModelDirs = dirs
+        root.detectedModelDirs = Backends.mergeDirs(root.detectedModelDirs, dirs)
+        root.scheduleSettingsSave()
         root.capabilitiesProbed = true
         root.ensureInstalledBackend()
         root.refreshModels()
@@ -2144,6 +2240,7 @@ Panel {
     if (root.altBinary !== "") extra.push(expandPath(root.altBinary))
     if (root.configuredSystemoneBinary !== "") extra.push(expandPath(root.configuredSystemoneBinary))
     if (root.detectedLlamaBinary !== "") extra.push(root.detectedLlamaBinary)
+    for (var i = 0; i < root.extraBuildPaths.length; i++) extra.push(expandPath(root.extraBuildPaths[i]))
     buildsProbe.command = ["python3", root.pluginDir + "/llama_builds.py"].concat(extra)
     buildsProbe.running = true
   }
@@ -2155,8 +2252,9 @@ Panel {
       onStreamFinished: {
         var builds = []
         try { builds = JSON.parse(String(text || "").trim() || "[]") } catch (e) { builds = [] }
-        root.llamaBuilds = Array.isArray(builds) ? builds : []
+        root.llamaBuilds = Backends.mergeBuilds(root.llamaBuilds, Array.isArray(builds) ? builds : [])
         root.buildsProbed = true
+        root.scheduleSettingsSave()
         if (root.settingsLoaded) root.sanitizeSettings()
       }
     }
@@ -2183,8 +2281,13 @@ Panel {
   readonly property int modelScanDepth: 8
 
   readonly property var searchDirs: {
-    if (root.configuredModelsDir !== "") return [expandPath(root.configuredModelsDir)]
-    return root.detectedModelDirs
+    var dirs = root.configuredModelsDir !== ""
+      ? [expandPath(root.configuredModelsDir)] : root.detectedModelDirs.slice()
+    for (var i = 0; i < root.extraModelDirs.length; i++) {
+      var dir = expandPath(root.extraModelDirs[i])
+      if (dir !== "" && dirs.indexOf(dir) === -1) dirs.push(dir)
+    }
+    return dirs
   }
 
   function isUnder(path, dir) {
@@ -3131,7 +3234,7 @@ Panel {
       var cudaEnv = Hardware.isCuda(root.hardware)
         ? "GGML_CUDA_REGISTER_HOST=1 GGML_CUDA_DISABLE_GRAPHS=1 " : ""
       var userEnv = root.envScriptPrefix()
-      script = "mkdir -p " + root.shellQuote(expandPath(root.slotSaveDir)) + "; " +
+      script = "mkdir -p -m 700 " + root.shellQuote(expandPath(root.slotSaveDir)) + "; chmod 700 " + root.shellQuote(expandPath(root.slotSaveDir)) + "; " +
         cudaEnv + (userEnv !== "" ? userEnv + " " : "") +
         "exec -a " + root.procMarker + " " + soArgs.map(root.shellQuote).join(" ")
     } else {
@@ -3146,7 +3249,7 @@ Panel {
         ? "GGML_CUDA_REGISTER_HOST=1 GGML_CUDA_DISABLE_GRAPHS=1 " : ""
       var userEnv = root.envScriptPrefix()
       var args = root.buildLlamaArgs()
-      script = "mkdir -p " + root.shellQuote(expandPath(root.slotSaveDir)) + "; " +
+      script = "mkdir -p -m 700 " + root.shellQuote(expandPath(root.slotSaveDir)) + "; chmod 700 " + root.shellQuote(expandPath(root.slotSaveDir)) + "; " +
         cudaEnv + (userEnv !== "" ? userEnv + " " : "") + "exec -a " + root.procMarker + " " + args.map(root.shellQuote).join(" ")
     }
     return script
@@ -4576,6 +4679,19 @@ Panel {
                     font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSizeSmall
                   }
+                  Text {
+                    text: "✕"
+                    visible: root.extraModelDirs.indexOf(modelData) !== -1
+                    color: root.bar.foreground
+                    opacity: 0.45
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSizeSmall
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeModelDir(modelData)
+                    }
+                  }
                 }
 
                 HoverHandler { id: settingsDirHover; cursorShape: Qt.PointingHandCursor }
@@ -4639,7 +4755,7 @@ Panel {
                 font.family: root.bar.fontFamily
                 font.pixelSize: root.fontSize
                 onEditingFinished: {
-                  if (text.trim() !== "") root.useModelsDir(text)
+                  if (text.trim() !== "") root.addModelDir(text)
                   settingsAddFolderRow.editing = false
                 }
                 Keys.onEscapePressed: {
@@ -4762,6 +4878,27 @@ Panel {
                     font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSizeSmall
                   }
+                  Text {
+                    visible: modelData.missing === true
+                    text: "missing"
+                    color: Commons.Color.urgent
+                    opacity: 0.8
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSizeSmall
+                  }
+                  Text {
+                    text: "✕"
+                    visible: root.extraBuildPaths.indexOf(modelData.path) !== -1
+                    color: root.bar.foreground
+                    opacity: 0.45
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSizeSmall
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuildPath(modelData.path)
+                    }
+                  }
                 }
               }
             }
@@ -4829,7 +4966,7 @@ Panel {
                 font.family: root.bar.fontFamily
                 font.pixelSize: root.fontSize
                 onEditingFinished: {
-                  root.setWidgetSetting("altBinary", text.trim())
+                  if (text.trim() !== "") root.addBuildPath(text)
                   settingsAddForkRow.editing = false
                 }
                 Keys.onEscapePressed: {

@@ -259,14 +259,18 @@ function envPrefix(env, quote) {
 // setsid is the fallback when systemd is unavailable: it detaches the
 // process but leaves no way to read its output back.
 function detachedCommand(hasSystemdRun, unitName, script) {
+  // Prompt-cache slot files hold the prompt's token ids. Launch under a
+  // private umask so a server started outside systemd cannot write them
+  // group/world-readable; the generated unit sets UMask=0077 as well.
+  var guarded = "umask 077; " + String(script || "")
   if (hasSystemdRun) {
     return ["systemd-run", "--user",
             "--unit=" + unitName,
             "--collect",
             "--property=KillMode=mixed",
-            "bash", "-lc", script]
+            "bash", "-lc", guarded]
   }
-  return ["setsid", "bash", "-lc", script]
+  return ["setsid", "bash", "-lc", guarded]
 }
 
 // Stops the distribution's system unit so our own instance can bind the port.
@@ -409,8 +413,10 @@ function findBuild(builds, path) {
 }
 
 function buildSupports(build, cacheTypes) {
+  // A build that was in a previous scan but is gone now cannot be launched.
+  if (!build || build.missing === true) return false
   // A build whose --help could not be read is not ruled out.
-  if (!build || !build.cacheTypes || build.cacheTypes.length === 0) return true
+  if (!build.cacheTypes || build.cacheTypes.length === 0) return true
   for (var i = 0; i < cacheTypes.length; i++)
     if (cacheTypes[i] && build.cacheTypes.indexOf(cacheTypes[i]) === -1) return false
   return true
@@ -453,10 +459,60 @@ function supportsFlag(build, flag) {
 function resolveBuild(builds, chosen, cacheTypeK, cacheTypeV) {
   builds = builds || []
   var explicit = findBuild(builds, chosen)
-  if (explicit) return explicit
+  if (explicit && explicit.missing !== true) return explicit
   for (var i = 0; i < builds.length; i++)
     if (buildSupports(builds[i], [cacheTypeK, cacheTypeV])) return builds[i]
-  return builds.length > 0 ? builds[0] : null
+  // A previous scan's build that vanished from this one must not win auto.
+  for (var j = 0; j < builds.length; j++)
+    if (builds[j] && builds[j].missing !== true) return builds[j]
+  return null
+}
+
+// A build is usable only while the file the probe found is still there. The
+// list keeps vanished builds so a mount/checkout that comes back later does
+// not lose its settings; they are flagged and skipped for launching.
+function buildAvailable(build) {
+  return !!build && build.missing !== true
+}
+
+// Merge a fresh probe into the list the widget already had. Fresh entries win
+// (they carry the current version/flags); entries only the previous list had
+// stay as `missing: true` instead of disappearing on a restart or a temporarily
+// unmounted disk.
+function mergeBuilds(previous, fresh) {
+  var out = []
+  var seen = {}
+  function key(build) {
+    if (!build) return ""
+    return String(build.real || build.path || "")
+  }
+  function add(build, missing) {
+    var k = key(build)
+    if (k === "" || seen[k]) return
+    seen[k] = true
+    var copy = {}
+    for (var field in build) copy[field] = build[field]
+    copy.missing = missing
+    out.push(copy)
+  }
+  for (var i = 0; i < (fresh || []).length; i++) add(fresh[i], false)
+  for (var j = 0; j < (previous || []).length; j++) add(previous[j], true)
+  return out
+}
+
+// Union of two directory lists, first occurrence wins. Used for detected model
+// folders so a scan that runs before a disk is mounted cannot erase the
+// folders a previous run saved.
+function mergeDirs(previous, fresh) {
+  var out = []
+  var lists = [previous || [], fresh || []]
+  for (var l = 0; l < lists.length; l++) {
+    for (var i = 0; i < lists[l].length; i++) {
+      var dir = String(lists[l][i] == null ? "" : lists[l][i]).trim()
+      if (dir !== "" && out.indexOf(dir) === -1) out.push(dir)
+    }
+  }
+  return out
 }
 
 // Cache types a model can pick: its build's own, or on auto every type any
@@ -529,6 +585,9 @@ if (typeof module !== "undefined") {
     slotPrefix: slotPrefix,
     findBuild: findBuild,
     buildSupports: buildSupports,
+    buildAvailable: buildAvailable,
+    mergeBuilds: mergeBuilds,
+    mergeDirs: mergeDirs,
     resolveBuild: resolveBuild,
     buildCacheTypes: buildCacheTypes,
     buildLabel: buildLabel,

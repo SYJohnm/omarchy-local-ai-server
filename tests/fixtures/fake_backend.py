@@ -7,6 +7,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 NAME=os.environ["NAME"]; ADDR=sys.argv[1]; DELAY=float(os.environ.get("DELAY","0"))
 t0=time.time()
 SLOT_DIR=os.environ.get("SLOT_DIR","")
+HUGE_SLOTS=int(os.environ.get("HUGE_SLOTS","0"))
 TOKENS={0:0,1:0}
 class H(BaseHTTPRequestHandler):
     protocol_version="HTTP/1.1"
@@ -16,7 +17,9 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_GET(self):
         if time.time()-t0<DELAY: return self.j(503,{"error":"loading"})
-        if self.path=="/slots": return self.j(200,[{"id":i,"is_processing":False} for i in TOKENS])
+        if self.path=="/slots":
+            if HUGE_SLOTS: return self.j(200,[{"id":0,"pad":"x"*HUGE_SLOTS}])
+            return self.j(200,[{"id":i,"is_processing":False} for i in TOKENS])
         self.j(200,{"status":"ok","name":NAME})
     def do_POST(self):
         body=json.loads(self.rfile.read(int(self.headers.get("Content-Length",0))) or b"{}")

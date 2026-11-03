@@ -116,3 +116,15 @@ the code is changed and the test suite still passes.
 - `omarchy plugin validate .` passes.
 - The server still starts, stops, restarts and restores its cache.
 - The README matches the code (System One works; flag dropping works).
+
+## Native router integration — service (in progress)
+
+- [x] **Sleep is out of the design.** No `--sleep-idle-seconds`; the relay owns
+      idle unload so it can save prompt-cache slots first.
+- [x] **Pure repair planner** (`Service.js`, tested): missing/stale unit →
+      write + daemon-reload, failed → reset-failed, unhealthy active → restart,
+      start/stop to match the desired state, enable/disable for persistent
+      units, and `activating` is left alone.
+- [ ] **Wire the planner into the relay lifecycle.** Panel observes
+      `LoadState/ActiveState/UnitFileState` + endpoint health, applies the
+      plan, and reports the repaired state.

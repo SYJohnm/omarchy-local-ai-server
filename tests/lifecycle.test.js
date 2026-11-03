@@ -97,10 +97,10 @@ function post(port, body) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-async function startFake(t, name, slotDir) {
+async function startFake(t, name, slotDir, extraEnv) {
   const port = await freePort()
   const proc = spawn("python3", [FAKE, String(port)],
-    { env: { ...process.env, NAME: name, SLOT_DIR: slotDir }, stdio: ["ignore", "pipe", "pipe"] })
+    { env: { ...process.env, NAME: name, SLOT_DIR: slotDir, ...(extraEnv || {}) }, stdio: ["ignore", "pipe", "pipe"] })
   t.after(() => proc.kill("SIGTERM"))
   for (let i = 0; i < 50; i++) {
     const up = await new Promise((resolve) => {
@@ -129,6 +129,24 @@ test("save writes one file per non-empty slot and no stray .tmp", async (t) => {
   const out = slotKv("save", srv.port, dir, "A.gguf")
   assert.match(out, /^saved 100 tokens/)
   assert.deepStrictEqual(fs.readdirSync(dir).sort(), ["A.gguf.slot0.bin"])
+})
+
+test("a saved cache and its directory are private", async (t) => {
+  const dir = tmpDir()
+  const srv = await startFake(t, "A", dir)
+  await post(srv.port)
+  slotKv("save", srv.port, dir, "A.gguf")
+  const file = path.join(dir, "A.gguf.slot0.bin")
+  assert.strictEqual(fs.statSync(file).mode & 0o777, 0o600)
+  assert.strictEqual(fs.statSync(dir).mode & 0o777, 0o700)
+})
+
+test("an oversized response is refused instead of read into memory", async (t) => {
+  const dir = tmpDir()
+  const srv = await startFake(t, "A", dir, { HUGE_SLOTS: "2000000" })
+  const out = slotKv("save", srv.port, dir, "A.gguf")
+  assert.match(out, /^save failed: response too large/)
+  assert.deepStrictEqual(fs.readdirSync(dir), [])
 })
 
 test("restore brings a saved cache back into a fresh server", async (t) => {
