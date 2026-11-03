@@ -145,6 +145,17 @@ the code is changed and the test suite still passes.
 - [x] Prompt cache through the relay: save before stop/build switch, restore
       once on the model's first request; `KillMode=mixed` so the relay can
       save before systemd tears the router down.
+- [x] Real multi-build switch validated: upstream LFM3 ↔ turboquant Qwen3.5,
+      two routers, distinct presets, slot save/restore across the switch.
+- [x] Router flags are filtered per build (turboquant 0.6 rejects
+      `--models-memory-margin`), and every GET (props/metrics/slots) is
+      passive so the panel's polls cannot drag the relay back to a build.
 - [ ] Per-build env from profiles — deliberately global for now.
 - [x] `Service.plan()` is wired to observed `LoadState/ActiveState/UnitFileState`
       and health; desired running state is persisted as `routerDesired`.
+
+## Remaining for the release
+
+- [ ] Auto-resume a `routerDesired=true` service after a shell restart.
+- [ ] Router-mode indicator + explicit fallback to the direct launcher.
+- [ ] Merge `feat/native-router` into `main`; decide the `origin/main` force-push.

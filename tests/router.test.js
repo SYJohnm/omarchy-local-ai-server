@@ -86,3 +86,16 @@ test("unitFile uses a private umask and the exact relay invocation", () => {
   assert.ok(unit.includes('ExecStart="python3" "/plugins/io.github.syjohnm.local-ai-server/router/relay.py"'))
   assert.ok(unit.includes('--config "/state/router.json"'))
 })
+
+test("router args are filtered by each build's own --help flags", () => {
+  const { config } = R.build({
+    stateDir: "/state",
+    models: [
+      { path: "/m/a.gguf", build: "/b/old/llama-server", flags: ["--models-max"], args: [] },
+      { path: "/m/b.gguf", build: "/b/new/llama-server", flags: ["--models-max", "--models-memory-margin"], args: [] }
+    ]
+  })
+  assert.deepStrictEqual(config.routers["/b/old/llama-server"].args, ["--models-max", "2"])
+  assert.deepStrictEqual(config.routers["/b/new/llama-server"].args,
+    ["--models-max", "2", "--models-memory-margin", "512"])
+})

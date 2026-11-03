@@ -82,10 +82,17 @@ function build(opts) {
   let nextPort = Number(opts.internalPortBase || 5800)
   for (const model of models) {
     if (!routers[model.build]) {
+      // Older forks ship router mode without every newer router flag. Probe
+      // results carry the build's --help flags; omit what it cannot parse.
+      const flags = model.flags || []
+      const supports = (flag) => flags.length === 0 || flags.includes(flag)
+      const args = []
+      if (supports("--models-max")) args.push("--models-max", "2")
+      if (supports("--models-memory-margin")) args.push("--models-memory-margin", "512")
       routers[model.build] = {
         binary: model.build,
         port: nextPort++,
-        args: ["--models-max", "2", "--models-memory-margin", "512"]
+        args: args
       }
       if (opts.env && Object.keys(opts.env).length > 0) routers[model.build].env = opts.env
     }

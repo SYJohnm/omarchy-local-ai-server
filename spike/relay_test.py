@@ -239,6 +239,15 @@ class RelaySpikeTest(unittest.TestCase):
         self.assertTrue(any(s.get("switching") for s in observed_open), "a switch should have been observed")
         self.assertEqual(state(self.port)["active_build"], "turbo")
 
+    def test_status_read_never_switches_build(self):
+        self.assertEqual(chat(self.port, MAIN_MODELS[0])[0], 200)
+        self.assertEqual(state(self.port)["active_build"], "main")
+        status, _headers, _data = request(
+            self.port, "GET", "/slots?model=" + TURBO_MODELS[0])
+        self.assertEqual(status, 404)
+        self.assertEqual(state(self.port)["active_build"], "main",
+                         "a status read must not switch builds")
+
     def test_health_and_metrics_proxy(self):
         status, _headers, data = request(self.port, "GET", "/health")
         self.assertEqual(status, 200)

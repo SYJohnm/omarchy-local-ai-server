@@ -192,6 +192,11 @@ and the relay keeps one router per build. A model switch inside a build is
 handled by the router; a switch to a model from another build drains the
 running requests, replaces the router, and keeps the public port open.
 
+Router flags are filtered against each build's `--help` (an older fork can
+reject `--models-memory-margin`). Diagnostics and metrics (`GET /props`,
+`/metrics`, `/slots`, …) are passive: only inference and explicit load/unload
+requests can switch builds.
+
 The relay is not enabled at login by default. `ipc call local-ai-server repair`
 observes `LoadState`, `ActiveState`, `UnitFileState` and the health endpoint,
 then applies `Service.plan()`: rewrite/reload a missing or stale unit, reset a

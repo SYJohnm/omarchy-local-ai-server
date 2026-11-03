@@ -3081,13 +3081,14 @@ Panel {
       if (!build) continue
       var tuning = Profiles.resolveFor(root.profiles, "llamacpp", path, build.path)
       seen[path] = true
-      out.push({ path: path, build: build.path,
+      out.push({ path: path, build: build.path, flags: build.flags || [],
                  args: root.argsForModelProfile(path, build.path, tuning) })
     }
     if (root.launchModel !== "" && !seen[root.launchModel] && root.resolvedBuild) {
       var selectedTuning = Profiles.resolveFor(root.profiles, "llamacpp", root.launchModel,
                                                root.resolvedBuild.path)
       out.push({ path: root.launchModel, build: root.resolvedBuild.path,
+                 flags: root.resolvedBuild.flags || [],
                  args: root.argsForModelProfile(root.launchModel, root.resolvedBuild.path, selectedTuning) })
     }
     return out

@@ -402,6 +402,9 @@ class Relay:
             router.wait_ready()
         except Exception:
             with self.cond:
+                # The old router is already stopped; leaving it as active would
+                # forward the next request to a dead port.
+                self.active = None
                 self.switching = False
                 self.cond.notify_all()
             raise
@@ -531,10 +534,26 @@ class RelayHandler(BaseHTTPRequestHandler):
             )
 
         build = model["build"]
+
+        # Status/metrics reads must never drive a build switch: the panel polls
+        # /slots?model=<selected> while a request runs on another build, and
+        # taking that as intent caused an endless switch loop. Serve the read
+        # from the active router only when it owns the model's build.
+        # Every GET is diagnostic/polling. Only POST (inference, explicit
+        # load/unload) expresses "serve this model now"; a metrics probe must
+        # never drag the relay back to the previously selected build.
+        read_only = method == "GET"
+        if read_only:
+            active = self.relay.active
+            if active is None or active.build != build:
+                return self._json({"error": {"message": "model build is not active", "type": "invalid_request_error"}}, 404)
+            return self._forward(method, self.path, body, build)
+
         try:
             self.relay.acquire(build)
         except Exception as error:
             log("router %s failed: %s" % (build, error))
+            self.relay.release(build)
             return self._json({"error": {"message": str(error), "type": "server_error"}}, 502)
 
         try:
