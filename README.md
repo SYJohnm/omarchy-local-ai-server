@@ -160,6 +160,10 @@ loading the weights is not. `slot_kv.py` does the saving through llama-server's
 `/slots` API. A cache saved under different tuning is rejected by the server
 and the start is simply cold.
 
+> **Router mode:** the llama.cpp path now runs behind the native-router relay,
+> and slot save/restore is **not wired there yet**; it is tracked in TODO.md.
+> The direct ollama path is unchanged.
+
 Slot files contain the prompt's token ids, so they are private by default: the
 cache directory is `0700`, saved files are `0600`, and detached launches run
 under `umask 077`.
