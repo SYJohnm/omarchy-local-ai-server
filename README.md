@@ -193,9 +193,10 @@ handled by the router; a switch to a model from another build drains the
 running requests, replaces the router, and keeps the public port open.
 
 The relay is not enabled at login by default. `ipc call local-ai-server repair`
-rewrites the unit, runs `daemon-reload`, clears a failed state and starts (or
-restarts) it, so a missing/stale/failed unit can be repaired from a script or
-the menu.
+observes `LoadState`, `ActiveState`, `UnitFileState` and the health endpoint,
+then applies `Service.plan()`: rewrite/reload a missing or stale unit, reset a
+failed one, start/stop/restart to match the persisted desired state, and leave
+a healthy service alone.
 
 ## Scripting
 

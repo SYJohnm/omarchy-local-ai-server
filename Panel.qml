@@ -13,6 +13,7 @@ import "Hardware.js" as Hardware
 import "Params.js" as Params
 import "Profiles.js" as Profiles
 import "Router.js" as Router
+import "Service.js" as Service
 
 // Local AI server manager.
 //
@@ -938,6 +939,9 @@ Panel {
   // direct launch path. The relay unit has its own name so a stale direct unit
   // can never be mistaken for it.
   readonly property bool routerMode: root.backend === "llamacpp"
+  // The state the service should be in, independent of what is observed right
+  // now. Survives a restart so repair can bring a crashed unit back.
+  property bool routerDesired: false
   readonly property string unitDir: expandPath("~/.config/systemd/user/")
   readonly property string routerUnitName: root.unitName + "-router"
   readonly property string routerUnitPath: root.unitDir + root.routerUnitName + ".service"
@@ -1712,6 +1716,7 @@ Panel {
       if (typeof parsed.extraArgs === "string") root.extraArgs = parsed.extraArgs
       if (typeof parsed.extraEnv === "string") root.extraEnv = parsed.extraEnv
       if (typeof parsed.llamaBuild === "string") root.llamaBuild = parsed.llamaBuild
+      if (typeof parsed.routerDesired === "boolean") root.routerDesired = parsed.routerDesired
       if (typeof parsed.keepAlive === "string") root.keepAlive = parsed.keepAlive
       if (typeof parsed.kvPersistence === "boolean") root.kvPersistence = parsed.kvPersistence
       if (typeof parsed.systemoneCtx === "string") root.systemoneCtx = parsed.systemoneCtx
@@ -1859,6 +1864,7 @@ Panel {
       systemoneModel: root.systemoneModel,
       extraArgs: root.extraArgs, keepAlive: root.keepAlive, extraEnv: root.extraEnv,
       llamaBuild: root.llamaBuild,
+      routerDesired: root.routerDesired,
       detectedModelDirs: root.detectedModelDirs,
       extraModelDirs: root.extraModelDirs,
       extraBuildPaths: root.extraBuildPaths,
@@ -3129,6 +3135,7 @@ Panel {
     if (!root.writeRouterFiles()) return
     root.lastError = ""
     root.expectedStop = false
+    root.routerDesired = true
     root.starting = true
     root.stopping = false
     root.running = false
@@ -3149,6 +3156,7 @@ Panel {
   function stopRouter() {
     if (routerCtlProc.running) return
     if (!root.running && !root.starting) return
+    root.routerDesired = false
     root.expectedStop = true
     root.stopping = true
     root.starting = false
@@ -3162,16 +3170,85 @@ Panel {
     routerCtlProc.running = true
   }
 
-  // Idempotent self-heal for the menu/scripts: a stopped relay is started
-  // (rewriting the unit, daemon-reload, reset-failed, enable), a running one is
-  // restarted with the current config.
+  // Idempotent self-heal for the menu/scripts. Desired state is "running";
+  // Service.plan() decides whether the unit must be rewritten, reloaded,
+  // reset, started, restarted or merely left alone.
   function repairRouter() {
-    if (routerCtlProc.running) return
-    root.startRouter()
+    if (routerCtlProc.running || routerServiceProbe.running) return
+    root.routerDesired = true
+    routerServiceProbe.running = true
+  }
+
+  function applyRouterRepair(raw) {
+    var map = {}
+    var lines = String(raw || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim()
+      var eq = line.indexOf("=")
+      if (eq > 0) map[line.slice(0, eq)] = line.slice(eq + 1)
+    }
+    var health = String(map["health"] || "000")
+    var unit = {
+      persistent: true,
+      exists: map["LoadState"] !== "not-found",
+      loadState: map["LoadState"] || "not-found",
+      activeState: map["ActiveState"] || "unknown",
+      enabled: map["UnitFileState"] || "unknown",
+      configMatches: !root.configChanged
+    }
+    var plan = Service.plan({
+      desired: { running: root.routerDesired, enabled: false },
+      unit: unit,
+      endpoint: { responsive: health !== "000", healthy: health === "200" }
+    })
+    if (plan.actions.length === 0) {
+      if (root.routerDesired && health === "200") {
+        root.running = true
+        root.starting = false
+      }
+      return
+    }
+    if (!root.writeRouterFiles()) return
+    var script = "mkdir -p -m 700 " + root.shellQuote(root.routerStateDir) + " " +
+                 root.shellQuote(root.unitDir) + "; "
+    var run = false
+    for (var a = 0; a < plan.actions.length; a++) {
+      var verb = plan.actions[a].verb
+      if (verb === "write-unit") continue
+      if (verb === "daemon-reload") script += "systemctl --user daemon-reload; "
+      else if (verb === "reset-failed") script += "systemctl --user reset-failed " + root.shellQuote(root.routerUnitName) + " 2>/dev/null; "
+      else if (verb === "start") { script += "systemctl --user start " + root.shellQuote(root.routerUnitName) + "; "; run = true }
+      else if (verb === "restart") { script += "systemctl --user restart " + root.shellQuote(root.routerUnitName) + "; "; run = true }
+      else if (verb === "stop") script += "systemctl --user stop " + root.shellQuote(root.routerUnitName) + "; "
+      else if (verb === "enable") script += "systemctl --user enable " + root.shellQuote(root.routerUnitName) + " 2>/dev/null; "
+      else if (verb === "disable") script += "systemctl --user disable " + root.shellQuote(root.routerUnitName) + " 2>/dev/null; "
+    }
+    routerCtlProc.action = "repair"
+    routerCtlProc.plannedRun = run
+    routerCtlProc.plannedStop = plan.actions.some(function(x) { return x.verb === "stop" })
+    root.starting = run
+    root.stopping = !run && routerCtlProc.plannedStop
+    routerCtlProc.command = ["bash", "-lc", script]
+    routerCtlProc.running = false
+    routerCtlProc.running = true
+  }
+
+  Process {
+    id: routerServiceProbe
+    command: ["bash", "-lc",
+      "systemctl --user show -p LoadState -p ActiveState -p UnitFileState -p MainPID " +
+      root.shellQuote(root.routerUnitName) + " 2>/dev/null; " +
+      "printf '\\nhealth=%s' \"$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 " +
+      root.shellQuote("http://" + root.host + ":" + root.port + "/health") + ")\""]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyRouterRepair(text)
+    }
   }
 
   function restartRouter() {
     if (routerCtlProc.running) return
+    root.routerDesired = true
     if (!root.writeRouterFiles()) return
     root.lastError = ""
     root.expectedStop = false
@@ -3193,12 +3270,31 @@ Panel {
   Process {
     id: routerCtlProc
     property string action: ""
+    property bool plannedRun: false
+    property bool plannedStop: false
     onExited: function(exitCode) {
       if (exitCode !== 0) {
         root.starting = false
         root.stopping = false
         root.running = false
         root.lastError = "Router service " + routerCtlProc.action + " failed (systemctl " + exitCode + ")."
+        return
+      }
+      if (routerCtlProc.action === "repair" && routerCtlProc.plannedStop) {
+        root.expectedStop = false
+        root.stopping = false
+        root.starting = false
+        root.running = false
+        root.clearRestartState()
+        root.resetMetrics()
+        return
+      }
+      if (routerCtlProc.action === "repair" && !routerCtlProc.plannedRun) {
+        // Only non-disruptive actions (write/reload/reset/enable/disable):
+        // the process state did not change.
+        root.starting = false
+        root.stopping = false
+        root.running = root.routerDesired
         return
       }
       if (routerCtlProc.action === "stop") {

@@ -146,5 +146,5 @@ the code is changed and the test suite still passes.
       once on the model's first request; `KillMode=mixed` so the relay can
       save before systemd tears the router down.
 - [ ] Per-build env from profiles — deliberately global for now.
-- [ ] Wire `Service.plan()` to observed `LoadState/ActiveState/UnitFileState`
-      instead of the start/restart shortcut.
+- [x] `Service.plan()` is wired to observed `LoadState/ActiveState/UnitFileState`
+      and health; desired running state is persisted as `routerDesired`.
