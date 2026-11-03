@@ -122,3 +122,36 @@ test("a v3 file round-trips", () => {
   const { profiles } = Profiles.fromSettings(parsed, Profiles.snapshot(live({ contextSize: "8192" })))
   assert.strictEqual(Profiles.get(profiles, "llamacpp", "/models/qwen.gguf").contextSize, "80000")
 })
+
+test("build profiles inherit the common profile and override it field by field", () => {
+  const build = "/h/turbo/build/bin/llama-server"
+  let store = Profiles.set({}, "llamacpp", "/m/q.gguf", Profiles.resolve(live({ contextSize: "4096" })))
+  store = Profiles.setFor(store, "llamacpp", "/m/q.gguf", build, { cacheTypeK: "turbo4", contextSize: "8192" })
+
+  assert.strictEqual(Profiles.getFor(store, "llamacpp", "/m/q.gguf", build).cacheTypeK, "turbo4")
+  const resolved = Profiles.resolveFor(store, "llamacpp", "/m/q.gguf", build)
+  assert.strictEqual(resolved.cacheTypeK, "turbo4")
+  assert.strictEqual(resolved.contextSize, "8192")
+  assert.strictEqual(resolved.threads, "7", "a field absent from the build profile still comes from common")
+
+  const other = Profiles.resolveFor(store, "llamacpp", "/m/q.gguf", "/h/main/llama-server")
+  assert.strictEqual(other.cacheTypeK, "turbo4", "a build with no profile shares the common tuning")
+  assert.strictEqual(other.contextSize, "4096")
+})
+
+test("setField pins a build without materializing the common tuning", () => {
+  const store = Profiles.setField({}, "llamacpp", "/m/q.gguf", "llamaBuild", "/h/turbo/llama-server")
+  assert.deepStrictEqual(Object.keys(store), ["llamacpp::/m/q.gguf"])
+  assert.strictEqual(store["llamacpp::/m/q.gguf"].llamaBuild, "/h/turbo/llama-server")
+  const resolved = Profiles.resolveFor(store, "llamacpp", "/m/q.gguf", "/h/turbo/llama-server")
+  assert.strictEqual(resolved.contextSize, "0")
+})
+
+test("removeFor drops one build and keeps common and the other build", () => {
+  const build = "/h/turbo/llama-server"
+  let store = Profiles.set({}, "llamacpp", "/m/q.gguf", { contextSize: "4096" })
+  store = Profiles.setFor(store, "llamacpp", "/m/q.gguf", build, { contextSize: "8192" })
+  store = Profiles.removeFor(store, "llamacpp", "/m/q.gguf", build)
+  assert.strictEqual(Profiles.getFor(store, "llamacpp", "/m/q.gguf", build), null)
+  assert.strictEqual(Profiles.get(store, "llamacpp", "/m/q.gguf").contextSize, "4096")
+})

@@ -25,6 +25,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # One slow slot used to hold Stop for two minutes, and four slots for eight.
@@ -56,6 +57,12 @@ def read_body(stream, headers, limit=MAX_RESPONSE_BYTES):
     return data
 
 
+def with_model(url, model):
+    if not model:
+        return url
+    return url + ("&" if "?" in url else "?") + "model=" + urllib.parse.quote(model, safe="")
+
+
 def call(url, method="GET", body=None, timeout=10):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method,
@@ -70,8 +77,8 @@ def call(url, method="GET", body=None, timeout=10):
             return e.code, None
 
 
-def slot_ids(base):
-    status, data = call(base + "/slots")
+def slot_ids(base, model=""):
+    status, data = call(with_model(base + "/slots", model))
     if status != 200 or not isinstance(data, list):
         return []
     return [s["id"] for s in data if isinstance(s, dict) and isinstance(s.get("id"), int)]
@@ -86,19 +93,22 @@ def private_dir(path):
         pass
 
 
-def save(base, slot_dir, prefix):
+def save(base, slot_dir, prefix, model=""):
     saved, notes = 0, []
     private_dir(slot_dir)
     deadline = time.monotonic() + SAVE_BUDGET
-    for sid in slot_ids(base):
+    for sid in slot_ids(base, model):
         left = deadline - time.monotonic()
         if left <= 0:
             notes.append("deadline reached")
             break
         name = "%s.slot%d.bin" % (prefix, sid)
         tmp = name + ".tmp"
+        body = {"filename": tmp}
+        if model:
+            body["model"] = model
         status, data = call("%s/slots/%d?action=save" % (base, sid), "POST",
-                            {"filename": tmp}, timeout=min(120, max(1, int(left))))
+                            body, timeout=min(120, max(1, int(left))))
         n = int(data.get("n_saved") or 0) if status == 200 and isinstance(data, dict) else 0
         tmp_path = os.path.join(slot_dir, tmp)
         try:
@@ -120,10 +130,10 @@ def save(base, slot_dir, prefix):
     return "saved %d tokens%s" % (saved, " (" + ", ".join(notes) + ")" if notes else "")
 
 
-def restore(base, slot_dir, prefix):
+def restore(base, slot_dir, prefix, model=""):
     restored, notes = 0, []
     deadline = time.monotonic() + RESTORE_BUDGET
-    for sid in slot_ids(base):
+    for sid in slot_ids(base, model):
         left = deadline - time.monotonic()
         if left <= 0:
             notes.append("deadline reached")
@@ -134,8 +144,11 @@ def restore(base, slot_dir, prefix):
         name = next((c for c in candidates if os.path.exists(os.path.join(slot_dir, c))), None)
         if name is None:
             continue
+        body = {"filename": name}
+        if model:
+            body["model"] = model
         status, data = call("%s/slots/%d?action=restore" % (base, sid), "POST",
-                            {"filename": name}, timeout=min(300, max(1, int(left))))
+                            body, timeout=min(300, max(1, int(left))))
         if status == 200 and isinstance(data, dict):
             n = int(data.get("n_restored") or 0)
             restored += n
@@ -155,6 +168,7 @@ def main():
     ap.add_argument("--url", required=True, help="server base URL, e.g. http://127.0.0.1:8080")
     ap.add_argument("--dir", required=True, help="the server's --slot-save-path")
     ap.add_argument("--prefix", required=True, help="file prefix, normally the model's file name")
+    ap.add_argument("--model", default="", help="router model id; required when the URL is a router")
     args = ap.parse_args()
 
     # Literal prompt tokens live in the slot files; never create artifacts
@@ -162,7 +176,7 @@ def main():
     os.umask(0o077)
     base = args.url.rstrip("/")
     try:
-        line = (save if args.action == "save" else restore)(base, args.dir, args.prefix)
+        line = (save if args.action == "save" else restore)(base, args.dir, args.prefix, args.model)
     except (OSError, ValueError) as e:
         line = "%s failed: %s" % (args.action, e)
     print(line)

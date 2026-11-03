@@ -47,9 +47,20 @@ def ini_value(value):
     return str(value).replace("\r", " ").replace("\n", " ")
 
 
-def render_preset(models):
+def slot_prefix(path):
+    """Match Backends.slotPrefix: readable basename + djb2 hash of full path."""
+    base = os.path.basename(str(path))
+    h = 5381
+    for ch in str(path):
+        h = ((h * 33) + ord(ch)) & 0xFFFFFFFF
+    return re.sub(r"[^A-Za-z0-9._-]", "_", base) + "-" + ("%08x" % h)
+
+
+def render_preset(models, slot_dir=""):
     """One INI section per model; the section name is the model id."""
     lines = ["version = 1", ""]
+    if slot_dir:
+        lines += ["[*]", "slot-save-path = " + slot_dir, ""]
     for model in models:
         name = str(model["id"])
         if name == "" or "]" in name or "\n" in name:
@@ -85,11 +96,12 @@ def env_map(value):
 class Router:
     """One llama-server router process for one build."""
 
-    def __init__(self, build, spec, state_dir, start_timeout, stop_timeout):
+    def __init__(self, build, spec, state_dir, start_timeout, stop_timeout, slot_dir=""):
         self.build = build
         self.spec = spec
         self.port = int(spec["port"])
         self.state_dir = state_dir
+        self.slot_dir = slot_dir
         self.preset = spec.get("preset") or os.path.join(
             state_dir, "preset-" + re.sub(r"[^A-Za-z0-9_.-]", "_", build) + ".ini")
         self.start_timeout = start_timeout
@@ -101,7 +113,7 @@ class Router:
         self.log_file = None
 
     def write_preset(self, models):
-        text = render_preset(models)
+        text = render_preset(models, self.slot_dir)
         os.makedirs(self.state_dir, exist_ok=True)
         with open(self.preset, "w", encoding="utf-8") as handle:
             handle.write(text)
@@ -177,12 +189,25 @@ class Router:
         if proc is None:
             return
         log("stop %s (pid %s)" % (self.build, proc.pid))
+        # The router spawns model children in its own session. Signalling only
+        # the router can leave a child holding the port and the systemd cgroup,
+        # which wedges the unit in "deactivating". Signal the whole group.
         try:
-            proc.terminate()
+            group = os.getpgid(proc.pid)
+        except OSError:
+            group = None
+        try:
+            if group is not None:
+                os.killpg(group, signal.SIGTERM)
+            else:
+                proc.terminate()
             proc.wait(timeout=self.stop_timeout)
         except Exception:
             try:
-                proc.kill()
+                if group is not None:
+                    os.killpg(group, signal.SIGKILL)
+                else:
+                    proc.kill()
                 proc.wait(timeout=5)
             except Exception:
                 pass
@@ -222,9 +247,17 @@ class Relay:
                 if name:
                     self.by_name[name] = model
 
+        self.prompt_cache = bool(config.get("prompt_cache", True))
+        self.slot_dir = config.get("slot_dir") or os.path.join(state_dir, "slots")
+        self.slot_kv = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "slot_kv.py")
+        self.restored = set()
+        self.preparing = set()
+        self.prepare_cond = threading.Condition()
+        os.makedirs(self.slot_dir, mode=0o700, exist_ok=True)
+
         self.routers = {}
         for build, spec in (config.get("routers") or {}).items():
-            self.routers[build] = Router(build, spec, state_dir, self.start_timeout, self.stop_timeout)
+            self.routers[build] = Router(build, spec, state_dir, self.start_timeout, self.stop_timeout, self.slot_dir)
         for model in self.models:
             if model["build"] not in self.routers:
                 raise ValueError("model %s names unknown build %r" % (model["id"], model["build"]))
@@ -268,6 +301,78 @@ class Relay:
                 pass
         return out
 
+    def router_base(self, router):
+        return "http://127.0.0.1:%d" % router.port
+
+    def loaded_models(self, router):
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", router.port, timeout=2)
+            conn.request("GET", "/models")
+            response = conn.getresponse()
+            payload = json.loads(response.read() or b"{}")
+            conn.close()
+        except Exception:
+            return []
+        out = []
+        for item in payload.get("data", []):
+            status = item.get("status") or {}
+            if status.get("value") == "loaded":
+                out.append(item.get("id"))
+        return [m for m in out if m]
+
+    def run_slot_kv(self, action, router, model):
+        try:
+            result = subprocess.run(
+                [sys.executable, self.slot_kv, action,
+                 "--url", self.router_base(router),
+                 "--dir", self.slot_dir,
+                 "--prefix", slot_prefix(model),
+                 "--model", model],
+                capture_output=True, text=True, timeout=15)
+            line = (result.stdout or result.stderr or "").strip()
+            if line:
+                log("slot %s %s: %s" % (action, os.path.basename(model), line))
+        except Exception as error:
+            log("slot %s failed for %s: %s" % (action, model, error))
+
+    def save_slots(self, router):
+        if not self.prompt_cache or router is None:
+            return
+        for model in self.loaded_models(router):
+            self.run_slot_kv("save", router, model)
+
+    def prepare_model(self, model):
+        """Load the model (if needed) and restore its prompt cache once."""
+        if not self.prompt_cache or self.active is None or not model:
+            return
+        router = self.active
+        key = (router.build, model)
+        with self.prepare_cond:
+            # Concurrent first requests for the same model must not all load
+            # and restore it: one does the work, the others wait.
+            while key in self.preparing:
+                self.prepare_cond.wait(timeout=0.5)
+            if key in self.restored:
+                return
+            self.preparing.add(key)
+        try:
+            try:
+                body = json.dumps({"model": model}).encode()
+                conn = http.client.HTTPConnection("127.0.0.1", router.port, timeout=300)
+                conn.request("POST", "/models/load", body=body,
+                             headers={"Content-Type": "application/json"})
+                response = conn.getresponse()
+                response.read()
+                conn.close()
+            except Exception as error:
+                log("preload failed for %s: %s" % (model, error))
+            self.run_slot_kv("restore", router, model)
+        finally:
+            with self.prepare_cond:
+                self.preparing.discard(key)
+                self.restored.add(key)
+                self.prepare_cond.notify_all()
+
     def acquire(self, build):
         with self.cond:
             self.inflight[build] = self.inflight.get(build, 0) + 1
@@ -288,7 +393,10 @@ class Relay:
 
         try:
             if old is not None:
-                old.stop()
+                try:
+                    self.save_slots(old)
+                finally:
+                    old.stop()
             router = self.routers[build]
             router.start(self.models_for(build))
             router.wait_ready()
@@ -300,6 +408,7 @@ class Relay:
 
         with self.cond:
             self.active = router
+            self.restored = set()
             self.switching = False
             self.cond.notify_all()
         log("active build: %s (pid %s, port %s)" % (build, router.proc.pid, router.port))
@@ -315,8 +424,12 @@ class Relay:
             self.closing = True
             self.cond.notify_all()
         if self.active is not None:
-            self.active.stop()
+            active = self.active
             self.active = None
+            try:
+                self.save_slots(active)
+            finally:
+                active.stop()
 
     def state(self):
         active = self.active
@@ -425,6 +538,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             return self._json({"error": {"message": str(error), "type": "server_error"}}, 502)
 
         try:
+            self.relay.prepare_model(model["id"])
             self._forward(method, self.path, body, build)
         finally:
             self.relay.release(build)

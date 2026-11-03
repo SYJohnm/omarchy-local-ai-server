@@ -72,6 +72,103 @@ function key(backend, model) {
   return String(backend || "") + "::" + m
 }
 
+// A model can be tuned once per build: a turboquant fork wants its cache
+// types, upstream produces different flags. The common key stays the fallback
+// for a build with no profile of its own.
+function keyFor(backend, model, build) {
+  var base = key(backend, model)
+  if (base === "" || build === undefined || build === null || String(build) === "") return base
+  return base + "::build::" + String(build)
+}
+
+function getFor(profiles, backend, model, build) {
+  var k = keyFor(backend, model, build)
+  if (k === "") return null
+  var store = profiles || {}
+  var found = store[k]
+  return (found && typeof found === "object") ? found : null
+}
+
+// Common profile overlaid with the build-specific one, then filled with
+// defaults. A missing build profile therefore shares everything with common.
+function resolveFor(profiles, backend, model, build) {
+  var merged = {}
+  var common = get(profiles, backend, model)
+  var specific = getFor(profiles, backend, model, build)
+  if (common) for (var c in common) merged[c] = common[c]
+  if (specific) for (var s in specific) merged[s] = specific[s]
+  return resolve(merged)
+}
+
+function hasFor(profiles, backend, model, build) {
+  return getFor(profiles, backend, model, build) !== null
+}
+
+function setFor(profiles, backend, model, build, values) {
+  var k = keyFor(backend, model, build)
+  var out = {}
+  var store = profiles || {}
+  for (var existing in store) out[existing] = store[existing]
+  if (k === "") return out
+  // Store only the fields this build overrides; everything else keeps coming
+  // from the common model profile. A full snapshot here would pin every field
+  // and make the common profile dead weight after the first edit.
+  var kept = {}
+  var source = values || {}
+  for (var i = 0; i < FIELDS.length; i++) {
+    var f = FIELDS[i]
+    if (source[f] !== undefined) kept[f] = source[f]
+  }
+  for (var j = 0; j < STRUCTURED.length; j++) {
+    var st = STRUCTURED[j]
+    if (source[st] !== undefined) kept[st] = clone(source[st])
+  }
+  out[k] = kept
+  return out
+}
+
+// Fields of `values` that differ from `base`, for writing a build profile that
+// inherits the rest.
+function diff(base, values) {
+  var out = {}
+  var b = base || {}
+  var v = values || {}
+  for (var i = 0; i < FIELDS.length; i++) {
+    var f = FIELDS[i]
+    if (JSON.stringify(v[f]) !== JSON.stringify(b[f])) out[f] = v[f]
+  }
+  for (var j = 0; j < STRUCTURED.length; j++) {
+    var s = STRUCTURED[j]
+    if (JSON.stringify(v[s]) !== JSON.stringify(b[s])) out[s] = clone(v[s])
+  }
+  return out
+}
+
+function removeFor(profiles, backend, model, build) {
+  var k = keyFor(backend, model, build)
+  var out = {}
+  var store = profiles || {}
+  for (var existing in store) if (existing !== k) out[existing] = store[existing]
+  return out
+}
+
+// Change one field on the common profile without materializing every other
+// field (used to pin a model to a build while its per-build profiles stay the
+// source of truth for the tuning values).
+function setField(profiles, backend, model, field, value) {
+  var k = key(backend, model)
+  if (k === "") return profiles || {}
+  var out = {}
+  var store = profiles || {}
+  for (var existing in store) out[existing] = store[existing]
+  var current = out[k]
+  var next = (current && typeof current === "object") ? {} : {}
+  if (current) for (var c in current) next[c] = current[c]
+  next[field] = value
+  out[k] = next
+  return out
+}
+
 // The live values as a storable object.
 function snapshot(source) {
   var out = {}
@@ -158,7 +255,7 @@ function fromSettings(parsed, flatValues) {
     var store = {}
     for (var k in p.profiles) {
       var entry = p.profiles[k]
-      if (entry && typeof entry === "object") store[k] = snapshot(entry)
+      if (entry && typeof entry === "object") store[k] = clone(entry)
     }
       return { profiles: store }
   }
@@ -173,12 +270,20 @@ if (typeof module !== "undefined") {
   module.exports = {
     FIELDS: FIELDS,
     key: key,
+    keyFor: keyFor,
     snapshot: snapshot,
     resolve: resolve,
     get: get,
+    getFor: getFor,
+    resolveFor: resolveFor,
     has: has,
+    hasFor: hasFor,
     set: set,
+    setFor: setFor,
+    setField: setField,
+    diff: diff,
     remove: remove,
+    removeFor: removeFor,
     rekey: rekey,
     fromSettings: fromSettings
   }

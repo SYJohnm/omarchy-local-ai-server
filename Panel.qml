@@ -1532,7 +1532,26 @@ Panel {
   property bool applyingTuning: false
 
   // The model this backend would launch, with its own tuning if it has one.
-  readonly property bool hasProfile: Profiles.has(root.profiles, root.backend, root.launchModel)
+  // Which build's profile the selected model is showing. The live build wins
+  // for the selected model; other models use their pin, then auto.
+  function profileBuildFor(model) {
+    if (root.backend !== "llamacpp") return ""
+    var m = model === undefined ? root.currentModel() : model
+    if (m === root.currentModel() && root.resolvedBuild)
+      return root.resolvedBuild.path || ""
+    var common = Profiles.get(root.profiles, root.backend, m)
+    if (common && common.llamaBuild) return String(common.llamaBuild)
+    var tuning = Profiles.resolve(common || {})
+    var build = Backends.resolveBuild(root.llamaBuilds, "", tuning.cacheTypeK, tuning.cacheTypeV)
+    return build ? (build.path || "") : ""
+  }
+
+  readonly property bool hasProfile: {
+    var model = root.launchModel
+    var build = root.profileBuildFor(model)
+    return Profiles.hasFor(root.profiles, root.backend, model, build) ||
+           Profiles.has(root.profiles, root.backend, model)
+  }
 
   // A user edit to any tuning value: stores it against the model this backend
   // would launch, creating its profile if this is the first edit.
@@ -1542,7 +1561,20 @@ Panel {
   function touchTuning() {
     var model = root.currentModel()
     if (!root.settingsLoaded || root.applyingTuning || model === "") return
-    root.profiles = Profiles.set(root.profiles, root.backend, model, Profiles.snapshot(root))
+    // The common profile is the shared baseline: seed it on the first edit so
+    // another build inherits these values; later edits on a build store only
+    // the fields that differ from it.
+    var existing = Profiles.get(root.profiles, root.backend, model)
+    var hasTuning = false
+    if (existing) for (var key in existing) if (key !== "llamaBuild") hasTuning = true
+    if (!hasTuning)
+      root.profiles = Profiles.set(root.profiles, root.backend, model, Profiles.snapshot(root))
+    var common = Profiles.resolve(Profiles.get(root.profiles, root.backend, model) || {})
+    var build = root.profileBuildFor(model)
+    root.profiles = Profiles.setFor(root.profiles, root.backend, model, build,
+                                    Profiles.diff(common, Profiles.snapshot(root)))
+    if (build !== "" && root.llamaBuild !== "")
+      root.profiles = Profiles.setField(root.profiles, root.backend, model, "llamaBuild", root.llamaBuild)
     root.scheduleSettingsSave()
   }
 
@@ -1576,8 +1608,8 @@ Panel {
   function applyTuningForSelection() {
     if (!root.settingsLoaded || root.applyingTuning) return
     var model = root.currentModel()
-    var profile = Profiles.get(root.profiles, root.backend, model)
-    root.applyTuning(profile !== null ? profile : Profiles.resolve(null))
+    var build = root.profileBuildFor(model)
+    root.applyTuning(Profiles.resolveFor(root.profiles, root.backend, model, build))
     // A profile written before arguments were split still carries a line.
     root.splitPastedArgs()
     root.autoSpecType(model)
@@ -1599,8 +1631,11 @@ Panel {
   // The next edit starts a fresh profile from them.
   function clearProfile() {
     if (!root.hasProfile) return
-    root.profiles = Profiles.remove(root.profiles, root.backend, root.launchModel)
-    root.applyTuning(Profiles.resolve(null))
+    var model = root.launchModel
+    var build = root.profileBuildFor(model)
+    root.profiles = Profiles.removeFor(root.profiles, root.backend, model, build)
+    root.profiles = Profiles.remove(root.profiles, root.backend, model)
+    root.applyTuning(Profiles.resolveFor(root.profiles, root.backend, model, build))
     root.scheduleSettingsSave()
   }
 
@@ -1936,11 +1971,18 @@ Panel {
   }
   onCacheTypeVChanged: root.touchTuning()
   onLlamaBuildChanged: {
+    if (root.applyingTuning) return
+    var model = root.currentModel()
+    if (model !== "") {
+      root.profiles = Profiles.setField(root.profiles, root.backend, model, "llamaBuild", root.llamaBuild)
+      root.applyTuningForSelection()
+    }
     // A build picked by hand may not take the cache types the model had;
     // fall back rather than launch into a flag the binary rejects.
-    if (!root.applyingTuning) root.sanitizeSettings()
-    root.touchTuning()
+    root.sanitizeSettings()
   }
+  onBuildsProbedChanged: if (root.buildsProbed && root.settingsLoaded && !root.applyingTuning)
+    root.applyTuningForSelection()
   onCacheRamChanged: root.touchTuning()
   onTemperatureChanged: root.touchTuning()
   onCpuMoeChanged: root.touchTuning()
@@ -2976,9 +3018,44 @@ Panel {
 
   // ---- Native router relay ----
 
-  // The relay lists every scanned model; only the selected one carries the
-  // tuned launch line for now. Other models keep the build their profile
-  // resolves to and run with the build/schema defaults.
+  // Build one model's argv from a stored profile without disturbing the live
+  // page. buildLlamaArgs() reads the live tuning properties, so apply the
+  // profile's values, generate, and restore. The relay needs every model's
+  // line, not just the selected one.
+  function argsForModelProfile(model, build, tuning) {
+    var saved = {}
+    var i
+    for (i = 0; i < Profiles.FIELDS.length; i++) {
+      var field = Profiles.FIELDS[i]
+      saved[field] = root[field]
+    }
+    var savedModel = root.selectedModel
+    var savedCustom = root.customParams
+    var savedEmitted = root.emittedFlags
+    var savedIgnored = root.ignoredFlags
+    root.applyingTuning = true
+    try {
+      root.selectedModel = model
+      for (i = 0; i < Profiles.FIELDS.length; i++) {
+        var f = Profiles.FIELDS[i]
+        root[f] = tuning[f]
+      }
+      root.llamaBuild = build
+      root.customParams = tuning.customParams || []
+      return root.buildLlamaArgs()
+    } finally {
+      for (i = 0; i < Profiles.FIELDS.length; i++) {
+        var rf = Profiles.FIELDS[i]
+        root[rf] = saved[rf]
+      }
+      root.selectedModel = savedModel
+      root.customParams = savedCustom
+      root.emittedFlags = savedEmitted
+      root.ignoredFlags = savedIgnored
+      root.applyingTuning = false
+    }
+  }
+
   function routerModels() {
     var out = []
     var seen = {}
@@ -2990,17 +3067,22 @@ Panel {
     for (var i = 0; i < options.length; i++) {
       var path = String((options[i] && options[i].value !== undefined) ? options[i].value : options[i])
       if (path === "" || seen[path]) continue
-      var profile = Profiles.get(root.profiles, "llamacpp", path)
-      var tuning = Profiles.resolve(profile || {})
-      var build = Backends.resolveBuild(root.llamaBuilds, tuning.llamaBuild,
-                                        tuning.cacheTypeK, tuning.cacheTypeV)
+      var common = Profiles.get(root.profiles, "llamacpp", path)
+      var base = Profiles.resolve(common || {})
+      var build = (path === root.launchModel && root.resolvedBuild)
+        ? root.resolvedBuild
+        : Backends.resolveBuild(root.llamaBuilds, base.llamaBuild, base.cacheTypeK, base.cacheTypeV)
       if (!build) continue
+      var tuning = Profiles.resolveFor(root.profiles, "llamacpp", path, build.path)
       seen[path] = true
       out.push({ path: path, build: build.path,
-                 args: path === root.launchModel ? root.buildLlamaArgs() : [] })
+                 args: root.argsForModelProfile(path, build.path, tuning) })
     }
     if (root.launchModel !== "" && !seen[root.launchModel] && root.resolvedBuild) {
-      out.push({ path: root.launchModel, build: root.resolvedBuild.path, args: root.buildLlamaArgs() })
+      var selectedTuning = Profiles.resolveFor(root.profiles, "llamacpp", root.launchModel,
+                                               root.resolvedBuild.path)
+      out.push({ path: root.launchModel, build: root.resolvedBuild.path,
+                 args: root.argsForModelProfile(root.launchModel, root.resolvedBuild.path, selectedTuning) })
     }
     return out
   }
@@ -3023,7 +3105,9 @@ Panel {
       var built = Router.build({
         host: root.host, port: root.port, stateDir: root.routerStateDir,
         defaultModel: root.launchModel !== "" ? root.launchModel : models[0].path,
-        models: models, env: root.routerEnv(), internalPortBase: internalBase
+        models: models, env: root.routerEnv(), internalPortBase: internalBase,
+        promptCache: root.kvPersistence,
+        slotDir: root.routerStateDir + "slots"
       })
       routerConfigFile.setText(JSON.stringify(built.config, null, 2) + "\n")
       routerUnitFile.setText(Router.unitFile({

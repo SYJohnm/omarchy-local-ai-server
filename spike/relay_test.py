@@ -86,6 +86,7 @@ class RelaySpikeTest(unittest.TestCase):
             "stop_timeout_s": 5,
             "drain_timeout_s": 10,
             "default_model": "/models/main-a.gguf",
+            "prompt_cache": False,
             "routers": {
                 "main": {
                     "port": main_port,

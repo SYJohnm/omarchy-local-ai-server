@@ -101,6 +101,8 @@ function build(opts) {
   const config = {
     listen: { host: opts.host || "127.0.0.1", port: Number(opts.port || 8080) },
     state_dir: opts.stateDir,
+    slot_dir: opts.slotDir || (String(opts.stateDir || "").replace(/\/+$/, "") + "/slots"),
+    prompt_cache: opts.promptCache !== false,
     default_model: opts.defaultModel || models[0].path,
     start_timeout_s: 30,
     stop_timeout_s: 10,
@@ -127,6 +129,10 @@ function unitFile(opts) {
     "[Service]",
     "Type=simple",
     "UMask=0077",
+    // SIGTERM reaches the relay only; it still has live routers to save the
+    // prompt cache into. After TimeoutStopSec systemd kills the whole group.
+    "KillMode=mixed",
+    "TimeoutStopSec=120",
     "Restart=on-failure",
     "RestartSec=5",
     "WorkingDirectory=" + (String(opts.workDir || "/").replace(/\/+$/, "") || "/"),

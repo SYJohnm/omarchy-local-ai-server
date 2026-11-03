@@ -138,9 +138,13 @@ the code is changed and the test suite still passes.
 - [x] Panel lifecycle: persistent `*-router.service`, start/stop/restart,
       adoption, journal, health, `repair` IPC, stale unit cleanup.
 - [x] Tests: `Router.js` (6), `Service.js` (10), relay end-to-end (4).
-- [ ] Non-selected models currently get build/default args only; extend
-      `routerModels()` to render every profile's tuning into its preset.
-- [ ] Per-build env from profiles (currently the global environment list).
+- [x] Every model's profile is rendered into its preset; the selected model
+      is no longer special.
+- [x] Profiles are stored per model × build, with the common model profile as
+      the shared fallback (`Profiles.resolveFor`).
+- [x] Prompt cache through the relay: save before stop/build switch, restore
+      once on the model's first request; `KillMode=mixed` so the relay can
+      save before systemd tears the router down.
+- [ ] Per-build env from profiles — deliberately global for now.
 - [ ] Wire `Service.plan()` to observed `LoadState/ActiveState/UnitFileState`
       instead of the start/restart shortcut.
-- [ ] Prompt cache through the relay (`/slots?model=` + save before unload).
