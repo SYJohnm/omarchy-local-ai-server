@@ -4118,41 +4118,8 @@ Panel {
     fontFamily: root.bar.fontFamily
     fontSize: Style.font.bodySmall
     opacity: root.starting ? 0.6 : 1.0
-    tooltipText: {
-      if (switchState !== "") return Model.barSwitchTooltip(switchState, root.slotsProcessing)
-      if (!root.running) return ""
-
-      var lines = []
-      // Header: backend, state and endpoint
-      var header = root.backendSpec.label + " (" + root.host + ":" + root.port + ")"
-      if (root.configChanged) header += " · restart pending"
-      lines.push(header)
-
-      // Active model and alias
-      var modelName = root.runningModel ? Model.baseName(root.runningModel) : (root.launchModel ? Model.baseName(root.launchModel) : "")
-      var alias = String(root.modelAlias).trim() || (modelName ? ModelsIni.deriveDefaultAlias(modelName) : "")
-      if (modelName) {
-        var modelLine = "Model: " + (alias ? alias + " [" + modelName + "]" : modelName)
-        lines.push(modelLine)
-      }
-
-      // Build / Fork
-      if (root.backend === "llamacpp" && root.resolvedBuild) {
-        lines.push("Build: " + Backends.buildLabel(root.resolvedBuild))
-      }
-
-      // Live metrics: tokens/s, prompt processing progress
-      if (root.ppActive && isFinite(root.ppPercent)) {
-        var ppLine = "Ingesting prompt: " + root.ppPercent.toFixed(0) + "%"
-        if (root.ppTokensPerSec > 0) ppLine += " (" + root.ppTokensPerSec.toFixed(1) + " t/s)"
-        lines.push(ppLine)
-      } else if (root.tokensPerSec > 0) {
-        lines.push("Speed: " + root.tokensPerSec.toFixed(1) + " t/s")
-      }
-
-      lines.push(root.showMetric ? "Right-click: hide t/s in bar" : "Right-click: show t/s in bar")
-      return lines.join("\n")
-    }
+    // Plain tooltipText is disabled so the rich graphical briefPopup handles hover previews
+    tooltipText: ""
     onPressed: function(b) {
       if (b === Qt.RightButton) root.showMetric = !root.showMetric
       else root.toggle()
@@ -4169,9 +4136,10 @@ Panel {
     anchorItem: button
     bar: root.bar
     owner: root
-    open: buttonHover.hovered && !panel.open && (root.running || root.starting)
-    contentWidth: fittedContentWidth(Style.space(260))
-    contentHeight: fittedContentHeight(briefLayout.implicitHeight + Style.space(16))
+    triggerMode: "hover"
+    open: buttonHover.hovered && !panel.open
+    contentWidth: briefPopup.fittedContentWidth(Style.space(260))
+    contentHeight: briefPopup.fittedContentHeight(briefLayout.implicitHeight + Style.space(16))
 
     ColumnLayout {
       id: briefLayout
@@ -4188,7 +4156,7 @@ Panel {
           width: 8
           height: 8
           radius: 4
-          color: root.running ? Commons.Color.accent : Commons.Color.urgent
+          color: root.running ? Commons.Color.accent : (root.starting ? Commons.Color.warning : Commons.Color.muted)
         }
 
         Text {
@@ -4235,6 +4203,29 @@ Panel {
           font.pixelSize: root.fontSizeSmall
           font.bold: true
           elide: Text.ElideRight
+        }
+      }
+
+      // Endpoint (host:port)
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(4)
+
+        Text {
+          text: "Endpoint:"
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: root.fontSizeSmall
+          opacity: 0.6
+        }
+
+        Text {
+          Layout.fillWidth: true
+          text: root.host + ":" + root.port
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: root.fontSizeSmall
+          opacity: 0.85
         }
       }
 
