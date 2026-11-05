@@ -2774,8 +2774,6 @@ Panel {
     }
     return out
   }
-    return out
-  }
 
   Process {
     id: ollamaStoreScan
