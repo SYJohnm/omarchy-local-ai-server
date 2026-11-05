@@ -160,20 +160,16 @@ loading the weights is not. `slot_kv.py` does the saving through llama-server's
 `/slots` API. A cache saved under different tuning is rejected by the server
 and the start is simply cold.
 
-> **Router mode:** the relay saves each loaded model's slots before it stops a
-> router or switches builds, and restores them on the model's first request.
-> `Keep prompt cache` is passed to the relay as `prompt_cache`.
-
 Slot files contain the prompt's token ids, so they are private by default: the
 cache directory is `0700`, saved files are `0600`, and detached launches run
 under `umask 077`.
 
 ## Surviving `omarchy restart shell`
 
-The server is launched detached as a transient systemd user unit
-(`io-github-syjohnm-local-ai-server-<backend>`), so `quickshell kill` does not
-take it down. The next widget instance re-adopts the running server after
-checking its health endpoint, which is also where it reads back prompt
+The server is launched detached as a transient systemd user unit with
+`Restart=on-failure` (`io-github-syjohnm-local-ai-server-<backend>`), so
+`quickshell kill` does not take it down. The next widget instance re-adopts
+the running server after checking its health endpoint, and reads back prompt
 processing from journald. Survive-restart is always on; stop the server from
 the panel first if you want it gone.
 
@@ -184,29 +180,13 @@ it on its own — the header marks it **external** and Stop is disabled. **Take
 over** stops the system service (polkit asks), starts an instance the widget
 controls, and serves the same model store.
 
-## Native router (llama.cpp)
+## Direct llama-server and prompt cache persistence
 
-llama.cpp models are served through the native `llama-server` router: the
-widget starts one relay (a persistent systemd user unit) on the public port,
-and the relay keeps one router per build. A model switch inside a build is
-handled by the router; a switch to a model from another build drains the
-running requests, replaces the router, and keeps the public port open.
-
-Router flags are filtered against each build's `--help` (an older fork can
-reject `--models-memory-margin`). Diagnostics and metrics (`GET /props`,
-`/metrics`, `/slots`, …) are passive: only inference and explicit load/unload
-requests can switch builds.
-
-The relay is not enabled at login by default. `ipc call local-ai-server repair`
-observes `LoadState`, `ActiveState`, `UnitFileState` and the health endpoint,
-then applies `Service.plan()`: rewrite/reload a missing or stale unit, reset a
-failed one, start/stop/restart to match the persisted desired state, and leave
-a healthy service alone. A relay that was running when the shell restarted is
-resumed once settings and the build probe are ready.
-
-**Settings → Backend → Launch mode** switches between **Router** (the relay) and
-**Direct** (the old one-model llama-server launcher) while the server is
-stopped. The status header shows `router` when the relay owns the port.
+llama.cpp models are served directly by `llama-server` without an intermediate
+proxy. Switching models or changing builds automatically drains active `/slots`,
+saves prompt KV caches (`slot_kv.py save`), replaces or restarts the systemd
+user unit with the target model and tuned argv, and restores the prompt cache
+once the health endpoint responds.
 
 ## Scripting
 
