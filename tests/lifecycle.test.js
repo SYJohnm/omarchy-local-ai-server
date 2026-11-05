@@ -52,6 +52,14 @@ test("slotPrefix keeps the file name and is unique per full path", () => {
   assert.strictEqual(Backends.slotPrefix(""), "")
 })
 
+test("unitName and procMarker support instance indexing", () => {
+  assert.strictEqual(Backends.unitName("io.github.test", "llamacpp"), "io-github-test-llamacpp")
+  assert.strictEqual(Backends.unitName("io.github.test", "llamacpp", 0), "io-github-test-llamacpp")
+  assert.strictEqual(Backends.unitName("io.github.test", "llamacpp", 1), "io-github-test-llamacpp-1")
+  assert.strictEqual(Backends.unitName("io.github.test", "llamacpp", 2), "io-github-test-llamacpp-2")
+  assert.strictEqual(Backends.procMarker("io.github.test", "llamacpp", 1), "io-github-test-llamacpp-1-proc")
+})
+
 test("systemoneLaunchArgs appends extra pieces once and keeps env out of argv", () => {
   const args = Backends.systemoneLaunchArgs(
     "/bin/llama-server", "/m/model.gguf", "127.0.0.1", 8081, "/slots", {

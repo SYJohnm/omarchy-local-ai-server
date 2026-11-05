@@ -300,12 +300,16 @@ function modelsDirFromUnitEnvironment(showOutput) {
 // suffix, so a dotted plugin id produces names that read as though they carry
 // a type ("io.github.syjohnm.local-ai-server-ollama.service"). Normalising them to dashes
 // keeps the generated unit unambiguous.
-function unitName(pluginId, backendId) {
+function unitName(pluginId, backendId, index) {
   var name = String(pluginId || "local-ai-server").replace(/[^A-Za-z0-9_-]/g, "-")
   // "systemone" -> "sys1" for shorter unit names (io.github.syjohnm.local-ai-server-sys1.service)
   var id = String(backendId || "server").replace(/[^A-Za-z0-9_-]/g, "-")
   if (id === "systemone") id = "sys1"
-  return name + "-" + id
+  var base = name + "-" + id
+  if (index !== undefined && index !== null && index !== "" && Number(index) > 0) {
+    base += "-" + Number(index)
+  }
+  return base
 }
 
 // Where a running server's output can be read from, as a journalctl argv, or
@@ -558,8 +562,8 @@ function installedBackends(found, probed) {
 // Namespaced for the same reason as unitName -- the original plugin used a
 // single global "Tray-llama-server", so a second widget would kill the
 // first one's server.
-function procMarker(pluginId, backendId) {
-  return unitName(pluginId, backendId) + "-proc"
+function procMarker(pluginId, backendId, index) {
+  return unitName(pluginId, backendId, index) + "-proc"
 }
 
 if (typeof module !== "undefined") {
