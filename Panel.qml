@@ -583,7 +583,7 @@ Panel {
     { id: "ctxSize",   label: "Context",        feature: "",          props: ["contextSize"] },
     { id: "threads",   label: "Threads",        feature: "threads",   props: ["threads"] },
     { id: "batchSize", label: "Batch / ubatch", feature: "batchSize", props: ["batchSize", "ubatchSize"] },
-    { id: "modelAlias", label: "Model alias",   feature: "",          props: ["modelAlias"], optional: true },
+    { id: "modelAlias", label: "Model alias",   feature: "",          props: ["modelAlias"] },
 
     // Optional rows: off the page until asked for, because their default is to
     // leave the backend alone and a control that says "default" in every
