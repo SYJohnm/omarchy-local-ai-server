@@ -12,6 +12,7 @@ import "Backends.js" as Backends
 import "Hardware.js" as Hardware
 import "Params.js" as Params
 import "Profiles.js" as Profiles
+import "ModelsIni.js" as ModelsIni
 
 
 // Local AI server manager.
@@ -340,6 +341,7 @@ Panel {
   // does not support it at all.
   readonly property var tristateValues: ["default", "on", "off"]
   property string reasoningPreserve: "default"
+  property string modelAlias: ""
 
   // ---- Vision projector ----
   //
@@ -581,6 +583,7 @@ Panel {
     { id: "ctxSize",   label: "Context",        feature: "",          props: ["contextSize"] },
     { id: "threads",   label: "Threads",        feature: "threads",   props: ["threads"] },
     { id: "batchSize", label: "Batch / ubatch", feature: "batchSize", props: ["batchSize", "ubatchSize"] },
+    { id: "modelAlias", label: "Model alias",   feature: "",          props: ["modelAlias"], optional: true },
 
     // Optional rows: off the page until asked for, because their default is to
     // leave the backend alone and a control that says "default" in every
@@ -617,6 +620,7 @@ Panel {
     parallel: "", reasoningPreserve: "default",
     mmprojMode: "auto", mmprojPath: "", mmprojOffload: "off",
     extraEnv: "",
+    modelAlias: "",
     systemoneCtx: "0"
   })
 
@@ -1528,13 +1532,17 @@ Panel {
   function profileBuildFor(model) {
     if (root.backend !== "llamacpp") return ""
     var m = model === undefined ? root.currentModel() : model
-    if (m === root.currentModel() && root.resolvedBuild)
-      return root.resolvedBuild.path || ""
     var common = Profiles.get(root.profiles, root.backend, m)
+    // If a build is explicitly pinned on this model, that build wins
     if (common && common.llamaBuild) return String(common.llamaBuild)
+    if (root.llamaBuild !== "" && m === root.currentModel()) return root.llamaBuild
+    // Otherwise look at the tuning in the model's profile to resolve the compatible build
     var tuning = Profiles.resolve(common || {})
     var build = Backends.resolveBuild(root.llamaBuilds, "", tuning.cacheTypeK, tuning.cacheTypeV)
-    return build ? (build.path || "") : ""
+    if (build) return build.path || ""
+    if (m === root.currentModel() && root.resolvedBuild)
+      return root.resolvedBuild.path || ""
+    return ""
   }
 
   readonly property bool hasProfile: {
@@ -1637,6 +1645,7 @@ Panel {
   // place) but not a real restart, so config is mirrored to disk.
   readonly property string settingsDir: expandPath("~/.local/state/omarchy/io.github.syjohnm.local-ai-server/")
   readonly property string settingsPath: settingsDir + "settings.json"
+  readonly property string modelsIniPath: settingsDir + "models.ini"
   property bool settingsLoaded: false
 
   readonly property string slotSaveDir: settingsDir + "slots/"
@@ -1789,6 +1798,9 @@ Panel {
     // profile was keyed by the chat selection. Move it onto the decision model.
     root.profiles = Profiles.rekey(root.profiles, "systemone", root.selectedModel, root.systemoneModel)
 
+    // Load models.ini if available, merging on top of profiles
+    modelsIniFile.reload()
+
     root.sanitizeSettings()
     root.settingsLoaded = true
     root.scheduleSettingsSave()
@@ -1864,6 +1876,12 @@ Panel {
       // values the user last had live.
       profiles: root.profiles
     }, null, 2) + "\n")
+
+    // Mirror to models.ini for hand edits and multi-fork documentation
+    try {
+      var iniData = ModelsIni.fromProfiles(root.profiles, root.currentModel())
+      modelsIniFile.setText(ModelsIni.serialize(iniData))
+    } catch (e) {}
   }
 
   // Applies the values derived from this machine's actual hardware, replacing
@@ -2014,6 +2032,7 @@ Panel {
   onParamCatalogueChanged: root.splitPastedArgs()
   onKeepAliveChanged: root.touchTuning()
   onExtraEnvChanged: root.touchTuning()
+  onModelAliasChanged: root.touchTuning()
   onKvPersistenceChanged: root.scheduleSettingsSave()
   onExtraModelDirsChanged: root.scheduleSettingsSave()
   onExtraBuildPathsChanged: root.scheduleSettingsSave()
@@ -2043,6 +2062,26 @@ Panel {
     // First run: without this, settingsLoaded never flips and every save is
     // silently skipped.
     onLoadFailed: root.loadSettings("")
+  }
+
+  FileView {
+    id: modelsIniFile
+    path: root.modelsIniPath
+    watchChanges: true
+    atomicWrites: true
+    printErrors: false
+    onLoaded: {
+      var parsed = ModelsIni.parse(text())
+      if (parsed && parsed.models) {
+        var converted = ModelsIni.toProfiles(parsed)
+        for (var k in converted) {
+          root.profiles[k] = converted[k]
+        }
+        if (root.settingsLoaded && !root.applyingTuning) {
+          root.applyTuningForSelection()
+        }
+      }
+    }
   }
 
   Timer {
@@ -3184,6 +3223,9 @@ Panel {
         emitFlag(root.resolvedBuild, "--cache-ram", String(root.cacheRam).trim(), args)
       if (!root.propOverridden("temperature") && String(root.temperature).trim() !== "")
         emitFlag(root.resolvedBuild, "--temp", String(root.temperature).trim(), args)
+      var activeAlias = String(root.modelAlias).trim() || ModelsIni.deriveDefaultAlias(model)
+      if (!root.propOverridden("alias") && activeAlias !== "")
+        emitFlag(root.resolvedBuild, "--alias", activeAlias, args)
     }
     // User-added parameters. Appended before the free-form extra args so a
     // hand-written flag still gets the last word on any duplicate.
@@ -7638,6 +7680,109 @@ Panel {
                       }
                     }
                   }
+                }
+              }
+
+              // ---- Model alias ----
+              Rectangle {
+                id: modelAliasRow
+                Layout.fillWidth: true
+                implicitHeight: 26
+                radius: 3
+                visible: root.builtinOnPage("modelAlias")
+                property bool editing: false
+                color: modelAliasHoverArea.containsMouse
+                  ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                  : "transparent"
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: !modelAliasRow.editing
+
+                  Text {
+                    text: "Model alias"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSize
+                    opacity: 0.85
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: "...................................................................................................."
+                    color: root.bar.foreground
+                    opacity: 0.15
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSize
+                  }
+                  Text {
+                    text: root.modelAlias !== "" ? root.modelAlias : (ModelsIni.deriveDefaultAlias(root.currentModel()) || "auto")
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSize
+                    opacity: root.modelAlias !== "" ? 0.85 : 0.45
+                  }
+                  Text {
+                    text: "×"
+                    Layout.leftMargin: Style.space(8)
+                    color: modelAliasHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
+                    opacity: modelAliasHoverArea.containsMouse ? 0.8 : 0.3
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSize
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeBuiltin("modelAlias")
+                    }
+                  }
+                }
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  spacing: Style.space(4)
+                  visible: modelAliasRow.editing
+
+                  Text {
+                    text: "Model alias"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSize
+                    opacity: 0.85
+                  }
+                  TextField {
+                    id: modelAliasEdit
+                    Layout.fillWidth: true
+                    text: root.modelAlias
+                    placeholderText: ModelsIni.deriveDefaultAlias(root.currentModel())
+                    onEditingFinished: {
+                      root.modelAlias = text.trim()
+                      modelAliasRow.editing = false
+                    }
+                    Keys.onEscapePressed: modelAliasRow.editing = false
+                  }
+                }
+
+                MouseArea {
+                  id: modelAliasHoverArea
+                  z: -1
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  visible: !modelAliasRow.editing
+                  onClicked: {
+                    modelAliasRow.editing = true
+                    modelAliasEdit.text = root.modelAlias
+                    modelAliasEdit.forceActiveFocus()
+                  }
+                }
+                PanelToolTip {
+                  visible: modelAliasHoverArea.containsMouse
+                  text: "Friendly name exposed via --alias for OpenAI-compatible clients and the UI."
                 }
               }
 

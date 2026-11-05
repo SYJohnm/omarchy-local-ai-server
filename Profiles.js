@@ -31,7 +31,9 @@ var FIELDS = [
   // Which llama-server build runs the model ("" = auto). Per model because a
   // fork is usually there for one model's sake -- its cache types, its
   // speculative decoding -- and the rest are happier on upstream.
-  "llamaBuild"
+  "llamaBuild",
+  // User-defined or auto-derived model alias (e.g. for --alias and OpenAI API)
+  "modelAlias"
 ]
 
 // Page state: the rows removed from Tuning, the optional rows added to it, the
@@ -51,7 +53,7 @@ var DEFAULTS = {
   loadMode: "auto", flashAttn: "auto", specType: "none", specTypeUserSet: false,
   parallel: "", reasoningPreserve: "default",
   mmprojMode: "auto", mmprojPath: "", mmprojOffload: "off",
-  extraArgs: "", keepAlive: "", extraEnv: "", llamaBuild: "",
+  extraArgs: "", keepAlive: "", extraEnv: "", llamaBuild: "", modelAlias: "",
   hiddenBuiltins: [], shownOptionals: [], builtinStash: {}, customParams: []
 }
 
