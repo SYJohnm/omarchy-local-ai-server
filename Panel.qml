@@ -406,6 +406,15 @@ Panel {
   // add any other parameter on demand. The catalogue is generated from the
   // binary's own --help, so it matches the build actually installed.
 
+  // Recent tg samples for the bar's hover sparkline.
+  property var rateHistory: []
+  function pushRate(value) {
+    var next = root.rateHistory.slice()
+    next.push(Number(value) || 0)
+    if (next.length > 50) next = next.slice(next.length - 50)
+    root.rateHistory = next
+  }
+
   // Catalogue for the active backend, parsed from --help.
   property var paramCatalogue: []
   property bool catalogueLoading: false
@@ -3981,6 +3990,7 @@ Panel {
       root.ppActive = false
     } else {
       root.tokensPerSec = timing.tps
+      root.pushRate(timing.tps)
       // A completed generation means the KV cache grew a turn; save it once
       // the server goes quiet, so a crash loses at most the last turn.
       if (root.savesSlots) slotAutosaveTimer.restart()
@@ -4146,6 +4156,211 @@ Panel {
     onPressed: function(b) {
       if (b === Qt.RightButton) root.showMetric = !root.showMetric
       else root.toggle()
+    }
+
+    HoverHandler {
+      id: buttonHover
+    }
+  }
+
+  // Graphical brief popup card on hover over the bar widget
+  PopupCard {
+    id: briefPopup
+    anchorItem: button
+    bar: root.bar
+    owner: root
+    open: buttonHover.hovered && !panel.open && (root.running || root.starting)
+    contentWidth: fittedContentWidth(Style.space(260))
+    contentHeight: fittedContentHeight(briefLayout.implicitHeight + Style.space(16))
+
+    ColumnLayout {
+      id: briefLayout
+      anchors.fill: parent
+      anchors.margins: Style.space(8)
+      spacing: Style.space(6)
+
+      // Header: Backend status
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(6)
+
+        Rectangle {
+          width: 8
+          height: 8
+          radius: 4
+          color: root.running ? Commons.Color.accent : Commons.Color.urgent
+        }
+
+        Text {
+          text: root.backendSpec.label
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: root.fontSize
+          font.bold: true
+        }
+
+        Item { Layout.fillWidth: true }
+
+        Text {
+          text: root.starting ? "Starting…" : (root.running ? (root.tokensPerSec > 0 ? root.tokensPerSec.toFixed(1) + " t/s" : "Active") : "Stopped")
+          color: root.running ? Commons.Color.accent : root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: root.fontSizeSmall
+          opacity: 0.8
+        }
+      }
+
+      // Active model and alias
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(4)
+
+        Text {
+          text: "Model:"
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: root.fontSizeSmall
+          opacity: 0.6
+        }
+
+        Text {
+          Layout.fillWidth: true
+          text: {
+            var m = root.runningModel ? Model.baseName(root.runningModel) : (root.launchModel ? Model.baseName(root.launchModel) : "")
+            var al = String(root.modelAlias).trim() || (m ? ModelsIni.deriveDefaultAlias(m) : "")
+            return al || m || "None"
+          }
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: root.fontSizeSmall
+          font.bold: true
+          elide: Text.ElideRight
+        }
+      }
+
+      // Build info
+      RowLayout {
+        Layout.fillWidth: true
+        visible: root.backend === "llamacpp" && root.resolvedBuild !== null
+        spacing: Style.space(4)
+
+        Text {
+          text: "Fork:"
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: root.fontSizeSmall
+          opacity: 0.6
+        }
+
+        Text {
+          Layout.fillWidth: true
+          text: root.resolvedBuild ? Backends.buildLabel(root.resolvedBuild) : ""
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: root.fontSizeSmall
+          elide: Text.ElideRight
+          opacity: 0.85
+        }
+      }
+
+      // Generation & Prompt speeds
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(12)
+        visible: root.running
+
+        ColumnLayout {
+          spacing: 1
+          Text {
+            text: "Generation"
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: root.fontSizeSmall
+            opacity: 0.6
+          }
+          Text {
+            text: root.tokensPerSec > 0 ? root.tokensPerSec.toFixed(1) + " tk/s" : "idle"
+            color: root.tokensPerSec > 0 ? Commons.Color.accent : root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: root.fontSize
+            font.bold: root.tokensPerSec > 0
+          }
+        }
+
+        ColumnLayout {
+          spacing: 1
+          Text {
+            text: "Prompt eval"
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: root.fontSizeSmall
+            opacity: 0.6
+          }
+          Text {
+            text: root.ppActive
+              ? (root.ppPercent > 0 ? root.ppPercent.toFixed(0) + "%" : "evaluating…")
+              : (root.ppTokensPerSec > 0 ? root.ppTokensPerSec.toFixed(1) + " tk/s" : "idle")
+            color: (root.ppActive || root.ppTokensPerSec > 0) ? Commons.Color.accent : root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: root.fontSize
+            font.bold: root.ppActive || root.ppTokensPerSec > 0
+          }
+        }
+      }
+
+      // Graphical speed sparkline (recent token generation rate)
+      Canvas {
+        id: sparkCanvas
+        Layout.fillWidth: true
+        implicitHeight: Style.space(28)
+        visible: root.running && root.rateHistory.length > 1
+
+        property var history: root.rateHistory
+        onHistoryChanged: requestPaint()
+
+        onPaint: {
+          var ctx = getContext("2d")
+          ctx.clearRect(0, 0, width, height)
+          var list = root.rateHistory || []
+          if (list.length < 2) return
+
+          var maxVal = 10
+          for (var i = 0; i < list.length; i++) {
+            if (list[i] > maxVal) maxVal = list[i]
+          }
+
+          var step = width / Math.max(1, list.length - 1)
+          var accent = Commons.Color.accent
+
+          // Area fill
+          ctx.beginPath()
+          ctx.moveTo(0, height)
+          for (var j = 0; j < list.length; j++) {
+            var val = list[j]
+            var x = j * step
+            var y = height - (val / maxVal) * (height - 4) - 2
+            if (j === 0) ctx.lineTo(x, y)
+            else ctx.lineTo(x, y)
+          }
+          ctx.lineTo(width, height)
+          ctx.closePath()
+          ctx.fillStyle = Qt.rgba(accent.r, accent.g, accent.b, 0.15)
+          ctx.fill()
+
+          // Line stroke
+          ctx.beginPath()
+          for (var k = 0; k < list.length; k++) {
+            var valK = list[k]
+            var xK = k * step
+            var yK = height - (valK / maxVal) * (height - 4) - 2
+            if (k === 0) ctx.moveTo(xK, yK)
+            else ctx.lineTo(xK, yK)
+          }
+          ctx.strokeStyle = accent
+          ctx.lineWidth = 1.5
+          ctx.stroke()
+        }
+      }
     }
   }
 

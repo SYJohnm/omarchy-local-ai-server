@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.syjohnm.local-ai-server",
   "name": "Local AI Server",
-  "version": "3.6.0",
+  "version": "3.7.0",
   "author": "SYJohnm",
   "license": "MIT",
   "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts. One direct llama-server instance, no relay.",
@@ -25,7 +25,8 @@
       "altBinary": "",
       "modelsDir": "",
       "systemoneBinary": "",
-      "systemoneModelsDir": ""
+      "systemoneModelsDir": "",
+      "instanceCount": 1
     },
     "schema": [
       {
@@ -93,6 +94,13 @@
         "label": "System One models directory",
         "description": "Leave blank to auto-detect. Separate from chat models.",
         "defaultValue": ""
+      },
+      {
+        "key": "instanceCount",
+        "type": "int",
+        "label": "Server instances",
+        "description": "Number of persistent llama-server instances (ports start at port base + 0..n-1).",
+        "defaultValue": 1
       }
     ]
   }
