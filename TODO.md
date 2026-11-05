@@ -1,5 +1,30 @@
 # TODO — audit fixes
 
+## Retirement du relais — étape 1 terminée (2026-11-05)
+
+Fait, d'après PLAN.md : le panneau ne lancera plus que le llama-server direct.
+
+- [x] `routerMode`/`directLaunch`/`routerDesired` supprimés ; start/stop/
+      switch/restart sans branche relais ; `maybeAutoResume`/autoResumeTimer
+      avec lui.
+- [x] `Router.js` et tests relais supprimés du chargement ; `settings.json`
+      n'écrit/lit plus `routerDesired` (clé ignorée si déjà présente).
+- [x] Sweep de migration : Start/Stop retirent aussi l'ancienne unité
+      `*-llamacpp-router.service` ; lancement avec
+      `--property=Restart=on-failure` (l'unité directe survit à un crash).
+- [x] Tests verts (134), `omarchy plugin validate .`, shell rechargé sans
+      erreur QML.
+- [ ] **router/relay.py et le dossier router/ encore sur disque** — l'unité
+      relais tourne encore sur cette machine ; supprimer les fichiers après la
+      première bascule (Start depuis le panneau), puis supprimer l'unité
+      persistance `io-github-syjohnm-local-ai-server-llamacpp-router.service`
+      et `.clock`.
+- [ ] Étape 2 du plan : l'adoption d'un serveur lancé par l'ancien relais
+      s'affiche "external" tant qu'il n'a pas été reparti par le widget.
+- [ ] Étapes 5-7 du plan : smoke 2-requêtes, puis multi-instances
+      (`instanceCount`, défaut 1), load/unload par ligne, fork par instance,
+      stats/hover de l'icône, logs par slot (les 3 bugs en attente).
+
 Working checklist for the 20 findings in the 3.3.0 audit. Each item is done when
 the code is changed and the test suite still passes.
 

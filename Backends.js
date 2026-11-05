@@ -268,6 +268,8 @@ function detachedCommand(hasSystemdRun, unitName, script) {
             "--unit=" + unitName,
             "--collect",
             "--property=KillMode=mixed",
+            "--property=Restart=on-failure",
+            "--property=RestartSec=3s",
             "bash", "-lc", guarded]
   }
   return ["setsid", "bash", "-lc", guarded]

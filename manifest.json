@@ -5,7 +5,7 @@
   "version": "3.6.0",
   "author": "SYJohnm",
   "license": "MIT",
-  "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts.",
+  "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts. One direct llama-server instance, no relay.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Local AI Server",
-    "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts.",
+    "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts. One direct llama-server instance, no relay.",
     "category": "Dev",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -25,8 +25,7 @@
       "altBinary": "",
       "modelsDir": "",
       "systemoneBinary": "",
-      "systemoneModelsDir": "",
-      "directLaunch": false
+      "systemoneModelsDir": ""
     },
     "schema": [
       {
@@ -94,12 +93,6 @@
         "label": "System One models directory",
         "description": "Leave blank to auto-detect. Separate from chat models.",
         "defaultValue": ""
-      },
-      {
-        "key": "directLaunch",
-        "type": "boolean",
-        "label": "Direct launch",
-        "description": "Use one direct llama-server instead of the native router relay."
       }
     ]
   }
