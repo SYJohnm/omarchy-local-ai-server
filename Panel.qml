@@ -5184,6 +5184,96 @@ Panel {
             spacing: Style.space(8)
             visible: root.currentPage === 0
 
+            // Instances section (multi-instance control) ---------------------
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: Style.space(4)
+
+              Text {
+                text: "Instances & Status"
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: root.fontSizeSmall
+                opacity: 0.6
+                font.bold: true
+              }
+
+              Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: instanceRowCol.implicitHeight + Style.space(8)
+                radius: 4
+                color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.03)
+                border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
+                border.width: 1
+
+                ColumnLayout {
+                  id: instanceRowCol
+                  anchors.fill: parent
+                  anchors.margins: Style.space(6)
+                  spacing: Style.space(4)
+
+                  RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Style.space(6)
+
+                    Rectangle {
+                      width: 8
+                      height: 8
+                      radius: 4
+                      color: root.running ? Commons.Color.accent : (root.starting ? Commons.Color.urgent : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.25))
+                    }
+
+                    Text {
+                      text: "Instance 0"
+                      color: root.bar.foreground
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: root.fontSize
+                      font.bold: true
+                    }
+
+                    Text {
+                      text: ":" + root.port
+                      color: root.bar.foreground
+                      opacity: 0.5
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: root.fontSizeSmall
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    Text {
+                      text: root.running ? (root.tokensPerSec > 0 ? root.tokensPerSec.toFixed(1) + " t/s" : "idle") : (root.starting ? "starting…" : "stopped")
+                      color: root.running ? Commons.Color.accent : root.bar.foreground
+                      opacity: root.running ? 0.9 : 0.45
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: root.fontSizeSmall
+                    }
+
+                    Button {
+                      text: root.running ? "Unload" : "Start"
+                      enabled: !root.stopping && (root.running ? root.canStop : true)
+                      onClicked: root.toggleServer()
+                    }
+                  }
+
+                  Text {
+                    Layout.fillWidth: true
+                    text: root.runningModel ? ("Loaded: " + Model.baseName(root.runningModel)) : (root.launchModel ? ("Ready: " + Model.baseName(root.launchModel)) : "No model loaded")
+                    color: root.bar.foreground
+                    opacity: root.running ? 0.85 : 0.5
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSizeSmall
+                  }
+
+                  BuildPickerRow {
+                    Layout.fillWidth: true
+                    readOnly: root.running || root.starting
+                  }
+                }
+              }
+            }
+
             // Backend section -----------------------------------------------
             // Backend and endpoint. Same shape as the tuning rows: a label,
             // a dotted leader, and the value the next start will use. Clicking
@@ -5782,25 +5872,20 @@ Panel {
                               font.pixelSize: root.fontSize
                             }
 
-                            Repeater {
-                              model: isDir
-                                ? []
-                                : String(node.description || "").split(" · ").filter(function(b) {
-                                    return b !== ""
-                                  })
-
-                              delegate: Text {
-                                required property string modelData
-                                readonly property string glyph: root.capabilityGlyph(modelData)
-
-                                Layout.maximumWidth: glyph !== "" ? implicitWidth : modelColumn.width * 0.3
-                                text: glyph !== "" ? glyph : modelData
-                                color: current ? Commons.Color.accent : root.bar.foreground
-                                opacity: current ? 0.75 : (glyph !== "" ? 0.55 : 0.42)
-                                elide: Text.ElideRight
-                                font.family: root.bar.fontFamily
-                                font.pixelSize: root.fontSize
-                              }
+                            TextAction {
+                              visible: !isDir && current && !root.running
+                              text: "Start"
+                              onClicked: root.startServer()
+                            }
+                            TextAction {
+                              visible: !isDir && current && root.running && root.runningModel !== node.path
+                              text: "Switch"
+                              onClicked: root.switchServer()
+                            }
+                            TextAction {
+                              visible: !isDir && current && root.running && root.runningModel === node.path
+                              text: "Unload"
+                              onClicked: root.stopServer()
                             }
                           }
                         }
