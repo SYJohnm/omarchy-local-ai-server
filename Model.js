@@ -34,34 +34,40 @@ function stopPlan(running, starting, canStop, savesSlots, model, serverRunning) 
 //
 // "total time = ... ms / N tokens" carries no "tokens per second" clause and
 // therefore never matches.
+// Parse timing lines. Supports optional slot id extraction when present:
+//   "slot print_timing: id  0 | task 0 | prompt eval time = ..."
+//   "slot print_timing: id  1 | task 2 | eval time = ..."
+// Bare lines without slot info return slot: null.
 function parseTimingLine(line) {
   var text = String(line || "")
-  var match = text.match(/(prompt\s+)?eval time\s*=\s*[\d.]+ ms\s*\/\s*\d+ tokens\s*\(\s*[\d.]+ ms per token,\s*([\d.]+) tokens per second\)/i)
+  var match = text.match(/(?:slot print_timing:\s*id\s*(\d+)\s*\|\s*task\s*\d+\s*\|\s*)?(prompt\s+)?eval time\s*=\s*[\d.]+ ms\s*\/\s*\d+ tokens\s*\(\s*[\d.]+ ms per token,\s*([\d.]+) tokens per second\)/i)
   if (!match) return null
-  var value = parseFloat(match[2])
+  var slot = match[1] !== undefined ? parseInt(match[1], 10) : null
+  var isPrompt = !!match[2]
+  var value = parseFloat(match[3])
   if (!isFinite(value)) return null
-  return { kind: match[1] ? "pp" : "tg", tps: value }
+  var res = { kind: isPrompt ? "pp" : "tg", tps: value }
+  if (slot !== null && isFinite(slot)) res.slot = slot
+  return res
 }
 
 // Live prompt-processing progress, logged per batch while the prompt is still
 // being ingested:
 //   "slot print_timing: id  0 | task 118 | prompt processing, n_tokens = 14336, progress = 0.46, t = 280.52 s / 51.11 tokens per second"
 //
-// This is the only reliable pp rate on a long prompt. Deriving it from /slots
-// means diffing n_prompt_tokens_processed between two polls, and that field
-// does not advance on every build -- it stays flat between batches, the diff
-// is zero, and the widget shows a percentage with no rate beside it. The line
-// carries both numbers already measured, so it is preferred when present.
-//
-// Returns {kind: "pp_progress", tps, percent} or null.
+// Supports optional slot id extraction when present.
+// Returns {kind: "pp_progress", tps, percent, [slot]} or null.
 function parsePromptProgressLine(line) {
   var text = String(line || "")
-  var match = text.match(/prompt processing,\s*n_tokens\s*=\s*\d+,\s*progress\s*=\s*([\d.]+),\s*t\s*=\s*[\d.]+ s\s*\/\s*([\d.]+) tokens per second/i)
+  var match = text.match(/(?:slot print_timing:\s*id\s*(\d+)\s*\|\s*task\s*\d+\s*\|\s*)?prompt processing,\s*n_tokens\s*=\s*\d+,\s*progress\s*=\s*([\d.]+),\s*t\s*=\s*[\d.]+ s\s*\/\s*([\d.]+) tokens per second/i)
   if (!match) return null
-  var percent = parseFloat(match[1]) * 100
-  var tps = parseFloat(match[2])
+  var slot = match[1] !== undefined ? parseInt(match[1], 10) : null
+  var percent = parseFloat(match[2]) * 100
+  var tps = parseFloat(match[3])
   if (!isFinite(percent) || !isFinite(tps)) return null
-  return { kind: "pp_progress", tps: tps, percent: Math.max(0, Math.min(100, percent)) }
+  var res = { kind: "pp_progress", tps: tps, percent: Math.max(0, Math.min(100, percent)) }
+  if (slot !== null && isFinite(slot)) res.slot = slot
+  return res
 }
 
 // Generation-speed-only view of parseTimingLine, for callers that only care

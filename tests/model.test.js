@@ -18,8 +18,8 @@ const BARE_TG = "       eval time =    1234.56 ms /   128 tokens (    9.65 ms pe
 test("parseTimingLine distinguishes pp from tg on prefixed lines", () => {
   // The regression this guards: an anchored ^prompt test misses the marker on
   // "slot print_timing: ... | prompt eval time" and reports pp as tg.
-  assert.deepStrictEqual(Model.parseTimingLine(OLLAMA_PP), { kind: "pp", tps: 21.10 })
-  assert.deepStrictEqual(Model.parseTimingLine(OLLAMA_TG), { kind: "tg", tps: 7.44 })
+  assert.deepStrictEqual(Model.parseTimingLine(OLLAMA_PP), { kind: "pp", tps: 21.10, slot: 0 })
+  assert.deepStrictEqual(Model.parseTimingLine(OLLAMA_TG), { kind: "tg", tps: 7.44, slot: 0 })
 })
 
 test("parseTimingLine handles the bare llama.cpp form", () => {
@@ -46,7 +46,7 @@ test("parsePromptProgressLine reads live ingestion progress", () => {
   // is why this line, not the poll, is what puts a rate next to the percent.
   const line = "5.27.453.169 I slot print_timing: id  0 | task 118 | prompt processing, n_tokens =  14336, progress = 0.46, t = 280.52 s / 51.11 tokens per second"
   assert.deepStrictEqual(Model.parsePromptProgressLine(line),
-                         { kind: "pp_progress", tps: 51.11, percent: 46 })
+                         { kind: "pp_progress", tps: 51.11, percent: 46, slot: 0 })
   assert.strictEqual(Model.parsePromptProgressLine(OLLAMA_PP), null, "completion timings are not progress")
   assert.strictEqual(Model.parsePromptProgressLine("unrelated log line"), null)
 })
