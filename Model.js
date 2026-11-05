@@ -352,6 +352,12 @@ function quantLabel(filename) {
   return match ? match[1].toUpperCase() : ""
 }
 
+// Strips quantization suffixes and extension to identify the base model name.
+function baseModelName(filenameOrPath) {
+  var base = baseName(String(filenameOrPath || "")).replace(/\.gguf$/i, "")
+  return base.replace(/[-_.](?:UD-)?(?:(?:IQ|Q)\d(?:_[A-Z0-9]+)*|BF16|F16|F32)(?:[-_.]|$)/gi, "").trim()
+}
+
 // Reads gguf_probe.py's batched JSON output and derives tool-calling /
 // thinking support from each model's embedded chat template -- the best
 // signal available without actually running the model.
@@ -609,6 +615,7 @@ if (typeof module !== "undefined") {
     dirName: dirName,
     ancestorDirs: ancestorDirs,
     baseName: baseName,
+    baseModelName: baseModelName,
     isMmprojName: isMmprojName,
     isMtpName: isMtpName,
     classifyModelFiles: classifyModelFiles,

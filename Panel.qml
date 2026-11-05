@@ -2733,16 +2733,25 @@ Panel {
     var blobNames = {}
     for (var n in root.ollamaBlobs) blobNames[root.ollamaBlobs[n].path] = n
 
+    // Count occurrences of each base model to only show quant badge if >= 2 variants exist
+    var baseCounts = {}
+    for (var bIdx = 0; bIdx < files.length; bIdx++) {
+      var bName = Model.baseModelName(files[bIdx])
+      baseCounts[bName] = (baseCounts[bName] || 0) + 1
+    }
+
     var sorted = files.slice().sort()
     for (var i = 0; i < sorted.length; i++) {
       var path = sorted[i]
       if (seen[path]) continue
       seen[path] = true
       var name = Model.baseName(path)
+      var baseModel = Model.baseModelName(path)
       var cap = (caps && caps[path]) || {}
       var badges = []
       var quant = Model.quantLabel(name)
-      if (quant) badges.push(quant)
+      // Only show quantization badge if the same model has more than one file/variant (>= 2)
+      if (quant && (baseCounts[baseModel] >= 2)) badges.push(quant)
       if (root.visionDirs[Model.dirName(path)]) badges.push("vision")
       if (cap.tools) badges.push("tools")
       if (cap.thinking) badges.push("thinking")
@@ -2763,6 +2772,8 @@ Panel {
         mtp: hasMtp
       })
     }
+    return out
+  }
     return out
   }
 
@@ -4102,9 +4113,37 @@ Panel {
     tooltipText: {
       if (switchState !== "") return Model.barSwitchTooltip(switchState, root.slotsProcessing)
       if (!root.running) return ""
-      return root.backendSpec.label +
-        (root.configChanged ? " · changes pending — open the panel and press Restart" : "") +
-        " · " + (root.showMetric ? "Right-click: hide tokens/s" : "Right-click: show tokens/s")
+
+      var lines = []
+      // Header: backend, state and endpoint
+      var header = root.backendSpec.label + " (" + root.host + ":" + root.port + ")"
+      if (root.configChanged) header += " · restart pending"
+      lines.push(header)
+
+      // Active model and alias
+      var modelName = root.runningModel ? Model.baseName(root.runningModel) : (root.launchModel ? Model.baseName(root.launchModel) : "")
+      var alias = String(root.modelAlias).trim() || (modelName ? ModelsIni.deriveDefaultAlias(modelName) : "")
+      if (modelName) {
+        var modelLine = "Model: " + (alias ? alias + " [" + modelName + "]" : modelName)
+        lines.push(modelLine)
+      }
+
+      // Build / Fork
+      if (root.backend === "llamacpp" && root.resolvedBuild) {
+        lines.push("Build: " + Backends.buildLabel(root.resolvedBuild))
+      }
+
+      // Live metrics: tokens/s, prompt processing progress
+      if (root.ppActive && isFinite(root.ppPercent)) {
+        var ppLine = "Ingesting prompt: " + root.ppPercent.toFixed(0) + "%"
+        if (root.ppTokensPerSec > 0) ppLine += " (" + root.ppTokensPerSec.toFixed(1) + " t/s)"
+        lines.push(ppLine)
+      } else if (root.tokensPerSec > 0) {
+        lines.push("Speed: " + root.tokensPerSec.toFixed(1) + " t/s")
+      }
+
+      lines.push(root.showMetric ? "Right-click: hide t/s in bar" : "Right-click: show t/s in bar")
+      return lines.join("\n")
     }
     onPressed: function(b) {
       if (b === Qt.RightButton) root.showMetric = !root.showMetric
