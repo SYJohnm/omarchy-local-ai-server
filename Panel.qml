@@ -3416,7 +3416,8 @@ Panel {
     // throughput still be read after this widget is torn down and rebuilt.
     serverProc.command = Backends.detachedCommand(root.hasSystemdRun, root.unitName, script)
     root.ownsUnit = root.hasSystemdRun
-    root.runningModel = root.launchModel
+    // The router loads whatever a request asks for, so nothing is loaded yet.
+    root.runningModel = root.routerMode ? "" : root.launchModel
     root.runningConfigHash = root.backend === "ollama" ? root.ollamaConfigHash() : ""
     root.adopted = false
     root.starting = true
@@ -3621,7 +3622,7 @@ Panel {
             "--prefix", root.kvPrefix(model)]
   }
 
-  readonly property bool savesSlots: root.kvPersistence && Backends.supports(root.backend, "slotKv")
+  readonly property bool savesSlots: root.kvPersistence && !root.routerMode && Backends.supports(root.backend, "slotKv")
 
   function stopServer() {
     var model = root.runningModel !== "" ? root.runningModel : root.launchModel
@@ -3856,6 +3857,7 @@ Panel {
   function startMetrics() {
     if (root.backendSpec.metricsMode === "slots") slotsPollTimer.restart()
     if (root.backendSpec.metricsMode === "log") psPollTimer.restart()
+    if (root.routerMode) routerPollTimer.restart()
     // The journal is the log view's only source, so it is followed for every
     // backend -- not just the ones that also read throughput out of it. This
     // is the adoption path: a llama.cpp server adopted from a previous widget
@@ -3867,6 +3869,7 @@ Panel {
   function stopMetrics() {
     slotsPollTimer.stop()
     psPollTimer.stop()
+    routerPollTimer.stop()
     unitWatchTimer.stop()
     journalProc.running = false
     root.logsSource = ""
@@ -3886,6 +3889,42 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.handleSlotsResponse(text)
+    }
+  }
+
+  // In router mode the loaded model changes per request, and /slots does not
+  // answer (400: "model name is missing"). /v1/models carries each preset's
+  // status, so that is the source of truth for the loaded alias.
+  Timer {
+    id: routerPollTimer
+    interval: 2000
+    repeat: true
+    onTriggered: if (root.running && root.routerMode && !routerProc.running) routerProc.running = true
+  }
+
+  Process {
+    id: routerProc
+    command: ["curl", "-s", "-m", "2", "http://" + root.host + ":" + root.port + "/v1/models"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var raw = String(text || "").trim()
+        if (raw === "") return // keep the last known state on a failed poll
+        var data
+        try { data = JSON.parse(raw) } catch (e) { return }
+        var list = (data && data.data) || []
+        for (var i = 0; i < list.length; i++) {
+          if (list[i].status && list[i].status.value === "loaded") {
+            // Prefer the on-disk path: the rest of the widget keys on paths.
+            var args = list[i].status.args || []
+            var idx = args.indexOf("--model")
+            root.runningModel = idx !== -1 && idx + 1 < args.length
+              ? String(args[idx + 1]) : String(list[i].id || "")
+            return
+          }
+        }
+        root.runningModel = ""
+      }
     }
   }
 
@@ -6194,7 +6233,7 @@ Panel {
 
             Text {
               Layout.fillWidth: true
-              visible: root.running && root.runningModel !== "" &&
+              visible: root.running && !root.routerMode && root.runningModel !== "" &&
                        root.launchModel !== root.runningModel &&
                        Backends.supports(root.backend, "slotKv")
               text: "Running " + Model.baseName(root.runningModel) + " — press Restart to load this one."
