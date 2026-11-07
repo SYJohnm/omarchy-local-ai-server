@@ -64,6 +64,9 @@ Panel {
     return b && b.real ? b.real : ""
   }
   property string systemoneModel: ""
+  // When set, Start launches llama-server in its own router mode
+  // (--models-preset over the converted models.ini) instead of one model.
+  property bool routerMode: false
   property var systemoneScannedOptions: []
   property bool systemoneScanning: false
   // Blank means "auto-detect": reuse the main model scan, which already
@@ -1061,6 +1064,8 @@ Panel {
           extraPieces: root.extraArgTokens(),
           propOverridden: root.propOverridden
         })
+    if (root.backend === "llamacpp" && root.routerMode)
+      return ModelsIni.routerLaunchArgs(root.launchLlamaBinary, root.host, root.port, root.routerPresetPath, { extraPieces: root.extraArgTokens() })
     return root.buildLlamaArgs()
   }
 
@@ -1379,7 +1384,7 @@ Panel {
       }
 
       Text {
-        Layout.maximumWidth: row.width * 0.6
+        Layout.fillWidth: true
         text: {
           if (root.llamaBuild !== "") {
             var chosen = Backends.findBuild(root.llamaBuilds, root.llamaBuild)
@@ -1655,6 +1660,8 @@ Panel {
   readonly property string settingsDir: expandPath("~/.local/state/omarchy/io.github.syjohnm.local-ai-server/")
   readonly property string settingsPath: settingsDir + "settings.json"
   readonly property string modelsIniPath: settingsDir + "models.ini"
+  // Router preset written at launch, in llama.cpp's INI format.
+  readonly property string routerPresetPath: settingsDir + "router.ini"
   property bool settingsLoaded: false
 
   readonly property string slotSaveDir: settingsDir + "slots/"
@@ -1717,6 +1724,7 @@ Panel {
         root.mmprojOffload = parsed.mmprojOffload
       if (typeof parsed.selectedModel === "string") root.selectedModel = parsed.selectedModel
       if (typeof parsed.systemoneModel === "string") root.systemoneModel = parsed.systemoneModel
+      if (typeof parsed.routerMode === "boolean") root.routerMode = parsed.routerMode
       if (typeof parsed.showMetric === "boolean") root.showMetric = parsed.showMetric
       if (typeof parsed.extraArgs === "string") root.extraArgs = parsed.extraArgs
       if (typeof parsed.extraEnv === "string") root.extraEnv = parsed.extraEnv
@@ -1869,6 +1877,7 @@ Panel {
       mmprojOffload: root.mmprojOffload,
       selectedModel: root.selectedModel, showMetric: root.showMetric,
       systemoneModel: root.systemoneModel,
+      routerMode: root.routerMode,
       extraArgs: root.extraArgs, keepAlive: root.keepAlive, extraEnv: root.extraEnv,
       llamaBuild: root.llamaBuild,
       detectedModelDirs: root.detectedModelDirs,
@@ -3056,7 +3065,7 @@ Panel {
   }
 
   function startServer() {
-    if (root.backend !== "ollama" && !root.launchModel) {
+    if (root.backend !== "ollama" && !root.routerMode && !root.launchModel) {
       root.lastError = "Pick a model first"
       return
     }
@@ -3327,6 +3336,32 @@ Panel {
       var env = root.ollamaLaunchEnv(launch)
       script = Backends.envPrefix(env, root.shellQuote) + " " +
         "exec -a " + root.procMarker + " " + launch.argv.map(root.shellQuote).join(" ")
+    } else if (root.backend === "llamacpp" && root.routerMode) {
+
+      // Native router: llama-server serves every model listed in its preset
+      // INI (converted from models.ini) and loads/unloads them per request.
+      // The INI is written by the launch script itself so the preset matches
+      // the profiles the page holds right now, not whatever was saved last.
+      var iniData = ModelsIni.fromProfiles(root.profiles, root.currentModel())
+      var iniText = ModelsIni.toRouterIni(iniData)
+      var rArgs = ModelsIni.routerLaunchArgs(root.launchLlamaBinary, root.host, root.port,
+                                             root.routerPresetPath, {
+        extraPieces: root.extraArgTokens()
+      })
+
+      // These two work around NVIDIA-specific faults and mean nothing on
+      // other backends, so they are applied only when an NVIDIA GPU was
+      // actually detected rather than injected unconditionally:
+      //   GGML_CUDA_REGISTER_HOST pins CPU-resident weights for DMA transfer.
+      //   GGML_CUDA_DISABLE_GRAPHS avoids CUDA graph capture, which assumes
+      // stable tensor addresses that hybrid CPU/GPU offload can violate.
+      var cudaEnv = Hardware.isCuda(root.hardware)
+        ? "GGML_CUDA_REGISTER_HOST=1 GGML_CUDA_DISABLE_GRAPHS=1 " : ""
+      var userEnv = root.envScriptPrefix()
+      script = "mkdir -p -m 700 " + root.shellQuote(root.routerPresetPath.replace(/\/[^/]*$/, "")) + "; " +
+        "printf '" + iniText.replace(/'/g, "'\\''") + "' > " + root.shellQuote(root.routerPresetPath) + "; " +
+        cudaEnv + (userEnv !== "" ? userEnv + " " : "") +
+        "exec -a " + root.procMarker + " " + rArgs.map(root.shellQuote).join(" ")
     } else if (root.backend === "systemone") {
       var soArgs = Backends.systemoneLaunchArgs(
         root.activeSystemoneBinary,
@@ -4696,7 +4731,7 @@ Panel {
                 id: settingsBackendPopup
                 x: 0
                 y: parent.height + 4
-                width: 260
+                width: 500
                 height: settingsBackendPopupCol.implicitHeight + 16
                 padding: 8
                 background: Rectangle {
@@ -5454,6 +5489,21 @@ Panel {
                       font.family: root.bar.fontFamily
                       font.pixelSize: root.fontSizeSmall
                     }
+                  }
+
+                  RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Style.space(6)
+                    Item { Layout.fillWidth: true }
+
+                    Button {
+                      text: root.routerMode ? "Router: ON" : "Router: OFF"
+                      enabled: root.backend === "llamacpp" && !root.running
+                      onClicked: {
+                        root.routerMode = !root.routerMode
+                        root.setWidgetSetting("routerMode", root.routerMode)
+                      }
+                    }
 
                     Button {
                       text: root.running ? "Unload" : "Start"
@@ -5464,7 +5514,9 @@ Panel {
 
                   Text {
                     Layout.fillWidth: true
-                    text: root.runningModel ? ("Loaded: " + Model.baseName(root.runningModel)) : (root.launchModel ? ("Ready: " + Model.baseName(root.launchModel)) : "No model loaded")
+                    text: root.routerMode && root.backend === "llamacpp"
+                            ? (root.running ? "Router: " + root.routerPresetPath.split("/").pop() : "Router mode (models.ini)")
+                            : (root.runningModel ? ("Loaded: " + Model.baseName(root.runningModel)) : (root.launchModel ? ("Ready: " + Model.baseName(root.launchModel)) : "No model loaded"))
                     color: root.bar.foreground
                     opacity: root.running ? 0.85 : 0.5
                     elide: Text.ElideRight
@@ -5550,7 +5602,7 @@ Panel {
                   id: backendPopup
                   x: 0
                   y: parent.height + 4
-                  width: 260
+                  width: 500
                   height: backendPopupCol.implicitHeight + 16
                   padding: 8
                   background: Rectangle {
@@ -6432,7 +6484,7 @@ Panel {
                   id: cachePopup
                   x: 0
                   y: parent.height + 4
-                  width: 260
+                  width: 500
                   height: cachePopupCol.implicitHeight + 16
                   padding: 8
                   background: Rectangle {
@@ -6750,7 +6802,7 @@ Panel {
                   id: moePopup
                   x: 0
                   y: parent.height + 4
-                  width: 260
+                  width: 500
                   height: moePopupCol.implicitHeight + 16
                   padding: 8
                   background: Rectangle {
@@ -7433,7 +7485,7 @@ Panel {
                   id: specPopup
                   x: 0
                   y: parent.height + 4
-                  width: 260
+                  width: 500
                   height: specPopupCol.implicitHeight + 16
                   padding: 8
                   background: Rectangle {

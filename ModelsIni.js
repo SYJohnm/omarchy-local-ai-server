@@ -297,6 +297,137 @@ function resolveModelTuning(iniData, modelPath, chosenBuild) {
   }
 }
 
+// ---- llama-server native router (--models-preset) ----
+//
+// llama.cpp's own INI format differs from this plugin's models.ini: keys are
+// long flags without leading dashes ("gpu-layers = 8"), and an unknown key
+// aborts the launch. The data handed in here comes from fromProfiles(), whose
+// keys are camelCase (the serialized models.ini snake_case is a file-only
+// spelling). Section names become the model ids clients see: the alias.
+
+// Router argv: the preset INI is the entire model catalogue; the binary acts
+// as the router when it gets --models-preset and no --model.
+function routerLaunchArgs(binary, host, port, presetPath, cfg) {
+  cfg = cfg || {}
+  var args = [
+    binary,
+    "--host", host,
+    "--port", String(port),
+    "--models-preset", presetPath,
+    // Prometheus endpoint, so Stats keeps working as in single-model mode.
+    "--metrics"
+  ]
+  if (cfg.modelsMax > 0) args.push("--models-max", String(cfg.modelsMax))
+  if (cfg.extraPieces) args = args.concat(cfg.extraPieces)
+  return args
+}
+
+// camelCase tuning field -> llama.cpp INI key (see `llama-server --help`).
+var ROUTER_KEY_MAP = {
+  contextSize: "ctx-size",
+  gpuLayers: "gpu-layers",
+  threads: "threads",
+  batchSize: "batch-size",
+  ubatchSize: "ubatch-size",
+  cacheRam: "cache-ram",
+  cacheTypeK: "cache-type-k",
+  cacheTypeV: "cache-type-v",
+  loadMode: "load-mode",
+  parallel: "parallel",
+  nCpuMoe: "n-cpu-moe",
+  keepAlive: "keep-alive",
+  mmprojPath: "mmproj",
+  temperature: "temperature",
+  flashAttn: "flash-attn"
+}
+
+// Flags with no value. Only emitted when true: llama.cpp rejects a bare
+// "--cpu-moe"-style key without a negation existing.
+var ROUTER_BOOL_KEYS = {
+  cpuMoe: "cpu-moe",
+  noRepack: "no-repack"
+}
+
+// Tri-state defaults that mean "let llama.cpp decide".
+var ROUTER_SKIP_VALUES = ["", "auto", "none", "default"]
+// Numeric "auto" sentinels: 0/"" leave the flag out.
+var ROUTER_ZERO_IS_DEFAULT = {
+  threads: true, batchSize: true, ubatchSize: true, contextSize: true,
+  nCpuMoe: true, cacheRam: true, parallel: true
+}
+
+// Renders the plugin data ("fromProfiles" output shape) as a llama.cpp router
+// preset INI, one section per model keyed by its alias.
+function toRouterIni(iniData) {
+  var out = "version = 1\n"
+  if (!iniData || !iniData.models) return out
+
+  var seenAliases = {}
+  for (var modelPath in iniData.models) {
+    var entry = iniData.models[modelPath]
+    var tuning = entry.common || {}
+    var alias = String(tuning.alias || "").trim() || deriveDefaultAlias(modelPath)
+    // Stale duplicate aliases point at moved/renamed models; the first (live)
+    // profile wins, matching the model list order.
+    if (seenAliases[alias]) continue
+    seenAliases[alias] = true
+    out += "\n[" + alias + "]\n"
+    out += "model = " + modelPath + "\n"
+
+    // Projector: off means never load one; otherwise the paths the tuning
+    // page recorded decide, and GPU offload of the projector stays opt-in.
+    if (String(tuning.mmprojMode) === "off") out += "no-mmproj = true\n"
+    if (String(tuning.mmprojOffload) === "on") out += "mmproj-offload = true\n"
+    else if (tuning.mmprojPath) out += "no-mmproj-offload = true\n"
+
+    // INI booleans take true/false, so the tri-state on/off flags become the
+    // flag itself or its --no- counterpart.
+    if (String(tuning.reasoningPreserve) === "on") out += "reasoning-preserve = true\n"
+    else if (String(tuning.reasoningPreserve) === "off") out += "no-reasoning-preserve = true\n"
+
+    for (var field in ROUTER_KEY_MAP) {
+      var value = tuning[field]
+      if (value === undefined || value === null) continue
+      var str = String(value).trim()
+      if (ROUTER_SKIP_VALUES.indexOf(str) !== -1) continue
+      if (ROUTER_ZERO_IS_DEFAULT[field] && (str === "0" || str === "-1")) continue
+      if (field === "gpuLayers" && str === "auto") continue
+      out += ROUTER_KEY_MAP[field] + " = " + str + "\n"
+    }
+
+    for (var boolField in ROUTER_BOOL_KEYS) {
+      if (tuning[boolField] === true) out += ROUTER_BOOL_KEYS[boolField] + " = true\n"
+    }
+
+    // Extra args are stored as raw llama.cpp tokens ("--flag value"); re-emit
+    // them as INI pairs so a value still lands on the right flag.
+    var pieces = String(tuning.extraArgs || "").split(/[\t ]+/).filter(Boolean)
+    for (var i = 0; i < pieces.length; i++) {
+      var token = String(pieces[i])
+      if (token === "--") continue
+      if (token.slice(0, 2) === "--") {
+        var next = pieces[i + 1]
+        if (next !== undefined && String(next).slice(0, 2) !== "--") {
+          out += token.slice(2) + " = " + next + "\n"
+          i++
+        } else
+          out += token.slice(2) + " = true\n"
+      } else if (token.slice(0, 1) === "-") {
+        // Short flag without a long form: cannot be expressed as an INI key.
+        continue
+      } else {
+        out += token + " = true\n"
+      }
+    }
+
+    // shortcut: fork-specific (per-build) tuning is not emitted -- the router
+    // runs one binary for every model. Upgrade if the router learns per-model
+    // binaries.
+  }
+
+  return out
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     deriveDefaultAlias: deriveDefaultAlias,
@@ -306,6 +437,8 @@ if (typeof module !== "undefined") {
     serialize: serialize,
     fromProfiles: fromProfiles,
     toProfiles: toProfiles,
-    resolveModelTuning: resolveModelTuning
+    resolveModelTuning: resolveModelTuning,
+    routerLaunchArgs: routerLaunchArgs,
+    toRouterIni: toRouterIni
   }
 }
