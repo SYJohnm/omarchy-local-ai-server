@@ -660,6 +660,35 @@ function formatBytes(bytes) {
   return (i === 0 ? String(Math.round(n)) : n.toFixed(1)) + " " + units[i]
 }
 
+// ---- Settings file ----
+
+// Whether a settings file can be read, and what it holds.
+//
+// A file that is present but unparseable must not be treated as "no settings".
+// loadSettings used to fall through to the defaults and set settingsLoaded
+// anyway, so the debounced save wrote those defaults back 200 ms later --
+// losing the selected model, the per-backend ports, the model directories, the
+// setup flag and the per-instance assignments. None of those are mirrored
+// anywhere (the tuning profiles are, in models.ini), so one mistyped comma in
+// a file people are invited to look at cost the whole setup, with no backup
+// and no message.
+//
+// A missing or empty file is a first run, not a broken one: that has to keep
+// working, or a fresh install would never save anything.
+//
+// @returns {{parsed: object|null, broken: boolean}}
+function readSettings(raw) {
+  var text = String(raw === undefined || raw === null ? "" : raw)
+  if (text.trim() === "") return { parsed: null, broken: false }
+  var parsed = null
+  try { parsed = JSON.parse(text) } catch (e) { parsed = null }
+  // A valid JSON scalar ("null", "7", a bare string) is not a settings object
+  // either, and writing over it would lose whatever the file really was.
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    return { parsed: null, broken: true }
+  return { parsed: parsed, broken: false }
+}
+
 // ---- Untrusted text ----
 //
 // QML Text defaults to Text.AutoText, which interprets markup-shaped input as
@@ -694,6 +723,7 @@ function plainText(value, limit) {
 
 if (typeof module !== "undefined") {
   module.exports = {
+    readSettings: readSettings,
     PLAIN_TEXT_LIMIT: PLAIN_TEXT_LIMIT,
     plainText: plainText,
     statusLabel: statusLabel,

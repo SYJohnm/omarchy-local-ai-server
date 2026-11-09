@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, struct, json
+import os, sys, struct, json
 
 FIXED_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
 
@@ -8,14 +8,22 @@ FIXED_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12:
 # much and skip the rest instead of pulling a multi-gigabyte string into RAM.
 MAX_STRING = 1 << 20
 
+# A header declares how many metadata keys and tensors follow, and both counts
+# are read straight from the file. Each loop below consumes at least a dozen
+# bytes per turn, so on a large model an implausible count means a loop that
+# runs for minutes before it reaches the end. Real models are far under these:
+# a few hundred metadata keys and a few thousand tensors.
+MAX_KV = 1 << 16
+MAX_TENSORS = 1 << 20
+
 # Model files come from the internet, so every length read from one is checked
 # against what is actually left in the file: a corrupt or hostile header must
 # not make the probe allocate terabytes or spin at end-of-file forever.
+#
+# fstat rather than a seek to the end and back: seeking discards the read
+# buffer, and this is called for every string and every array.
 def remaining(f):
-    here = f.tell()
-    end = f.seek(0, 2)
-    f.seek(here)
-    return end - here
+    return os.fstat(f.fileno()).st_size - f.tell()
 
 def read_str(f):
     (n,) = struct.unpack('<Q', f.read(8))
@@ -33,7 +41,24 @@ def skip_value(f, vtype):
     elif vtype == 9:
         (elem_type,) = struct.unpack('<I', f.read(4))
         (count,) = struct.unpack('<Q', f.read(8))
-        if count > remaining(f):
+        # `count > remaining(f)` bounded bytes, not elements. With a one-byte
+        # element type that let count reach the size of the file, and the loop
+        # below then ran that many times: measured at 83 ns an element, a 20 GB
+        # model permitted about half an hour of spinning on one file, with the
+        # panel stuck on "Scanning..." and no error. The file can be sparse, so
+        # it costs an attacker 4 KB on disk.
+        if elem_type in FIXED_SIZES:
+            size = FIXED_SIZES[elem_type]
+            if count > remaining(f) // size:
+                raise ValueError('array of %d runs past end of file' % count)
+            # Nothing in a fixed-size array is read, so skip it in one seek.
+            f.seek(count * size, 1)
+            return
+        if elem_type not in (8, 9):
+            raise ValueError('unknown gguf value type %d' % elem_type)
+        # A string or a nested array costs at least its 8-byte length or its
+        # 12-byte header, which is what bounds this loop.
+        if count > remaining(f) // 8:
             raise ValueError('array of %d runs past end of file' % count)
         for _ in range(count):
             skip_value(f, elem_type)
@@ -94,6 +119,10 @@ def probe(path):
             return {'error': 'not gguf'}
         struct.unpack('<I', f.read(4))  # version
         tensor_count, kv_count = struct.unpack('<QQ', f.read(16))
+        if kv_count > MAX_KV:
+            raise ValueError('header declares %d metadata keys' % kv_count)
+        if tensor_count > MAX_TENSORS:
+            raise ValueError('header declares %d tensors' % tensor_count)
         for _ in range(kv_count):
             key = read_str(f)
             (vtype,) = struct.unpack('<I', f.read(4))

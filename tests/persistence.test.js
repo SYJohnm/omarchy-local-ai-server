@@ -3,6 +3,7 @@
 const test = require("node:test")
 const assert = require("node:assert")
 const B = require("../Backends.js")
+const Model = require("../Model.js")
 
 test("mergeBuilds keeps a vanished build as missing and lets fresh data win", () => {
   const previous = [
@@ -57,4 +58,46 @@ test("the launch declares a private umask on the unit as well as in the script",
   const argv = B.detachedCommand(true, "u", "echo hi")
   assert.ok(argv.includes("--property=UMask=0077"), argv.join(" "))
   assert.ok(argv.includes("umask 077; echo hi"), argv.join(" "))
+})
+
+// ---- settings file readability ----
+
+test("a missing or empty settings file is a first run, not a broken one", () => {
+  // A fresh install must still save, which is why loadSettings("") has to
+  // flip settingsLoaded.
+  for (const raw of ["", "   ", "\n", undefined, null]) {
+    const r = Model.readSettings(raw)
+    assert.strictEqual(r.broken, false, JSON.stringify(raw))
+    assert.strictEqual(r.parsed, null)
+  }
+})
+
+test("a good settings file comes back parsed", () => {
+  const r = Model.readSettings('{"backend":"llamacpp","host":"127.0.0.1"}')
+  assert.strictEqual(r.broken, false)
+  assert.strictEqual(r.parsed.backend, "llamacpp")
+})
+
+test("a present but unreadable settings file is broken, so it is not saved over", () => {
+  // One mistyped comma used to cost the selected model, the per-backend ports,
+  // the model directories, the setup flag and the instance assignments: the
+  // defaults were loaded and written back 200 ms later.
+  for (const raw of [
+    '{"backend":"llamacpp",}',      // trailing comma
+    '{"backend":"llamacpp"',        // truncated
+    "{'backend':'llamacpp'}",       // single quotes
+    "not json at all",
+    "\u0000\u0001garbage"
+  ]) {
+    const r = Model.readSettings(raw)
+    assert.strictEqual(r.broken, true, JSON.stringify(raw))
+    assert.strictEqual(r.parsed, null)
+  }
+})
+
+test("valid JSON that is not a settings object is broken too", () => {
+  // Writing over it would lose whatever the file actually was.
+  for (const raw of ["null", "7", '"a string"', "[1,2,3]", "true"]) {
+    assert.strictEqual(Model.readSettings(raw).broken, true, raw)
+  }
 })

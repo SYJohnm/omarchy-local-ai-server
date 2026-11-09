@@ -2119,10 +2119,22 @@ Panel {
   // does not fight a selection the user just made by hand.
   property string routerLoadedSeen: ""
 
+  // Set when the file on disk is present but could not be read. Every write is
+  // refused while it is set, so a broken file is never saved over; the panel
+  // runs on defaults and says so. Clearing it means fixing or removing the
+  // file -- removing it makes the next start an ordinary first run.
+  property bool settingsBroken: false
+
   function loadSettings(raw) {
     if (root.settingsLoaded) return
-    var parsed = null
-    try { parsed = JSON.parse(raw || "") } catch (e) { parsed = null }
+    var read = Model.readSettings(raw)
+    if (read.broken) {
+      root.settingsBroken = true
+      root.lastError = "settings.json could not be read, so nothing will be saved. " +
+        "Fix or remove " + root.settingsPath
+      return
+    }
+    var parsed = read.parsed
     if (parsed && typeof parsed === "object") {
       if (typeof parsed.backend === "string" && Backends.ids().indexOf(parsed.backend) !== -1) root.backend = parsed.backend
       // A file without the flag was written before setup existed, by an
@@ -2315,6 +2327,10 @@ Panel {
   }
 
   function flushSettings() {
+    // One chokepoint rather than a guard at each caller: resetToDetectedDefaults
+    // calls this directly, and clicking it with an unreadable file on disk
+    // would have replaced that file instead of recovering from it.
+    if (root.settingsBroken) return
     settingsFile.setText(JSON.stringify({
       version: 3,
       setupDone: root.setupDone,

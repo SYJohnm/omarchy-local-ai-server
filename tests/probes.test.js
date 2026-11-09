@@ -49,6 +49,124 @@ test("gguf_probe caps a huge string and keeps parsing the next key", () => {
   }
 })
 
+function ggufHeader(tensors, kvPairs) {
+  const header = Buffer.alloc(24)
+  header.write("GGUF", 0)
+  header.writeUInt32LE(3, 4)
+  header.writeBigUInt64LE(BigInt(tensors), 8)
+  header.writeBigUInt64LE(BigInt(kvPairs), 16)
+  return header
+}
+
+function u32(n) {
+  const b = Buffer.alloc(4)
+  b.writeUInt32LE(n)
+  return b
+}
+
+function u64(n) {
+  const b = Buffer.alloc(8)
+  b.writeBigUInt64LE(BigInt(n))
+  return b
+}
+
+function probeFile(file) {
+  return JSON.parse(execFileSync("python3", ["-I", PROBE, file], {
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024,
+    timeout: 30000
+  }))[file]
+}
+
+test("gguf_probe refuses an array whose element count cannot fit, instead of spinning", () => {
+  // The bound used to be `count > bytes left`, which bounds bytes rather than
+  // elements. With a one-byte element type that let count reach the size of
+  // the file and the skip loop then ran that many times: 83 ns an element, so
+  // a 20 GB model allowed about half an hour on one file with the panel stuck
+  // on "Scanning...". The file can be sparse, so it costs 4 KB on disk.
+  const dir = tmpdir()
+  try {
+    const file = path.join(dir, "huge-array.gguf")
+    const N = 200_000_000
+    const body = Buffer.concat([
+      ggufHeader(0, 1),
+      ggufString("x"), u32(9),   // value type 9 = array
+      u32(0),                     // element type 0 = uint8, one byte each
+      u64(N)
+    ])
+    const fd = fs.openSync(file, "w")
+    fs.writeSync(fd, body)
+    fs.ftruncateSync(fd, body.length + N + 1024) // sparse: bytes left > count
+    fs.closeSync(fd)
+    assert.ok(fs.statSync(file).size > N, "the declared count must fit in the file")
+
+    const started = Date.now()
+    const out = probeFile(file)
+    const elapsed = Date.now() - started
+    // Seeked past in one step rather than walked. Before the fix this file
+    // took 16.6 s; the budget is loose enough for a slow machine and still
+    // nowhere near a walk.
+    assert.ok(elapsed < 5000, "took " + elapsed + "ms, which means it walked the array")
+    // It stops at that key rather than inventing data for it.
+    assert.ok(!("x" in out), JSON.stringify(out))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("gguf_probe rejects an array of strings that cannot fit", () => {
+  // A string element costs at least its 8-byte length, which is the bound.
+  const dir = tmpdir()
+  try {
+    const file = path.join(dir, "string-array.gguf")
+    fs.writeFileSync(file, Buffer.concat([
+      ggufHeader(0, 1),
+      ggufString("x"), u32(9),
+      u32(8),            // element type 8 = string
+      u64(1_000_000)     // far more than 8 bytes each in this tiny file
+    ]))
+    assert.match(probeFile(file).error, /runs past end of file/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("gguf_probe rejects an implausible metadata or tensor count", () => {
+  // Both counts are read straight from the header. Each loop eats at least a
+  // dozen bytes a turn, so on a large model an absurd count is minutes of
+  // walking before it reaches the end.
+  const dir = tmpdir()
+  try {
+    const kv = path.join(dir, "kv.gguf")
+    fs.writeFileSync(kv, ggufHeader(0, 2 ** 40))
+    assert.match(probeFile(kv).error, /metadata keys/)
+
+    const tensors = path.join(dir, "tensors.gguf")
+    fs.writeFileSync(tensors, ggufHeader(2 ** 40, 0))
+    assert.match(probeFile(tensors).error, /tensors/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("gguf_probe still reads a normal array-valued key", () => {
+  // The fix must not skip arrays the probe is meant to walk past.
+  const dir = tmpdir()
+  try {
+    const file = path.join(dir, "ok.gguf")
+    fs.writeFileSync(file, Buffer.concat([
+      ggufHeader(0, 2),
+      // An ordinary uint32 array, as a tokenizer list would be.
+      ggufString("tokenizer.ggml.token_type"), u32(9), u32(4), u64(3),
+      u32(1), u32(1), u32(1),
+      ggufString("general.name"), u32(8), ggufString("after the array")
+    ]))
+    assert.strictEqual(probeFile(file)["general.name"], "after the array")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("ollama_blobs ignores a manifest digest that escapes the store", () => {
   const dir = tmpdir()
   try {
