@@ -14,6 +14,7 @@ import "Params.js" as Params
 import "Profiles.js" as Profiles
 import "ModelsIni.js" as ModelsIni
 import "Instances.js" as Instances
+import "LlamaArgs.js" as LlamaArgs
 
 
 // Local AI server manager.
@@ -2569,9 +2570,17 @@ Panel {
       var parsed = ModelsIni.parse(text())
       if (parsed && parsed.models) {
         var converted = ModelsIni.toProfiles(parsed)
-        for (var k in converted) {
-          root.profiles[k] = converted[k]
-        }
+        // Built into a copy and assigned once. Writing into root.profiles in
+        // place changed the data without assigning the property, and QML only
+        // emits a change signal on assignment -- so every binding on profiles
+        // (hasProfile, which decides whether a model offers to reset its
+        // tuning) kept the previous answer after a hand edit, while the values
+        // themselves did reach the server. It looked like it had worked while
+        // part of the page disagreed.
+        var next = {}
+        for (var existing in root.profiles) next[existing] = root.profiles[existing]
+        for (var k in converted) next[k] = converted[k]
+        root.profiles = next
         if (root.settingsLoaded && !root.applyingTuning) {
           root.applyTuningForSelection()
         }
@@ -3656,237 +3665,67 @@ Panel {
   // equal a flag name and cause a false skip.
   property var emittedFlags: ({})
 
-  function emitFlag(build, flag, value, args) {
-    if (Backends.supportsFlag(build, flag)) {
-      // Boolean flags carry no value; an empty argv entry is an error to
-      // llama-server, not "use the default".
-      args.push(flag)
-      if (String(value) !== "") args.push(String(value))
-      root.emittedFlags[flag] = true
-      return true
-    }
-    if (ignoredFlags.indexOf(flag) === -1) ignoredFlags.push(flag)
-    return false
-  }
-
   // Builds the llama-server argv.
   //
-  // Called with no argument it describes the primary: every accessor below
-  // then reads the live property it used to read directly, so the launch line
-  // the page has always produced is unchanged by construction.
-  //
-  // `spec` points it at another instance instead -- {model, build, binary,
-  // port, tuning} -- where `tuning` is that model's resolved profile
-  // (Profiles.resolveFor). One builder serves every instance, so an extra
-  // server cannot drift from the primary's flags for the same model.
+  // The composition itself lives in LlamaArgs.js, which is pure and tested:
+  // this is the adapter that gathers what it needs. Called with no argument it
+  // describes the primary, reading the live tuning properties through
+  // Profiles.snapshot -- the same values the old in-file accessor read, field
+  // for field. `spec` points it at another instance instead: {model, build,
+  // binary, port, tuning}, where tuning is that model's resolved profile. One
+  // builder serves every instance, so an extra server cannot drift from the
+  // flags the primary would use for the same model.
   function buildLlamaArgs(spec) {
     spec = spec || {}
     var forPrimary = spec.tuning === undefined || spec.tuning === null
-
-    // Tuning accessor. For the primary it is the identity on root.
-    var tuning = forPrimary ? null : spec.tuning
-    var T = function(field) { return tuning === null ? root[field] : tuning[field] }
-
+    var tuning = forPrimary ? Profiles.snapshot(root) : spec.tuning
     var model = spec.model !== undefined ? spec.model : root.selectedModel
-    var build = spec.build !== undefined ? spec.build : root.resolvedBuild
-    var binary = spec.binary !== undefined ? spec.binary : root.launchLlamaBinary
-    var port = String(spec.port !== undefined ? spec.port : root.port)
 
-    var params = T("customParams") || []
-    var overridden = function(prop) {
-      for (var oi = 0; oi < params.length; oi++)
-        if (root.ownedFlags[params[oi].key] === prop) return true
-      return false
-    }
+    // The module expands no paths, so a custom projector arrives expanded.
+    var resolved = {}
+    for (var f in tuning) resolved[f] = tuning[f]
+    if (String(resolved.mmprojPath || "") !== "")
+      resolved.mmprojPath = expandPath(resolved.mmprojPath)
 
-    // The projector and the MTP draft belong to the model being launched, not
-    // to whatever the picker is showing, so they are resolved from `model`.
-    var mmprojMode = T("mmprojMode")
-    var mmprojOffload = T("mmprojOffload")
-    var resolvedMmproj =
-      mmprojMode === "off" ? ""
-      : mmprojMode === "custom" ? String(T("mmprojPath")).trim()
-      : root.mmprojFor(model)
-    var mmprojActive = resolvedMmproj !== ""
-    var mtp = root.mtpDraftFor(model)
-    var mtpActive = mtp !== "" && T("specType") === "draft-mtp"
-
-    // Which flags were dropped and which were emitted is page state: it tells
-    // the Tuning rows that this build ignores a flag. Only the primary's
-    // launch describes the page, so an extra instance's bookkeeping is rolled
-    // back rather than overwriting it.
-    var savedIgnored = root.ignoredFlags
-    var savedEmitted = root.emittedFlags
-
-    var ngl = parseInt(T("gpuLayers"), 10)
-    ignoredFlags = []
-    root.emittedFlags = {}
-    var currentBuild = build
-
-    if (!isFinite(ngl)) ngl = 0
-    // -1 is llama.cpp's "fit as many layers as VRAM allows" sentinel, not a
-    // layer count, so it is passed through unclamped.
-    if (ngl !== -1) ngl = Math.max(0, Math.min(999, ngl))
-
-    var args = [
-      binary,
-      "--model", model,
-      "--host", root.host,
-      "--port", port,
-      "--slot-save-path", expandPath(root.slotSaveDir),
-      // Prometheus endpoint, so Stats can read totals the /slots view does
-      // not carry.
-      "--metrics"
-    ]
-
-    // Every flag a built-in control owns is emitted only while no added
-    // parameter has taken it over. Emitting both is how a launch line ended up
-    // carrying two "--load-mode mmap": llama.cpp keeps the last occurrence, so
-    // the duplicate is silent -- the control still shows its own value while
-    // the server runs on the other one.
-    if (build && root.backend === "llamacpp") {
-      if (!overridden("gpuLayers")) emitFlag(build, "--gpu-layers", ngl, args)
-      if (!overridden("cacheTypeK")) emitFlag(build, "--cache-type-k", T("cacheTypeK"), args)
-      if (!overridden("cacheTypeV")) emitFlag(build, "--cache-type-v", T("cacheTypeV"), args)
-      if (!overridden("flashAttn")) emitFlag(build, "--flash-attn", T("flashAttn"), args)
-      if (!overridden("loadMode")) emitFlag(build, "--load-mode", T("loadMode"), args)
-    }
-
-    // Vision projector. "auto" reproduces what the plugin always did -- use
-    // the projector sitting next to the model -- but says so in a row instead
-    // of only in the launch line, and the other two modes are what that guess
-    // was missing: a directory holding a projector for a different model, and
-    // a card with room to offload the tower after all.
-    // An added parameter for any one of the three takes the whole row, the
-    // same way the MoE pair works: which projector to load and whether to
-    // offload it are one decision, and leaving half of it to a control the
-    // page no longer shows is exactly the invisible state the row exists to
-    // prevent.
-    var visionOwned = overridden("mmprojMode") ||
-                      overridden("mmprojPath") ||
-                      overridden("mmprojOffload")
-    if (!visionOwned) {
-      if (mmprojMode === "off") {
-        args.push("--no-mmproj")
-      } else if (mmprojActive) {
-        args.push("--mmproj", expandPath(resolvedMmproj))
-        // GPU offload is llama.cpp's default but rarely fits alongside the
-        // main model's layers, and the failure mode is an allocation abort
-        // rather than a clean error -- so the plugin default stays "off".
-        if (mmprojOffload === "on") {
-          if (!build || root.backend !== "llamacpp" ||
-            Backends.supportsFlag(build, "--mmproj-offload"))
-            args.push("--mmproj-offload")
-        } else if (!build || root.backend !== "llamacpp" ||
-                   Backends.supportsFlag(build, "--no-mmproj-offload")) {
-          args.push("--no-mmproj-offload")
-        }
-      }
-    }
-
-    // External MTP draft, the same idea as the projector above: a file named
-    // like a draft beside the model, never a picker entry. It is passed only
-    // while the spec type uses it -- --model-draft alone loads the weights and
-    // decodes nothing with them. A hand-added --model-draft keeps the last
-    // word on which file is loaded.
-    var mtpOwned = false
-    for (var d = 0; d < params.length; d++)
-      if (params[d].key === "--model-draft") mtpOwned = true
-    if (!mtpOwned && mtpActive) {
-      if (!build || root.backend !== "llamacpp" ||
-          Backends.supportsFlag(build, "--model-draft")) {
-        args.push("--model-draft", expandPath(mtp))
-        root.emittedFlags["--model-draft"] = true
-      } else if (ignoredFlags.indexOf("--model-draft") === -1) {
-        ignoredFlags.push("--model-draft")
-      }
-    }
-
-    if (build && root.backend === "llamacpp") {
-      // Parallel, reasoning, threads, MoE, context, batch, cache, temp
-      if (!overridden("parallel") && String(T("parallel")).trim() !== "")
-        emitFlag(build, "--parallel", String(T("parallel")).trim(), args)
-
-      if (!overridden("reasoningPreserve")) {
-        if (T("reasoningPreserve") === "on") emitFlag(build, "--reasoning-preserve", "", args)
-        else if (T("reasoningPreserve") === "off") emitFlag(build, "--no-reasoning-preserve", "", args)
-      }
-
-      var threadCount = parseInt(T("threads"), 10)
-      if (!overridden("threads") && isFinite(threadCount) && threadCount > 0)
-        emitFlag(build, "--threads", String(threadCount), args)
-
-      // MoE flags are mutually exclusive in llama.cpp
-      if (!overridden("nCpuMoe") && !overridden("cpuMoe")) {
-        var nCpuMoeTrimmed = String(T("nCpuMoe")).trim()
-        if (nCpuMoeTrimmed !== "") emitFlag(build, "--n-cpu-moe", nCpuMoeTrimmed, args)
-        else if (T("cpuMoe")) emitFlag(build, "--cpu-moe", "", args)
-      }
-
-      if (!overridden("noRepack") && T("noRepack"))
-        emitFlag(build, "--no-repack", "", args)
-      if (!overridden("specType") && T("specType") !== "none")
-        emitFlag(build, "--spec-type", T("specType"), args)
-
-      var ctxSize = parseInt(T("contextSize"), 10)
-      if (!overridden("contextSize") && isFinite(ctxSize) && ctxSize > 0)
-        emitFlag(build, "--ctx-size", String(ctxSize), args)
-      var batch = parseInt(T("batchSize"), 10)
-      if (!overridden("batchSize") && isFinite(batch) && batch > 0)
-        emitFlag(build, "--batch-size", String(batch), args)
-      var ubatch = parseInt(T("ubatchSize"), 10)
-      if (!overridden("ubatchSize") && isFinite(ubatch) && ubatch > 0)
-        emitFlag(build, "--ubatch-size", String(ubatch), args)
-      if (!overridden("cacheRam") && String(T("cacheRam")).trim() !== "")
-        emitFlag(build, "--cache-ram", String(T("cacheRam")).trim(), args)
-      if (!overridden("temperature") && String(T("temperature")).trim() !== "")
-        emitFlag(build, "--temp", String(T("temperature")).trim(), args)
-      // The model being launched, which is the one named by --model above.
-      // This read used to be a bare `model` -- an identifier nothing in scope
-      // defines, so it raised a ReferenceError out of buildLlamaArgs the
-      // moment the alias row was left on "auto", which is its default. That
-      // took the whole direct launch with it: no argv was ever built and
-      // Start did nothing at all. Router mode assembles its argv elsewhere,
-      // which is the only reason this was survivable.
-      var activeAlias = String(T("modelAlias")).trim() ||
-                        ModelsIni.deriveDefaultAlias(model)
-      if (!overridden("alias") && activeAlias !== "")
-        emitFlag(build, "--alias", activeAlias, args)
-    }
-    // User-added parameters. Appended before the free-form extra args so a
-    // hand-written flag still gets the last word on any duplicate.
-    //
-    // A flag a built-in still emitted is skipped rather than appended twice.
-    // The override guards above are what normally prevent that; this stays as
-    // the backstop for a flag no ownership entry covers -- an alias a future
-    // llama.cpp build adds, or a settings file from a version that reserved
-    // the flag instead of yielding it.
-    for (var c = 0; c < params.length; c++) {
-      var entry = params[c]
-      if (root.emittedFlags[entry.key]) {
-        console.warn("local-ai-server: skipping", entry.key,
-                     "-- already set by a built-in control")
-        continue
-      }
+    var result = LlamaArgs.build({
+      model: model,
+      build: spec.build !== undefined ? spec.build : root.resolvedBuild,
+      binary: spec.binary !== undefined ? spec.binary : root.launchLlamaBinary,
+      host: root.host,
+      port: spec.port !== undefined ? spec.port : root.port,
+      slotDir: expandPath(root.slotSaveDir),
+      backend: root.backend,
+      tuning: resolved,
+      ownedFlags: root.ownedFlags,
+      // The projector and the draft sitting beside the model being launched,
+      // which only the model scan can resolve.
+      autoMmproj: expandPath(root.mmprojFor(model)),
+      autoMtp: expandPath(root.mtpDraftFor(model)),
+      supportsFlag: Backends.supportsFlag,
       // A flag this build's --help does not describe still has to be passed:
       // it may come from an alternate binary, or from a line pasted before the
       // catalogue loaded. Without the stand-in the row rendered and the launch
       // line silently omitted it.
-      var spec = Params.find(root.paramCatalogue, entry.key) ||
-                 Params.fallbackSpec(entry.key, entry.type)
-      args = args.concat(Params.toArgv(spec, entry.value))
-    }
+      customArgv: function(entry) {
+        var paramSpec = Params.find(root.paramCatalogue, entry.key) ||
+                        Params.fallbackSpec(entry.key, entry.type)
+        return Params.toArgv(paramSpec, entry.value)
+      },
+      splitExtraArgs: Model.splitExtraArgs,
+      parseArgs: Model.parseArgs,
+      deriveDefaultAlias: ModelsIni.deriveDefaultAlias
+    })
 
-    var extraPieces = Model.splitExtraArgs(T("extraArgs"))
-    for (var p = 0; p < extraPieces.length; p++) args = args.concat(Model.parseArgs(extraPieces[p]))
-
-    if (!forPrimary) {
-      root.ignoredFlags = savedIgnored
-      root.emittedFlags = savedEmitted
+    // Which flags were dropped and which were emitted is page state: it tells
+    // the Tuning rows that this build ignores a flag. Only the primary's
+    // launch describes the page, so an extra instance's bookkeeping is not
+    // published.
+    if (forPrimary) {
+      root.ignoredFlags = result.ignoredFlags
+      root.emittedFlags = result.emittedFlags
     }
-    return args
+    return result.args
   }
-
   // The projector found beside a given model, if any. detectedMmproj is this
   // for the selected model; buildLlamaArgs needs it for an arbitrary one.
   function mmprojFor(model) {
@@ -4218,10 +4057,15 @@ Panel {
     id: runningArgsProc
     // systemd first, then the marker for the setsid fallback; without the
     // fallback a non-systemd server had no argv and never offered Restart.
+    // Unit and marker arrive as arguments, the way the per-instance reader
+    // does it. Both are safe either way -- Backends.unitName strips them to
+    // [A-Za-z0-9_-] -- but one rule spelled two ways is one a later edit can
+    // get wrong in only one place.
     command: ["bash", "-c",
-      "pid=$(systemctl --user show -p MainPID --value " + root.shellQuote(root.unitName) + " 2>/dev/null); " +
-      "[ -n \"$pid\" ] && [ \"$pid\" != 0 ] || pid=$(pgrep -f -- \"^" + root.procMarker + " \" | head -n1); " +
-      "[ -n \"$pid\" ] && [ \"$pid\" != 0 ] && readlink /proc/$pid/exe && tr '\\0' '\\n' < /proc/$pid/cmdline"]
+      "pid=$(systemctl --user show -p MainPID --value \"$1\" 2>/dev/null); " +
+      "[ -n \"$pid\" ] && [ \"$pid\" != 0 ] || pid=$(pgrep -f -- \"^$2 \" | head -n1); " +
+      "[ -n \"$pid\" ] && [ \"$pid\" != 0 ] && readlink /proc/$pid/exe && tr '\\0' '\\n' < /proc/$pid/cmdline",
+      "_", root.unitName, root.procMarker]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -7096,12 +6940,12 @@ Panel {
                 delegate: Rectangle {
                   id: instRow
                   required property int index
-                  readonly property var state: root.instanceState(instRow.index)
-                  readonly property bool isPrimary: !!instRow.state.primary
-                  readonly property bool up: !!instRow.state.running
+                  readonly property var snap: root.instanceState(instRow.index)
+                  readonly property bool isPrimary: !!instRow.snap.primary
+                  readonly property bool up: !!instRow.snap.running
                   readonly property bool pending:
-                    !!instRow.state.starting || !!instRow.state.stopping
-                  readonly property string modelPath: String(instRow.state.model || "")
+                    !!instRow.snap.starting || !!instRow.snap.stopping
+                  readonly property string modelPath: String(instRow.snap.model || "")
 
                   Layout.fillWidth: true
                   implicitHeight: instCol.implicitHeight + Style.space(8)
@@ -7130,7 +6974,7 @@ Panel {
                           ? Commons.Color.accent
                           : (instRow.pending
                               ? Commons.Color.urgent
-                              : (instRow.state.failed
+                              : (instRow.snap.failed
                                   ? root.bar.urgent
                                   : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.25)))
                       }
@@ -7146,7 +6990,7 @@ Panel {
 
                       Text {
                         textFormat: Text.PlainText
-                        text: instRow.state.port > 0 ? ":" + instRow.state.port : "no port"
+                        text: instRow.snap.port > 0 ? ":" + instRow.snap.port : "no port"
                         color: root.bar.foreground
                         opacity: 0.5
                         font.family: root.bar.fontFamily
@@ -7156,7 +7000,7 @@ Panel {
                       Text {
                         textFormat: Text.PlainText
                         visible: text !== "" && text !== "this widget"
-                        text: Instances.ownerLabel(instRow.state)
+                        text: Instances.ownerLabel(instRow.snap)
                         color: root.bar.foreground
                         opacity: 0.45
                         font.family: root.bar.fontFamily
@@ -7167,11 +7011,11 @@ Panel {
 
                       Text {
                         textFormat: Text.PlainText
-                        text: Instances.stateLabel(instRow.state)
-                        color: instRow.state.failed
+                        text: Instances.stateLabel(instRow.snap)
+                        color: instRow.snap.failed
                           ? root.bar.urgent
                           : (instRow.up ? Commons.Color.accent : root.bar.foreground)
-                        opacity: instRow.up ? 0.9 : (instRow.state.failed ? 0.9 : 0.45)
+                        opacity: instRow.up ? 0.9 : (instRow.snap.failed ? 0.9 : 0.45)
                         font.family: root.bar.fontFamily
                         font.pixelSize: root.fontSizeSmall
                       }
@@ -7260,15 +7104,15 @@ Panel {
                         visible: !instRow.isPrimary
                         text: "Restart"
                         tooltipText: "Stop and start this instance with its current model and build"
-                        enabled: instRow.up && !instRow.pending && !!instRow.state.canStop
+                        enabled: instRow.up && !instRow.pending && !!instRow.snap.canStop
                         onClicked: root.restartInstance(instRow.index)
                       }
 
                       Button {
-                        text: instRow.up || instRow.state.starting ? "Unload" : "Start"
+                        text: instRow.up || instRow.snap.starting ? "Unload" : "Start"
                         tooltipText: instRow.isPrimary
                           ? ""
-                          : (instRow.state.launchable || instRow.up
+                          : (instRow.snap.launchable || instRow.up
                               ? ""
                               : "Needs a model, a llama.cpp build, a free port and a systemd user session")
                         enabled: instRow.isPrimary
@@ -7279,9 +7123,9 @@ Panel {
                           // ten minutes, with no way to cancel a model that
                           // was never going to load. InstanceRunner.stop()
                           // handles the starting case already.
-                          : (instRow.up || instRow.state.starting
-                              ? !!instRow.state.ownsUnit && !instRow.state.stopping
-                              : !!instRow.state.launchable)
+                          : (instRow.up || instRow.snap.starting
+                              ? !!instRow.snap.ownsUnit && !instRow.snap.stopping
+                              : !!instRow.snap.launchable)
                         onClicked: instRow.isPrimary
                           ? root.toggleServer()
                           : root.toggleInstance(instRow.index)
@@ -7291,8 +7135,8 @@ Panel {
                     Text {
                       textFormat: Text.PlainText
                       Layout.fillWidth: true
-                      visible: !instRow.isPrimary && String(instRow.state.lastError || "") !== ""
-                      text: String(instRow.state.lastError || "")
+                      visible: !instRow.isPrimary && String(instRow.snap.lastError || "") !== ""
+                      text: String(instRow.snap.lastError || "")
                       color: root.bar.urgent
                       wrapMode: Text.WordWrap
                       maximumLineCount: 2
