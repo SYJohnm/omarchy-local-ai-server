@@ -121,8 +121,11 @@ async function startFake(t, name, slotDir, extraEnv) {
   return { port, stop: () => proc.kill("SIGTERM") }
 }
 
-function slotKv(action, port, dir, prefix) {
-  return execFileSync("python3", [SLOT_KV, action, "--url", "http://127.0.0.1:" + port,
+// `url` overrides the endpoint built from the port, for the cases that are
+// about the URL itself rather than about a server answering on it.
+function slotKv(action, port, dir, prefix, url) {
+  const endpoint = url !== undefined ? url : "http://127.0.0.1:" + port
+  return execFileSync("python3", [SLOT_KV, action, "--url", endpoint,
     "--dir", dir, "--prefix", prefix], { encoding: "utf8" }).trim()
 }
 
@@ -192,6 +195,18 @@ test("a cache the server rejects is reported, not fatal", async (t) => {
   fs.writeFileSync(path.join(dir, "A.gguf.slot0.bin"), JSON.stringify({ model: "B", tokens: 5 }))
   const srv = await startFake(t, "A", dir)
   assert.match(slotKv("restore", srv.port, dir, "A.gguf"), /slot 0 rejected/)
+})
+
+test("a non-http endpoint is refused before anything is opened", () => {
+  // The URL is built by the widget from host:port, so this is defence in
+  // depth: urlopen also speaks file:, and a scheme arriving from a settings
+  // file copied between machines would make the helper read a local file.
+  const dir = tmpDir()
+  assert.match(slotKv("save", null, dir, "A.gguf", "file:///etc/passwd"),
+               /^save failed: endpoint must be http or https/)
+  assert.match(slotKv("restore", null, dir, "A.gguf", "notaurl"),
+               /^restore failed: endpoint must be http or https/)
+  assert.deepStrictEqual(fs.readdirSync(dir), [])
 })
 
 test("nothing saved and nothing reachable both exit cleanly", async (t) => {

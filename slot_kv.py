@@ -57,6 +57,22 @@ def read_body(stream, headers, limit=MAX_RESPONSE_BYTES):
     return data
 
 
+def check_url(url):
+    """Accept only a plain http(s) endpoint.
+
+    The URL is built by the widget from host:port, so this is defence in depth
+    rather than a fix for a known path: urlopen also speaks file:, ftp: and
+    data:, and a scheme that reached here from a settings file copied between
+    machines would make this helper read a local file and POST nothing.
+    """
+    parsed = urllib.parse.urlsplit(str(url))
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("endpoint must be http or https")
+    if not parsed.netloc:
+        raise ValueError("endpoint has no host")
+    return url
+
+
 def with_model(url, model):
     if not model:
         return url
@@ -174,7 +190,12 @@ def main():
     # Literal prompt tokens live in the slot files; never create artifacts
     # readable by another local user.
     os.umask(0o077)
-    base = args.url.rstrip("/")
+    try:
+        base = check_url(args.url.rstrip("/"))
+    except ValueError as e:
+        print("%s failed: %s" % (args.action, e))
+        sys.stdout.flush()
+        return
     try:
         line = (save if args.action == "save" else restore)(base, args.dir, args.prefix, args.model)
     except (OSError, ValueError) as e:

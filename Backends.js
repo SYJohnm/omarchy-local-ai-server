@@ -9,6 +9,25 @@
 // URLs or plain data for the caller to execute, which keeps it unit-testable
 // under Node.
 
+// ---- Untrusted text ----
+//
+// Labels built here are rendered by Omarchy's shared components, which own
+// their Text element and expose no textFormat -- and a Text in AutoText mode
+// interprets markup, so `<img src="http://...">` in a path would make the
+// shell fetch it. See Model.plainText for the reasoning; this is the same rule
+// applied to the strings this module produces. It is duplicated rather than
+// imported because both files are loaded as QML JS libraries, which cannot
+// require() each other.
+function plain(value, limit) {
+  var s = String(value === undefined || value === null ? "" : value)
+  s = s.replace(/<[^>]*>?/g, "").replace(/[<>]/g, "")
+  s = s.replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2028\u2029\u2066-\u2069\ufeff]/g, " ")
+  s = s.replace(/\s+/g, " ").replace(/^ | $/g, "")
+  var max = (typeof limit === "number" && limit > 0) ? Math.floor(limit) : 400
+  if (s.length > max) s = s.slice(0, Math.max(1, max - 1)) + "…"
+  return s
+}
+
 // ---- Path helpers ----
 
 // Candidate absolute paths for a backend binary, in priority order. The
@@ -260,13 +279,17 @@ function envPrefix(env, quote) {
 // process but leaves no way to read its output back.
 function detachedCommand(hasSystemdRun, unitName, script) {
   // Prompt-cache slot files hold the prompt's token ids. Launch under a
-  // private umask so a server started outside systemd cannot write them
-  // group/world-readable; the generated unit sets UMask=0077 as well.
+  // private umask so a server cannot write them group/world-readable. The
+  // shell prefix covers the setsid fallback, which has no unit; the unit
+  // declares UMask too, so the protection does not rest on one prefix that a
+  // later change to the script could drop. The comment here used to claim the
+  // unit set it while the property was missing.
   var guarded = "umask 077; " + String(script || "")
   if (hasSystemdRun) {
     return ["systemd-run", "--user",
             "--unit=" + unitName,
             "--collect",
+            "--property=UMask=0077",
             "--property=KillMode=mixed",
             "--property=Restart=on-failure",
             "--property=RestartSec=3s",
@@ -402,6 +425,15 @@ function slotPrefix(model) {
     ("00000000" + h.toString(16)).slice(-8)
 }
 
+// The pre-hash slot name: caches written before the path hash was added are
+// named after the model file alone. The orphan sweep keeps both spellings, so
+// an older cache belonging to a model that is still there is not swept away.
+function legacySlotPrefix(model) {
+  var base = String(model || "").replace(/^.*\//, "")
+  if (base === "") return ""
+  return base.replace(/[^A-Za-z0-9._-]/g, "_")
+}
+
 // ---- llama.cpp builds ----
 //
 // llama_builds.py lists every llama-server on the machine as
@@ -535,13 +567,17 @@ function buildCacheTypes(builds, chosen) {
 }
 
 // "llama-cpp-turboquant-cuda · 424c336 · 2026-09-02 · CUDA"
+// A build's fields come from llama_builds.py, which reads paths on disk and
+// parses `--help` output, so they are not the plugin's own strings. The label
+// is rendered by shared components whose Text format the plugin cannot set,
+// so markup is neutralised here rather than at each of them.
 function buildLabel(build) {
   if (!build) return ""
   var parts = [build.fork || "llama-server"]
   if (build.commit) parts.push(String(build.commit).slice(0, 7))
   if (build.date) parts.push(build.date)
   if (build.gpu) parts.push(build.gpu)
-  return parts.join(" · ")
+  return plain(parts.join(" · "), 120)
 }
 
 // ---- Installed backends ----
@@ -589,6 +625,7 @@ if (typeof module !== "undefined") {
     procMarker: procMarker,
     journalCommand: journalCommand,
     slotPrefix: slotPrefix,
+    legacySlotPrefix: legacySlotPrefix,
     findBuild: findBuild,
     buildSupports: buildSupports,
     buildAvailable: buildAvailable,
@@ -597,6 +634,7 @@ if (typeof module !== "undefined") {
     resolveBuild: resolveBuild,
     buildCacheTypes: buildCacheTypes,
     buildLabel: buildLabel,
+    plain: plain,
     installedBackends: installedBackends,
     supportsFlag: supportsFlag,
     registerFlagAliases: registerFlagAliases

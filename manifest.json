@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.syjohnm.local-ai-server",
   "name": "Local AI Server",
-  "version": "3.7.0",
+  "version": "3.8.0",
   "author": "SYJohnm",
   "license": "MIT",
-  "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts. One direct llama-server instance, no relay.",
+  "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts. Direct llama-server, or native router mode serving every model from one process.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Local AI Server",
-    "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts. One direct llama-server instance, no relay.",
+    "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts. Direct llama-server, or native router mode serving every model from one process.",
     "category": "Dev",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -99,8 +99,10 @@
         "key": "instanceCount",
         "type": "int",
         "label": "Server instances",
-        "description": "Number of persistent llama-server instances (ports start at port base + 0..n-1).",
-        "defaultValue": 1
+        "description": "How many persistent llama-server instances to manage. Each one gets its own port (host:port and the ports above it), model and build, and can be started or unloaded on its own from the Server page. llama.cpp only, and a single instance in router mode, where one process already serves every model.",
+        "defaultValue": 1,
+        "minimum": 1,
+        "maximum": 8
       }
     ]
   }

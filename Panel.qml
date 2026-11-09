@@ -13,6 +13,7 @@ import "Hardware.js" as Hardware
 import "Params.js" as Params
 import "Profiles.js" as Profiles
 import "ModelsIni.js" as ModelsIni
+import "Instances.js" as Instances
 
 
 // Local AI server manager.
@@ -395,7 +396,14 @@ Panel {
   property string extraEnv: ""
   readonly property var parsedEnv: Model.parseEnvAssignments(root.extraEnv)
   function envScriptPrefix() {
-    return root.parsedEnv.env.map(function(e) { return e.name + "=" + root.shellQuote(e.value) }).join(" ")
+    return root.envScriptPrefixFor(root.extraEnv)
+  }
+
+  // The same rendering for an arbitrary profile's environment, which is what
+  // an extra instance launches with.
+  function envScriptPrefixFor(extraEnv) {
+    var parsed = Model.parseEnvAssignments(extraEnv)
+    return parsed.env.map(function(e) { return e.name + "=" + root.shellQuote(e.value) }).join(" ")
   }
 
 
@@ -935,6 +943,14 @@ Panel {
   // stopped unauthenticated -- taking control means stopping it and starting
   // our own in its place.
   property bool systemUnitActive: false
+  // Set when the last stop was not asked for -- a crash, an OOM kill, or a
+  // server stopped from outside. The Server page says "crashed" rather than
+  // "stopped" for it, and a plain Start clears it.
+  property bool lastExitWasCrash: false
+  // Consecutive failed liveness polls. A single miss is not a dead server:
+  // curl's timeout is one second and a server decoding on a loaded machine can
+  // be slower than that, so it takes a few in a row (Instances.healthVerdict).
+  property int healthFailures: 0
   // Model store the system unit uses, read from its own environment so the
   // path is discovered rather than assumed. A taken-over instance points at
   // it to serve the models already on disk instead of an empty store.
@@ -953,6 +969,225 @@ Panel {
   readonly property string unitName: Backends.unitName(root.moduleName, root.backend)
   readonly property string activeUnitName: root.unitName
   readonly property string procMarker: Backends.procMarker(root.moduleName, root.backend)
+
+  // ---- Instances ----
+  //
+  // `instanceCount` was a manifest setting with nothing behind it: whatever
+  // number it held, one server was launched and the Server page showed one
+  // hardcoded "Instance 0". It is real now -- every index above 0 is its own
+  // persistent llama-server, with its own transient unit, process marker,
+  // port (portBase + n), model, build and prompt cache.
+  //
+  // Index 0 stays the server the rest of this file manages through its own
+  // properties: it owns the restart lifecycle, the log view, the hooks and the
+  // KV-cache bookkeeping, and its unit and marker keep their un-suffixed names
+  // so a server left running by an older version is still adopted. The extra
+  // indices are InstanceRunner objects, each a small copy of the same
+  // launch/adopt/watch cycle over its own endpoint.
+  readonly property int requestedInstanceCount: Instances.clampCount(
+    setting("instanceCount", 1), root.backend, root.routerMode)
+  readonly property var instancePlan: Instances.plan({
+    pluginId: root.moduleName,
+    backendId: root.backend,
+    portBase: root.port,
+    count: root.requestedInstanceCount,
+    routerMode: root.routerMode,
+    unitName: Backends.unitName,
+    procMarker: Backends.procMarker
+  })
+  readonly property int instanceCount: root.instancePlan.length
+
+  // Which model and which build each index above 0 serves, keyed by index as
+  // a string so the map survives JSON. The primary keeps using the Model and
+  // Tuning pages; these are the assignments the Server page makes per row.
+  property var instanceModels: ({})
+  property var instanceBuilds: ({})
+
+  function setInstanceModel(index, path) {
+    var next = {}
+    for (var k in root.instanceModels) next[k] = root.instanceModels[k]
+    if (String(path) === "") delete next[String(index)]
+    else next[String(index)] = String(path)
+    root.instanceModels = next
+    root.scheduleSettingsSave()
+  }
+
+  function setInstanceBuild(index, build) {
+    var next = {}
+    for (var k in root.instanceBuilds) next[k] = root.instanceBuilds[k]
+    if (String(build) === "") delete next[String(index)]
+    else next[String(index)] = String(build)
+    root.instanceBuilds = next
+    root.scheduleSettingsSave()
+  }
+
+  // Models already claimed by another index (or by the primary). Two servers
+  // on one model would write the same prompt-cache files and waste the VRAM
+  // twice over, so a row does not offer what another row already has.
+  // The runner object for an index above 0, or null.
+  function runnerFor(index) {
+    for (var i = 0; i < extraInstances.count; i++) {
+      var runner = extraInstances.objectAt(i)
+      if (runner && runner.idx === Number(index)) return runner
+    }
+    return null
+  }
+
+  // Every extra instance stopped, for a change that invalidates their
+  // endpoints: a backend switch retargets the port map, and nothing else would
+  // ever come back for a server whose index the new backend does not have.
+  function stopAllExtras() {
+    for (var i = 0; i < extraInstances.count; i++) {
+      var runner = extraInstances.objectAt(i)
+      if (runner && (runner.running || runner.starting)) runner.stop()
+    }
+  }
+
+  // Re-probe every extra index for a server that appeared since: one started
+  // by hand, or left by a shell that went away between panel opens.
+  function adoptExtras() {
+    for (var i = 0; i < extraInstances.count; i++) {
+      var runner = extraInstances.objectAt(i)
+      if (runner) runner.adopt()
+    }
+  }
+
+  function toggleInstance(index) {
+    var runner = root.runnerFor(index)
+    if (!runner) return
+    if (runner.running || runner.starting) runner.stop()
+    else runner.start()
+  }
+
+  function restartInstance(index) {
+    var runner = root.runnerFor(index)
+    if (runner) runner.restart()
+  }
+
+  // The models an index may be assigned: everything the scan found, minus what
+  // another instance already has. The current assignment is always kept, or
+  // the row would show an empty picker for the model it is serving.
+  function instanceModelOptions(index) {
+    var current = String(root.instanceModels[String(index)] || "")
+    var out = []
+    for (var i = 0; i < root.activeModelOptions.length; i++) {
+      var option = root.activeModelOptions[i]
+      var value = String(option.value)
+      if (value !== current && root.modelClaimedBy(index, value) !== -1) continue
+      out.push(option)
+    }
+    return out
+  }
+
+  // Build choices for an extra instance, in the same shape and order as the
+  // primary's picker.
+  function instanceBuildOptions() {
+    var out = [{ value: "", label: root.autoBuild
+                   ? "Auto · " + Backends.buildLabel(root.autoBuild) : "Auto" }]
+    for (var i = 0; i < root.llamaBuilds.length; i++)
+      out.push({ value: root.llamaBuilds[i].path, label: Backends.buildLabel(root.llamaBuilds[i]) })
+    return out
+  }
+
+  function modelClaimedBy(index, path) {
+    if (String(path) === "") return -1
+    if (index !== 0 && String(path) === String(root.launchModel)) return 0
+    for (var k in root.instanceModels) {
+      if (Number(k) === Number(index)) continue
+      if (Number(k) >= root.instanceCount) continue
+      if (String(root.instanceModels[k]) === String(path)) return Number(k)
+    }
+    return -1
+  }
+  readonly property bool multiInstance: root.instanceCount > 1
+  readonly property bool canAddInstances:
+    Instances.supportsMultiple(root.backend, root.routerMode)
+
+  // The primary described the way Instances.js describes any instance, so one
+  // set of labels and one aggregation serve the whole list.
+  readonly property var primaryInstance: ({
+    index: 0,
+    port: parseInt(root.port, 10) || 0,
+    unitName: root.unitName,
+    procMarker: root.procMarker,
+    primary: true,
+    running: root.running,
+    starting: root.starting,
+    stopping: root.stopping,
+    switching: root.switching,
+    failed: root.lastExitWasCrash,
+    adopted: root.adopted,
+    ownsUnit: root.ownsUnit,
+    tokensPerSec: root.tokensPerSec,
+    ppActive: root.ppActive,
+    ppPercent: root.ppPercent,
+    ppTokensPerSec: root.ppTokensPerSec,
+    model: root.runningModel !== "" ? root.runningModel : root.launchModel,
+    build: root.backend === "llamacpp" ? Backends.buildLabel(root.resolvedBuild) : "",
+    lastError: root.lastError,
+    canStop: root.canStop,
+    busy: root.stopping || root.takingOver
+  })
+
+  // Each runner publishes its own state here, keyed by index; the page and the
+  // bar read the map. The runners are deliberately not polled through the
+  // Instantiator: lowering the count fires objectRemoved while the object is
+  // being torn down, and reading it there raises "attempted to evaluate a
+  // function in an invalid context" and leaves the list showing instances
+  // that no longer exist. A published snapshot outlives its runner, so
+  // retiring an index is an ordinary removal from a map.
+  property var extraSnapshots: ({})
+
+  function publishInstance(index, data) {
+    var next = {}
+    for (var k in root.extraSnapshots) next[k] = root.extraSnapshots[k]
+    next[String(index)] = data
+    root.extraSnapshots = next
+  }
+
+  function retireInstance(index) {
+    var next = {}
+    for (var k in root.extraSnapshots)
+      if (Number(k) !== Number(index)) next[k] = root.extraSnapshots[k]
+    root.extraSnapshots = next
+  }
+
+  readonly property var instanceStates: {
+    var out = []
+    for (var i = 0; i < root.instanceCount; i++) out.push(root.instanceState(i))
+    return out
+  }
+
+  // The state of one index, by index rather than by position. A runner
+  // publishes a frame or two after its index appears, so until then the row
+  // describes an instance that exists but has not reported yet -- which is
+  // what it is -- instead of shifting every row below it up by one.
+  function instanceState(index) {
+    if (Number(index) === 0) return root.primaryInstance
+    var published = root.extraSnapshots[String(index)]
+    if (published) return published
+    var identity = root.instancePlan[Number(index)] || null
+    return {
+      index: Number(index),
+      port: identity ? identity.port : 0,
+      unitName: identity ? identity.unitName : "",
+      procMarker: identity ? identity.procMarker : "",
+      primary: false,
+      running: false, starting: false, stopping: false, switching: false,
+      failed: false, adopted: false, ownsUnit: false,
+      tokensPerSec: 0, ppActive: false, ppPercent: 0, ppTokensPerSec: 0,
+      model: String(root.instanceModels[String(index)] || ""),
+      build: "", lastError: "", canStop: false, launchable: false, busy: false
+    }
+  }
+
+  // What the bar reports for the widget as a whole. With several servers
+  // decoding at once the sum is what the machine is actually doing; ingestion
+  // is a single-prompt event, so the furthest-along prompt is reported instead.
+  readonly property real aggregateRate: Instances.aggregateRate(root.instanceStates)
+  readonly property var leadingPrompt: Instances.leadingPrompt(root.instanceStates)
+  readonly property int instancesRunning: Instances.runningCount(root.instanceStates)
+  readonly property bool anyInstanceRunning: root.instancesRunning > 0
 
   // Set once the capability probe has reported, so the backend list and the
   // restart comparison never act on binaries that simply are not known yet.
@@ -990,6 +1225,81 @@ Panel {
   // answers /health: re-reading a long prompt is what makes a restart cost
   // minutes, not loading the weights. llama.cpp only.
   property bool kvPersistence: true
+
+  // ---- Start on login ----
+  //
+  // The widget is what knows how to launch: it resolves the build, renders the
+  // router preset from the current profiles and owns the tuned argv. So this is
+  // the widget starting its own server once, as soon as everything it needs has
+  // resolved -- not a separate systemd unit, which would go stale the moment
+  // tuning, the model or the build changed.
+  property bool startOnLogin: false
+  // One shot per shell session. Without it a manual Stop would be undone the
+  // next time any of the readiness inputs changed.
+  property bool autoStartDone: false
+  // The adoption probe has answered, so "nothing is running" is a fact rather
+  // than "not known yet". A launch sweeps the unit before starting, so firing
+  // this before adoption resolves would tear down a server that was already up
+  // -- which is exactly what happens on `omarchy restart shell`.
+  property bool adoptProbed: false
+
+  readonly property bool autoStartReady:
+    root.startOnLogin && !root.autoStartDone && root.adoptProbed &&
+    root.settingsLoaded && root.capabilitiesProbed &&
+    // The build list decides which binary serves the model's cache types.
+    (root.backend !== "llamacpp" || root.buildsProbed) &&
+    root.activeBinary !== "" &&
+    !root.running && !root.starting && !root.stopping &&
+    // Router mode loads per request and ollama needs no model named up front;
+    // everything else has to have one, which arrives with the model scan.
+    (root.routerMode || root.backend === "ollama" || root.launchModel !== "")
+
+  // Every input above is a property, so this fires on its own once the last
+  // one lands -- no polling, and no call to sprinkle through the probes.
+  onAutoStartReadyChanged: if (root.autoStartReady) autoStartTimer.restart()
+
+  Timer {
+    id: autoStartTimer
+    // Settles the readiness inputs (the scan can re-select a model just after
+    // the probes land) and keeps a multi-GB model load out of the first
+    // seconds of the session, when the rest of the desktop is still coming up.
+    interval: 3000
+    repeat: false
+    onTriggered: {
+      // Re-checked rather than trusted: three seconds is long enough for the
+      // user to have pressed Start, or for a server to have been adopted.
+      if (!root.autoStartReady) return
+      // A server still loading its weights does not answer /health yet, so the
+      // adoption probe above reports nothing running. Launching on that would
+      // sweep the unit and restart a model that was already most of the way
+      // loaded -- minutes of work thrown away on every shell restart. The unit
+      // itself gives the decisive answer.
+      autoStartGuard.command = root.hasSystemdRun
+        ? ["systemctl", "--user", "is-active", root.activeUnitName]
+        : ["bash", "-c", "pgrep -f -- \"^$1 \" >/dev/null && echo active || echo inactive",
+           "_", root.procMarker]
+      autoStartGuard.running = false
+      autoStartGuard.running = true
+    }
+  }
+
+  Process {
+    id: autoStartGuard
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (!root.autoStartReady) return
+        root.autoStartDone = true
+        if (String(text).trim() === "active") {
+          // Already up, just not answering yet: adopt it instead of replacing it.
+          root.adoptRunningServer()
+          return
+        }
+        root.startServer()
+      }
+    }
+  }
+
   // The server outlives the shell on purpose: it is started detached, and the
   // next panel re-adopts it through /proc. Not a setting any more -- a shell
   // restart that took the model down with it was never what anyone wanted.
@@ -1012,6 +1322,14 @@ Panel {
   property int restartIdleTicks: 0
   // Set by a restart so the stop it goes through starts the server again.
   property bool restartAfterStop: false
+  // Backend switch requested while a server was running: the current server is
+  // stopped first (so its unit, not the target's, is torn down and its prompt
+  // cache saved), then the backend is switched once the stop has fully
+  // completed. See requestBackend / applyPendingBackendSwitch.
+  property string pendingBackendSwitch: ""
+  // After an auto-switch, the backend to start once its own model resolves
+  // (model scan is async). Empty disarms it; a manual Stop/Start clears it.
+  property string pendingBackendStart: ""
   // Stop was pressed while the debounced autosave was writing the cache.
   property bool stopAfterAutosave: false
   property bool slotsBusy: false
@@ -1074,6 +1392,13 @@ Panel {
   property real tokensPerSec: 0
   property real ppPercent: 0
   property real ppTokensPerSec: 0
+  // When a rate was last measured. tokensPerSec used to be cleared only by a
+  // stop or a restart, so one generation pinned that number to the bar and to
+  // the Server page for the life of the process -- the widget reported a
+  // request that had finished an hour earlier, and "idle" was a state it could
+  // never show while a server was up. The rate is held briefly after the last
+  // token (the final reading is the interesting one) and then released.
+  property real lastRateAtMs: 0
   // Set once a logged ingestion progress line arrives for the current prompt,
   // cleared when that prompt finishes. While set, the /slots poll leaves pp
   // numbers alone: the log's are measured, the poll's are derived from a
@@ -1324,6 +1649,7 @@ Panel {
   // instead of boxed buttons: the panel is a list of values, and a link reads
   // as an action without adding another rectangle.
   component TextAction: Text {
+    textFormat: Text.PlainText
     id: action
 
     property bool active: false
@@ -1366,6 +1692,7 @@ Panel {
       spacing: Style.space(4)
 
       Text {
+        textFormat: Text.PlainText
         text: "Build"
         color: root.bar.foreground
         font.family: root.bar.fontFamily
@@ -1374,6 +1701,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         Layout.fillWidth: true
         text: "...................................................................................................."
         color: root.bar.foreground
@@ -1384,6 +1712,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         Layout.fillWidth: true
         text: {
           if (root.llamaBuild !== "") {
@@ -1400,6 +1729,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         text: "v"
         color: root.bar.foreground
         opacity: 0.5
@@ -1469,6 +1799,7 @@ Panel {
               spacing: Style.space(4)
 
               Text {
+                textFormat: Text.PlainText
                 text: "•"
                 color: Commons.Color.accent
                 visible: parent.parent.chosen
@@ -1476,6 +1807,7 @@ Panel {
                 font.pixelSize: root.fontSize
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: modelData.label
                 color: parent.parent.chosen ? Commons.Color.accent : root.bar.foreground
@@ -1666,6 +1998,107 @@ Panel {
 
   readonly property string slotSaveDir: settingsDir + "slots/"
 
+  // ---- Prompt-cache housekeeping ----
+  //
+  // A slot file is the size of a context, and the cache of a model that was
+  // deleted or moved is never reclaimed by anything else, so a library churned
+  // over a few months quietly leaves gigabytes in the state folder. Measured
+  // when Settings opens and swept only on request: a model scan that has not
+  // run (or ran for the other backend) must never be read as "those models are
+  // gone".
+  property var slotCacheFiles: []
+  property var slotKeepPrefixes: []
+  property bool slotCacheProbed: false
+  property bool slotCacheBusy: false
+  // False when the model sweep found nothing at all: with no catalogue to
+  // compare against, every cache would look orphaned, so the offer is withheld.
+  property bool slotKeepProbed: false
+  readonly property real slotCacheBytes: Model.totalSlotBytes(root.slotCacheFiles)
+  readonly property var slotCacheOrphans:
+    Model.slotOrphans(root.slotCacheFiles, root.slotKeepPrefixes)
+
+  // Every directory that can hold a model whose cache would land in the slot
+  // folder. Both llama.cpp and System One save slots, and System One can have
+  // a directory of its own, so the keep set is built from the union -- never
+  // from the catalogue of whichever backend happens to be selected.
+  readonly property var slotScanDirs: {
+    var dirs = root.searchDirs.slice()
+    if (root.configuredSystemoneModelsDir !== "") {
+      var so = expandPath(root.configuredSystemoneModelsDir)
+      if (so !== "" && dirs.indexOf(so) === -1) dirs.push(so)
+    }
+    return dirs
+  }
+
+  // One pass: the slot files with their sizes, then every model on disk. The
+  // keep set comes from the filesystem rather than from the UI's current
+  // catalogue, so a backend that has not been scanned this session cannot have
+  // its caches mistaken for orphans.
+  function refreshSlotCacheStats() {
+    if (root.slotCacheBusy) return
+    if (root.slotScanDirs.length === 0) return
+    root.slotCacheBusy = true
+    var dirs = root.slotScanDirs.map(root.shellQuote).join(" ")
+    slotStatsProc.command = ["bash", "-lc",
+      "find " + root.shellQuote(expandPath(root.slotSaveDir)) +
+      " -maxdepth 1 -type f -name '*.slot*.bin' -printf 'S\\t%s\\t%f\\n' 2>/dev/null; " +
+      "find -L " + dirs + " -maxdepth " + root.modelScanDepth +
+      " -type f -iname '*.gguf' -printf 'M\\t%p\\n' 2>/dev/null; true"]
+    slotStatsProc.running = false
+    slotStatsProc.running = true
+  }
+
+  Process {
+    id: slotStatsProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var slotLines = []
+        var keep = []
+        var lines = String(text).split("\n")
+        for (var i = 0; i < lines.length; i++) {
+          var line = lines[i]
+          if (line.indexOf("S\t") === 0) {
+            slotLines.push(line.slice(2))
+          } else if (line.indexOf("M\t") === 0) {
+            var p = line.slice(2)
+            if (p === "") continue
+            // Both spellings: a cache written before the path hash existed is
+            // named after the model file alone.
+            var hashed = Backends.slotPrefix(p)
+            var legacy = Backends.legacySlotPrefix(p)
+            if (hashed !== "" && keep.indexOf(hashed) === -1) keep.push(hashed)
+            if (legacy !== "" && keep.indexOf(legacy) === -1) keep.push(legacy)
+          }
+        }
+        root.slotCacheFiles = Model.parseSlotListing(slotLines.join("\n"))
+        root.slotKeepPrefixes = keep
+        root.slotKeepProbed = keep.length > 0
+        root.slotCacheProbed = true
+        root.slotCacheBusy = false
+      }
+    }
+  }
+
+  // Removes exactly the files the sweep named -- never a pattern, so nothing
+  // else in the cache folder (the .staging tree, a lock) can be caught by it.
+  function removeSlotOrphans() {
+    var orphans = root.slotCacheOrphans
+    if (orphans.length === 0) return
+    var dir = expandPath(root.slotSaveDir)
+    // "--" so a file name starting with a dash is still read as a path.
+    var args = ["rm", "-f", "--"]
+    for (var i = 0; i < orphans.length; i++) args.push(dir + orphans[i].name)
+    Quickshell.execDetached(args)
+    slotRefreshTimer.restart()
+  }
+
+  Timer {
+    id: slotRefreshTimer
+    interval: 400
+    onTriggered: root.refreshSlotCacheStats()
+  }
+
   // The model the running server actually loaded, captured at launch.
   //
   // Kept separate from selectedModel so the picker stays usable while a server
@@ -1674,6 +2107,9 @@ Panel {
   // mid-run would autosave the live cache under the newly picked model's name,
   // which the next launch would then restore into a mismatched model.
   property string runningModel: ""
+  // Last model a router poll saw as loaded, so the UI follows load events but
+  // does not fight a selection the user just made by hand.
+  property string routerLoadedSeen: ""
 
   function loadSettings(raw) {
     if (root.settingsLoaded) return
@@ -1696,6 +2132,16 @@ Panel {
         var seeded = {}
         seeded[root.backend] = parsed.port
         root.backendPorts = seeded
+      }
+      if (parsed.instanceModels && typeof parsed.instanceModels === "object") {
+        var im = {}
+        for (var mk in parsed.instanceModels) im[String(mk)] = String(parsed.instanceModels[mk])
+        root.instanceModels = im
+      }
+      if (parsed.instanceBuilds && typeof parsed.instanceBuilds === "object") {
+        var ib = {}
+        for (var bkk in parsed.instanceBuilds) ib[String(bkk)] = String(parsed.instanceBuilds[bkk])
+        root.instanceBuilds = ib
       }
       if (typeof parsed.gpuLayers === "string") root.gpuLayers = parsed.gpuLayers
       if (typeof parsed.contextSize === "string") root.contextSize = parsed.contextSize
@@ -1731,6 +2177,7 @@ Panel {
       if (typeof parsed.llamaBuild === "string") root.llamaBuild = parsed.llamaBuild
       if (typeof parsed.keepAlive === "string") root.keepAlive = parsed.keepAlive
       if (typeof parsed.kvPersistence === "boolean") root.kvPersistence = parsed.kvPersistence
+      if (typeof parsed.startOnLogin === "boolean") root.startOnLogin = parsed.startOnLogin
       if (typeof parsed.systemoneCtx === "string") root.systemoneCtx = parsed.systemoneCtx
 
       // ids this build knows: a row renamed or dropped between versions would
@@ -1865,6 +2312,7 @@ Panel {
       setupDone: root.setupDone,
       backend: root.backend,
       host: root.host, backendPorts: root.backendPorts,
+      instanceModels: root.instanceModels, instanceBuilds: root.instanceBuilds,
       gpuLayers: root.gpuLayers, threads: root.threads,
       contextSize: root.contextSize, batchSize: root.batchSize, ubatchSize: root.ubatchSize,
       cacheTypeK: root.cacheTypeK, cacheTypeV: root.cacheTypeV,
@@ -1885,6 +2333,7 @@ Panel {
       extraBuildPaths: root.extraBuildPaths,
       llamaBuilds: root.llamaBuilds,
       kvPersistence: root.kvPersistence,
+      startOnLogin: root.startOnLogin,
       systemoneCtx: root.systemoneCtx,
       hiddenBuiltins: root.hiddenBuiltins, shownOptionals: root.shownOptionals,
       customParams: root.customParams,
@@ -1970,6 +2419,9 @@ Panel {
     // the selection is empty here, so this is still the neutral default.
     root.applyTuningForSelection()
     root.adoptRunningServer()
+    // ollama needs no model, so an auto-switch to it can start right away;
+    // llama.cpp/System One wait for the async scan via onLaunchModelChanged.
+    root.maybeAutoStartSwitched()
   }
 
   // The catalogue describes one specific binary, so it is rebuilt whenever the
@@ -2052,6 +2504,7 @@ Panel {
   onExtraEnvChanged: root.touchTuning()
   onModelAliasChanged: root.touchTuning()
   onKvPersistenceChanged: root.scheduleSettingsSave()
+  onStartOnLoginChanged: root.scheduleSettingsSave()
   onExtraModelDirsChanged: root.scheduleSettingsSave()
   onExtraBuildPathsChanged: root.scheduleSettingsSave()
   onDetectedModelDirsChanged: root.scheduleSettingsSave()
@@ -2135,6 +2588,9 @@ Panel {
     root.showingSettings = true
     root.settingsSection = "backend"
     root.showingLogs = false
+    // On demand only: the find walks the cache folder, and nothing outside
+    // Settings shows the number.
+    root.refreshSlotCacheStats()
   }
 
   function closeSettings() {
@@ -2288,7 +2744,12 @@ Panel {
         backend: root.backend, model: root.runningModel, selected: root.launchModel,
         build: root.backend === "llamacpp" ? Backends.buildLabel(root.resolvedBuild) : "",
         endpoint: root.host + ":" + root.port,
-        pp: root.ppTokensPerSec, tg: root.tokensPerSec
+        pp: root.ppTokensPerSec, tg: root.tokensPerSec,
+        instances: root.instanceStates.map(function(i) {
+          return { index: i.index, port: i.port, state: Instances.stateLabel(i),
+                   model: i.model, build: i.build, running: !!i.running }
+        }),
+        totalTg: root.aggregateRate
       })
     }
   }
@@ -2667,7 +3128,9 @@ Panel {
         var opts = []
         for (var i = 0; i < split.models.length; i++) {
           var p = split.models[i]
-          opts.push({ value: p, label: Model.baseName(p).replace(/\.gguf$/i, ""), description: Model.dirName(p) })
+          opts.push({ value: p,
+                      label: Model.plainText(Model.baseName(p).replace(/\.gguf$/i, ""), 160),
+                      description: Model.plainText(Model.dirName(p), 200) })
         }
         root.systemoneScannedOptions = opts
         root.systemoneScanning = false
@@ -2785,8 +3248,12 @@ Panel {
 
       out.push({
         value: path,
-        label: sharedName ? sharedName : name.replace(/\.gguf$/i, ""),
-        description: badges.join(" · ") || Model.dirName(path),
+        // The label and description are a file name and a directory, and the
+        // picker renders them through a shared component whose Text format
+        // the plugin cannot set -- so markup is neutralised here. The value
+        // stays the real path: it is a launch argument, not display text.
+        label: Model.plainText(sharedName ? sharedName : name.replace(/\.gguf$/i, ""), 160),
+        description: Model.plainText(badges.join(" · ") || Model.dirName(path), 200),
         mtp: hasMtp
       })
     }
@@ -2811,7 +3278,7 @@ Panel {
           var size = Number(info.size) || 0
           out.push({
             value: names[i],
-            label: names[i],
+            label: Model.plainText(names[i], 160),
             description: size > 0 ? (size / 1073741824).toFixed(1) + "GB" : "",
             mtp: false
           })
@@ -2873,7 +3340,8 @@ Panel {
         // (a differently-located store) is still worth offering.
         for (var name in detailFor) {
           if (known[name]) continue
-          merged.push({ value: name, label: name, description: detailFor[name], mtp: false })
+          merged.push({ value: name, label: Model.plainText(name, 160),
+                        description: Model.plainText(detailFor[name], 200), mtp: false })
         }
         root.modelOptions = merged
         root.validateSelection()
@@ -2907,9 +3375,56 @@ Panel {
 
   function toggleServer() {
     if (root.stopping) return
+    // A manual action overrides any armed auto-switch/start.
+    root.pendingBackendStart = ""
     if (root.running || root.starting) stopServer()
     else startServer()
   }
+
+  // Backend picker: switching while a server runs no longer needs a manual
+  // Stop first. The running server is stopped (saving its prompt cache), the
+  // backend is switched once that completes, and the new backend starts on its
+  // own once its model has resolved.
+  function requestBackend(v) {
+    if (v === root.backend) return
+    // Instance ports are allocated from the active backend's port base, so a
+    // switch leaves every extra server listening where nothing will look for
+    // it again. They go down with the primary.
+    root.stopAllExtras()
+    if (root.running || root.starting || root.stopping) {
+      root.pendingBackendSwitch = v
+      root.stopServer()
+    } else {
+      root.pendingBackendStart = ""
+      root.backend = v
+    }
+  }
+
+  // Runs from the single point where a stop has fully completed. Switches the
+  // backend and arms the auto-start. Returns true when it consumed a pending
+  // switch, so finishStop skips the ordinary restart path.
+  function applyPendingBackendSwitch() {
+    if (root.pendingBackendSwitch === "") return false
+    var nb = root.pendingBackendSwitch
+    root.pendingBackendSwitch = ""
+    root.pendingBackendStart = nb
+    // Triggers onBackendChanged: resets tuning and kicks off the async model
+    // scan for the new backend. maybeAutoStartSwitched starts once it lands.
+    root.backend = nb
+    return true
+  }
+
+  // Arms once per switch: starts the freshly switched backend as soon as it has
+  // a model to launch (ollama needs none). A no-op until then, and disarmed by
+  // any manual Start/Stop, so it never fights a hand-made choice.
+  function maybeAutoStartSwitched() {
+    if (root.pendingBackendStart === "" || root.pendingBackendStart !== root.backend) return
+    if (root.running || root.starting || root.stopping) return
+    if (root.backend !== "ollama" && root.launchModel === "") return
+    root.pendingBackendStart = ""
+    root.startServer()
+  }
+  onLaunchModelChanged: root.maybeAutoStartSwitched()
 
   // Best-effort cleanup of a server this widget started but lost track of.
   // Matched on the per-instance marker, so it never touches an unrelated
@@ -2943,6 +3458,10 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        // Set before any early return: what start-on-login needs to know is
+        // that the question "is one already running?" has been answered, not
+        // what the answer was.
+        root.adoptProbed = true
         if (root.running || root.starting) return
         if (text.trim() !== "200") return
         root.running = true
@@ -3075,6 +3594,8 @@ Panel {
     }
     if (serverProc.running || root.stopping || startSweepProc.running) return
     root.lastError = ""
+    root.lastExitWasCrash = false
+    root.healthFailures = 0
     // Count the pre-launch sweep as starting too: Stop pressed in this window
     // must not be ignored while the sweep is still running.
     root.starting = true
@@ -3124,13 +3645,59 @@ Panel {
     return false
   }
 
-  // Builds the llama-server argv. Kept as a function returning the array so
-  // the composition is testable by eye and the launch path stays one line.
-  function buildLlamaArgs() {
-    var ngl = parseInt(root.gpuLayers, 10)
+  // Builds the llama-server argv.
+  //
+  // Called with no argument it describes the primary: every accessor below
+  // then reads the live property it used to read directly, so the launch line
+  // the page has always produced is unchanged by construction.
+  //
+  // `spec` points it at another instance instead -- {model, build, binary,
+  // port, tuning} -- where `tuning` is that model's resolved profile
+  // (Profiles.resolveFor). One builder serves every instance, so an extra
+  // server cannot drift from the primary's flags for the same model.
+  function buildLlamaArgs(spec) {
+    spec = spec || {}
+    var forPrimary = spec.tuning === undefined || spec.tuning === null
+
+    // Tuning accessor. For the primary it is the identity on root.
+    var tuning = forPrimary ? null : spec.tuning
+    var T = function(field) { return tuning === null ? root[field] : tuning[field] }
+
+    var model = spec.model !== undefined ? spec.model : root.selectedModel
+    var build = spec.build !== undefined ? spec.build : root.resolvedBuild
+    var binary = spec.binary !== undefined ? spec.binary : root.launchLlamaBinary
+    var port = String(spec.port !== undefined ? spec.port : root.port)
+
+    var params = T("customParams") || []
+    var overridden = function(prop) {
+      for (var oi = 0; oi < params.length; oi++)
+        if (root.ownedFlags[params[oi].key] === prop) return true
+      return false
+    }
+
+    // The projector and the MTP draft belong to the model being launched, not
+    // to whatever the picker is showing, so they are resolved from `model`.
+    var mmprojMode = T("mmprojMode")
+    var mmprojOffload = T("mmprojOffload")
+    var resolvedMmproj =
+      mmprojMode === "off" ? ""
+      : mmprojMode === "custom" ? String(T("mmprojPath")).trim()
+      : root.mmprojFor(model)
+    var mmprojActive = resolvedMmproj !== ""
+    var mtp = root.mtpDraftFor(model)
+    var mtpActive = mtp !== "" && T("specType") === "draft-mtp"
+
+    // Which flags were dropped and which were emitted is page state: it tells
+    // the Tuning rows that this build ignores a flag. Only the primary's
+    // launch describes the page, so an extra instance's bookkeeping is rolled
+    // back rather than overwriting it.
+    var savedIgnored = root.ignoredFlags
+    var savedEmitted = root.emittedFlags
+
+    var ngl = parseInt(T("gpuLayers"), 10)
     ignoredFlags = []
     root.emittedFlags = {}
-    var currentBuild = root.resolvedBuild
+    var currentBuild = build
 
     if (!isFinite(ngl)) ngl = 0
     // -1 is llama.cpp's "fit as many layers as VRAM allows" sentinel, not a
@@ -3138,10 +3705,10 @@ Panel {
     if (ngl !== -1) ngl = Math.max(0, Math.min(999, ngl))
 
     var args = [
-      root.launchLlamaBinary,
-      "--model", root.selectedModel,
+      binary,
+      "--model", model,
       "--host", root.host,
-      "--port", String(root.port),
+      "--port", port,
       "--slot-save-path", expandPath(root.slotSaveDir),
       // Prometheus endpoint, so Stats can read totals the /slots view does
       // not carry.
@@ -3153,12 +3720,12 @@ Panel {
     // carrying two "--load-mode mmap": llama.cpp keeps the last occurrence, so
     // the duplicate is silent -- the control still shows its own value while
     // the server runs on the other one.
-    if (root.resolvedBuild && root.backend === "llamacpp") {
-      if (!root.propOverridden("gpuLayers")) emitFlag(root.resolvedBuild, "--gpu-layers", ngl, args)
-      if (!root.propOverridden("cacheTypeK")) emitFlag(root.resolvedBuild, "--cache-type-k", root.cacheTypeK, args)
-      if (!root.propOverridden("cacheTypeV")) emitFlag(root.resolvedBuild, "--cache-type-v", root.cacheTypeV, args)
-      if (!root.propOverridden("flashAttn")) emitFlag(root.resolvedBuild, "--flash-attn", root.flashAttn, args)
-      if (!root.propOverridden("loadMode")) emitFlag(root.resolvedBuild, "--load-mode", root.loadMode, args)
+    if (build && root.backend === "llamacpp") {
+      if (!overridden("gpuLayers")) emitFlag(build, "--gpu-layers", ngl, args)
+      if (!overridden("cacheTypeK")) emitFlag(build, "--cache-type-k", T("cacheTypeK"), args)
+      if (!overridden("cacheTypeV")) emitFlag(build, "--cache-type-v", T("cacheTypeV"), args)
+      if (!overridden("flashAttn")) emitFlag(build, "--flash-attn", T("flashAttn"), args)
+      if (!overridden("loadMode")) emitFlag(build, "--load-mode", T("loadMode"), args)
     }
 
     // Vision projector. "auto" reproduces what the plugin always did -- use
@@ -3171,23 +3738,23 @@ Panel {
     // offload it are one decision, and leaving half of it to a control the
     // page no longer shows is exactly the invisible state the row exists to
     // prevent.
-    var visionOwned = root.propOverridden("mmprojMode") ||
-                      root.propOverridden("mmprojPath") ||
-                      root.propOverridden("mmprojOffload")
+    var visionOwned = overridden("mmprojMode") ||
+                      overridden("mmprojPath") ||
+                      overridden("mmprojOffload")
     if (!visionOwned) {
-      if (root.mmprojMode === "off") {
+      if (mmprojMode === "off") {
         args.push("--no-mmproj")
-      } else if (root.mmprojActive) {
-        args.push("--mmproj", expandPath(root.resolvedMmproj))
+      } else if (mmprojActive) {
+        args.push("--mmproj", expandPath(resolvedMmproj))
         // GPU offload is llama.cpp's default but rarely fits alongside the
         // main model's layers, and the failure mode is an allocation abort
         // rather than a clean error -- so the plugin default stays "off".
-        if (root.mmprojOffload === "on") {
-          if (!root.resolvedBuild || root.backend !== "llamacpp" ||
-            Backends.supportsFlag(root.resolvedBuild, "--mmproj-offload"))
+        if (mmprojOffload === "on") {
+          if (!build || root.backend !== "llamacpp" ||
+            Backends.supportsFlag(build, "--mmproj-offload"))
             args.push("--mmproj-offload")
-        } else if (!root.resolvedBuild || root.backend !== "llamacpp" ||
-                   Backends.supportsFlag(root.resolvedBuild, "--no-mmproj-offload")) {
+        } else if (!build || root.backend !== "llamacpp" ||
+                   Backends.supportsFlag(build, "--no-mmproj-offload")) {
           args.push("--no-mmproj-offload")
         }
       }
@@ -3199,60 +3766,68 @@ Panel {
     // decodes nothing with them. A hand-added --model-draft keeps the last
     // word on which file is loaded.
     var mtpOwned = false
-    for (var d = 0; d < root.customParams.length; d++)
-      if (root.customParams[d].key === "--model-draft") mtpOwned = true
-    if (!mtpOwned && root.mtpDraftActive) {
-      if (!root.resolvedBuild || root.backend !== "llamacpp" ||
-          Backends.supportsFlag(root.resolvedBuild, "--model-draft")) {
-        args.push("--model-draft", expandPath(root.detectedMtp))
+    for (var d = 0; d < params.length; d++)
+      if (params[d].key === "--model-draft") mtpOwned = true
+    if (!mtpOwned && mtpActive) {
+      if (!build || root.backend !== "llamacpp" ||
+          Backends.supportsFlag(build, "--model-draft")) {
+        args.push("--model-draft", expandPath(mtp))
         root.emittedFlags["--model-draft"] = true
       } else if (ignoredFlags.indexOf("--model-draft") === -1) {
         ignoredFlags.push("--model-draft")
       }
     }
 
-    if (root.resolvedBuild && root.backend === "llamacpp") {
+    if (build && root.backend === "llamacpp") {
       // Parallel, reasoning, threads, MoE, context, batch, cache, temp
-      if (!root.propOverridden("parallel") && String(root.parallel).trim() !== "")
-        emitFlag(root.resolvedBuild, "--parallel", String(root.parallel).trim(), args)
+      if (!overridden("parallel") && String(T("parallel")).trim() !== "")
+        emitFlag(build, "--parallel", String(T("parallel")).trim(), args)
 
-      if (!root.propOverridden("reasoningPreserve")) {
-        if (root.reasoningPreserve === "on") emitFlag(root.resolvedBuild, "--reasoning-preserve", "", args)
-        else if (root.reasoningPreserve === "off") emitFlag(root.resolvedBuild, "--no-reasoning-preserve", "", args)
+      if (!overridden("reasoningPreserve")) {
+        if (T("reasoningPreserve") === "on") emitFlag(build, "--reasoning-preserve", "", args)
+        else if (T("reasoningPreserve") === "off") emitFlag(build, "--no-reasoning-preserve", "", args)
       }
 
-      var threadCount = parseInt(root.threads, 10)
-      if (!root.propOverridden("threads") && isFinite(threadCount) && threadCount > 0)
-        emitFlag(root.resolvedBuild, "--threads", String(threadCount), args)
+      var threadCount = parseInt(T("threads"), 10)
+      if (!overridden("threads") && isFinite(threadCount) && threadCount > 0)
+        emitFlag(build, "--threads", String(threadCount), args)
 
       // MoE flags are mutually exclusive in llama.cpp
-      if (!root.propOverridden("nCpuMoe") && !root.propOverridden("cpuMoe")) {
-        var nCpuMoeTrimmed = String(root.nCpuMoe).trim()
-        if (nCpuMoeTrimmed !== "") emitFlag(root.resolvedBuild, "--n-cpu-moe", nCpuMoeTrimmed, args)
-        else if (root.cpuMoe) emitFlag(root.resolvedBuild, "--cpu-moe", "", args)
+      if (!overridden("nCpuMoe") && !overridden("cpuMoe")) {
+        var nCpuMoeTrimmed = String(T("nCpuMoe")).trim()
+        if (nCpuMoeTrimmed !== "") emitFlag(build, "--n-cpu-moe", nCpuMoeTrimmed, args)
+        else if (T("cpuMoe")) emitFlag(build, "--cpu-moe", "", args)
       }
 
-      if (!root.propOverridden("noRepack") && root.noRepack)
-        emitFlag(root.resolvedBuild, "--no-repack", "", args)
-      if (!root.propOverridden("specType") && root.specType !== "none")
-        emitFlag(root.resolvedBuild, "--spec-type", root.specType, args)
+      if (!overridden("noRepack") && T("noRepack"))
+        emitFlag(build, "--no-repack", "", args)
+      if (!overridden("specType") && T("specType") !== "none")
+        emitFlag(build, "--spec-type", T("specType"), args)
 
-      var ctxSize = parseInt(root.contextSize, 10)
-      if (!root.propOverridden("contextSize") && isFinite(ctxSize) && ctxSize > 0)
-        emitFlag(root.resolvedBuild, "--ctx-size", String(ctxSize), args)
-      var batch = parseInt(root.batchSize, 10)
-      if (!root.propOverridden("batchSize") && isFinite(batch) && batch > 0)
-        emitFlag(root.resolvedBuild, "--batch-size", String(batch), args)
-      var ubatch = parseInt(root.ubatchSize, 10)
-      if (!root.propOverridden("ubatchSize") && isFinite(ubatch) && ubatch > 0)
-        emitFlag(root.resolvedBuild, "--ubatch-size", String(ubatch), args)
-      if (!root.propOverridden("cacheRam") && String(root.cacheRam).trim() !== "")
-        emitFlag(root.resolvedBuild, "--cache-ram", String(root.cacheRam).trim(), args)
-      if (!root.propOverridden("temperature") && String(root.temperature).trim() !== "")
-        emitFlag(root.resolvedBuild, "--temp", String(root.temperature).trim(), args)
-      var activeAlias = String(root.modelAlias).trim() || ModelsIni.deriveDefaultAlias(model)
-      if (!root.propOverridden("alias") && activeAlias !== "")
-        emitFlag(root.resolvedBuild, "--alias", activeAlias, args)
+      var ctxSize = parseInt(T("contextSize"), 10)
+      if (!overridden("contextSize") && isFinite(ctxSize) && ctxSize > 0)
+        emitFlag(build, "--ctx-size", String(ctxSize), args)
+      var batch = parseInt(T("batchSize"), 10)
+      if (!overridden("batchSize") && isFinite(batch) && batch > 0)
+        emitFlag(build, "--batch-size", String(batch), args)
+      var ubatch = parseInt(T("ubatchSize"), 10)
+      if (!overridden("ubatchSize") && isFinite(ubatch) && ubatch > 0)
+        emitFlag(build, "--ubatch-size", String(ubatch), args)
+      if (!overridden("cacheRam") && String(T("cacheRam")).trim() !== "")
+        emitFlag(build, "--cache-ram", String(T("cacheRam")).trim(), args)
+      if (!overridden("temperature") && String(T("temperature")).trim() !== "")
+        emitFlag(build, "--temp", String(T("temperature")).trim(), args)
+      // The model being launched, which is the one named by --model above.
+      // This read used to be a bare `model` -- an identifier nothing in scope
+      // defines, so it raised a ReferenceError out of buildLlamaArgs the
+      // moment the alias row was left on "auto", which is its default. That
+      // took the whole direct launch with it: no argv was ever built and
+      // Start did nothing at all. Router mode assembles its argv elsewhere,
+      // which is the only reason this was survivable.
+      var activeAlias = String(T("modelAlias")).trim() ||
+                        ModelsIni.deriveDefaultAlias(model)
+      if (!overridden("alias") && activeAlias !== "")
+        emitFlag(build, "--alias", activeAlias, args)
     }
     // User-added parameters. Appended before the free-form extra args so a
     // hand-written flag still gets the last word on any duplicate.
@@ -3262,8 +3837,8 @@ Panel {
     // the backstop for a flag no ownership entry covers -- an alias a future
     // llama.cpp build adds, or a settings file from a version that reserved
     // the flag instead of yielding it.
-    for (var c = 0; c < root.customParams.length; c++) {
-      var entry = root.customParams[c]
+    for (var c = 0; c < params.length; c++) {
+      var entry = params[c]
       if (root.emittedFlags[entry.key]) {
         console.warn("local-ai-server: skipping", entry.key,
                      "-- already set by a built-in control")
@@ -3278,9 +3853,22 @@ Panel {
       args = args.concat(Params.toArgv(spec, entry.value))
     }
 
-    var extraPieces = Model.splitExtraArgs(root.extraArgs)
+    var extraPieces = Model.splitExtraArgs(T("extraArgs"))
     for (var p = 0; p < extraPieces.length; p++) args = args.concat(Model.parseArgs(extraPieces[p]))
+
+    if (!forPrimary) {
+      root.ignoredFlags = savedIgnored
+      root.emittedFlags = savedEmitted
+    }
     return args
+  }
+
+  // The projector found beside a given model, if any. detectedMmproj is this
+  // for the selected model; buildLlamaArgs needs it for an arbitrary one.
+  function mmprojFor(model) {
+    if (model === "") return ""
+    var found = root.visionDirs[Model.dirName(model)]
+    return found ? String(found) : ""
   }
 
   // The shell script that starts the backend, listening on the public
@@ -3359,7 +3947,12 @@ Panel {
         ? "GGML_CUDA_REGISTER_HOST=1 GGML_CUDA_DISABLE_GRAPHS=1 " : ""
       var userEnv = root.envScriptPrefix()
       script = "mkdir -p -m 700 " + root.shellQuote(root.routerPresetPath.replace(/\/[^/]*$/, "")) + "; " +
-        "printf '" + iniText.replace(/'/g, "'\\''") + "' > " + root.shellQuote(root.routerPresetPath) + "; " +
+        // printf '%s' rather than printf '<text>': the preset is data, and as
+        // a format string its own content is interpreted -- a model path with
+        // a % in it (URL-encoded names are common) loses characters to a
+        // conversion specifier, and a backslash becomes an escape. The
+        // quoting was already correct; the format was not.
+        "printf '%s' " + root.shellQuote(iniText) + " > " + root.shellQuote(root.routerPresetPath) + "; " +
         cudaEnv + (userEnv !== "" ? userEnv + " " : "") +
         "exec -a " + root.procMarker + " " + rArgs.map(root.shellQuote).join(" ")
     } else if (root.backend === "systemone") {
@@ -3418,6 +4011,7 @@ Panel {
     root.ownsUnit = root.hasSystemdRun
     // The router loads whatever a request asks for, so nothing is loaded yet.
     root.runningModel = root.routerMode ? "" : root.launchModel
+    root.routerLoadedSeen = ""
     root.runningConfigHash = root.backend === "ollama" ? root.ollamaConfigHash() : ""
     root.adopted = false
     root.starting = true
@@ -3499,6 +4093,8 @@ Panel {
     var detail = root.lastErrorLine()
     root.lastError = (root.starting ? "Server failed to start" : "Server stopped") +
       (state === "failed" ? " (crashed)" : "") + (detail ? ": " + detail : "")
+    root.lastExitWasCrash = true
+    root.healthFailures = 0
     root.runHook("stopped")
     root.starting = false
     root.running = false
@@ -3632,6 +4228,9 @@ Panel {
       // An adopted root-owned service or a hand-started server: nothing here
       // can stop it, so do not hide it and do not fire the stopped hook.
       root.restartAfterStop = false
+      // An external server cannot be switched from here either.
+      root.pendingBackendSwitch = ""
+      root.pendingBackendStart = ""
       root.lastError = "This server was not started by this widget, so it cannot be stopped from here."
       return
     }
@@ -3650,6 +4249,9 @@ Panel {
       root.expectedStop = true
       root.restartAfterStop = false
       root.stopping = false
+      // The sweep is tearing the just-launched unit down; honour a queued
+      // backend switch here since finishStop will not run for this path.
+      root.applyPendingBackendSwitch()
       return
     }
 
@@ -3694,8 +4296,13 @@ Panel {
     root.runHook("stopped")
     root.running = false
     root.stopping = false
+    root.lastExitWasCrash = false
+    root.healthFailures = 0
     root.adopted = false
     root.resetMetrics()
+    // A queued backend switch takes precedence over a plain restart: it reruns
+    // through its own start once the new backend's model resolves.
+    if (root.applyPendingBackendSwitch()) return
     if (root.restartAfterStop) {
       root.restartAfterStop = false
       // startServer sweeps the old unit synchronously before launching.
@@ -3705,6 +4312,7 @@ Panel {
 
   function resetMetrics() {
     root.runningModel = ""
+    root.routerLoadedSeen = ""
     root.tokensPerSec = 0
     root.ppActive = false
     root.ppPercent = 0
@@ -3751,9 +4359,19 @@ Panel {
 
   // Both servers open their port before the model is loaded, so liveness is
   // polled on the endpoint that only answers once it is ready to serve.
+  //
+  // This used to stop the moment a start answered, which left nothing watching
+  // a server that was up. The unit watch below only covers a server launched
+  // here under systemd -- not one adopted from a previous shell, not the
+  // setsid fallback, and not a root-owned system service -- and every metrics
+  // poller deliberately swallows a failure to keep the last known reading. So
+  // a server that crashed, was OOM-killed, or was stopped from a terminal
+  // stayed "running, idle" in the panel for as long as the shell lived, with
+  // the rate of its last request still on the bar. It keeps beating now, at a
+  // slower cadence once there is nothing to wait for.
   Timer {
     id: healthPollTimer
-    interval: 800
+    interval: root.running && !root.starting ? 3000 : 800
     repeat: true
     onTriggered: if (!healthProc.running) healthProc.running = true
   }
@@ -3764,20 +4382,55 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (root.starting && text.trim() === "200") {
-          root.starting = false
-          root.running = true
-          startingTimer.stop()
-          healthPollTimer.stop()
-          root.restoreSlots()
-          // What Restart compares the page against.
-          root.readRunningArgs()
-          root.runHook("started")
-          root.lastDecodeSample = null
-          root.startMetrics()
+        var answered = text.trim() === "200"
+        if (answered) {
+          root.healthFailures = 0
+          if (root.starting) {
+            root.starting = false
+            root.running = true
+            root.lastExitWasCrash = false
+            startingTimer.stop()
+            root.restoreSlots()
+            // What Restart compares the page against.
+            root.readRunningArgs()
+            root.runHook("started")
+            root.lastDecodeSample = null
+            root.startMetrics()
+          }
+          return
         }
+        // A start that has not answered yet is the startup timeout's business,
+        // and a stop in progress is expected to stop answering.
+        if (!root.running || root.starting || root.stopping || root.expectedStop) return
+        root.healthFailures += 1
+        if (Instances.healthVerdict({ running: true, failures: root.healthFailures }) === "gone")
+          root.reportServerGone()
       }
     }
+  }
+
+  // The endpoint stopped answering for long enough to call it gone. Separate
+  // from reportUnitStopped because it is reached for servers that have no unit
+  // to read a state from -- adopted, external, or started without systemd.
+  function reportServerGone() {
+    if (root.expectedStop || root.stopping) return
+    if (!root.running && !root.starting) return
+    root.healthFailures = 0
+    startingTimer.stop()
+    healthPollTimer.stop()
+    unitWatchTimer.stop()
+    root.stopMetrics()
+    var detail = root.lastErrorLine()
+    root.lastError = "Server stopped answering on " + root.healthUrl +
+      (detail ? ": " + detail : "")
+    root.lastExitWasCrash = true
+    root.runHook("stopped")
+    root.starting = false
+    root.running = false
+    root.adopted = false
+    root.ownsUnit = false
+    root.clearRestartState()
+    root.resetMetrics()
   }
 
   // ---- Hooks ----
@@ -3858,6 +4511,14 @@ Panel {
     if (root.backendSpec.metricsMode === "slots") slotsPollTimer.restart()
     if (root.backendSpec.metricsMode === "log") psPollTimer.restart()
     if (root.routerMode) routerPollTimer.restart()
+    // Liveness, not readiness. This is the one path every running server
+    // reaches -- launched here, adopted from a previous shell, or taken over
+    // -- so arming the watches here is what makes "running" mean running. The
+    // unit watch is the fast, decisive signal when there is a unit to read;
+    // the health poll covers the cases where there is not.
+    root.healthFailures = 0
+    if (root.healthUrl !== "") healthPollTimer.restart()
+    if (root.hasSystemdRun && root.ownsUnit) unitWatchTimer.restart()
     // The journal is the log view's only source, so it is followed for every
     // backend -- not just the ones that also read throughput out of it. This
     // is the adoption path: a llama.cpp server adopted from a previous widget
@@ -3873,6 +4534,24 @@ Panel {
     unitWatchTimer.stop()
     journalProc.running = false
     root.logsSource = ""
+  }
+
+  // Releases a rate the server is no longer producing. One second is fine
+  // granularity for a four-second linger, and the timer only runs while there
+  // is a number to release.
+  Timer {
+    id: idleDecayTimer
+    interval: 1000
+    repeat: true
+    running: root.running && !root.ppActive &&
+             (root.tokensPerSec > 0 || root.ppTokensPerSec > 0)
+    onTriggered: {
+      var idle = Date.now() - root.lastRateAtMs
+      var tg = Instances.rateAfterIdle(root.tokensPerSec, idle)
+      if (tg !== root.tokensPerSec) root.tokensPerSec = tg
+      var pp = Instances.rateAfterIdle(root.ppTokensPerSec, idle)
+      if (pp !== root.ppTokensPerSec) root.ppTokensPerSec = pp
+    }
   }
 
   Timer {
@@ -3918,11 +4597,19 @@ Panel {
             // Prefer the on-disk path: the rest of the widget keys on paths.
             var args = list[i].status.args || []
             var idx = args.indexOf("--model")
-            root.runningModel = idx !== -1 && idx + 1 < args.length
+            var loaded = idx !== -1 && idx + 1 < args.length
               ? String(args[idx + 1]) : String(list[i].id || "")
+            // Follow load events (request-driven in router mode): the picker
+            // and tuning page move to the model the server actually loaded.
+            if (loaded !== "" && loaded !== root.routerLoadedSeen) {
+              root.routerLoadedSeen = loaded
+              if (root.selectedModel !== loaded) root.selectModel(loaded)
+            }
+            root.runningModel = loaded
             return
           }
         }
+        root.routerLoadedSeen = ""
         root.runningModel = ""
       }
     }
@@ -4001,7 +4688,10 @@ Panel {
           nPromptDone >= root.lastPromptSample.n) {
         var ppDtSec = (ppNow - root.lastPromptSample.t) / 1000
         var ppDn = nPromptDone - root.lastPromptSample.n
-        if (ppDtSec > 0.05 && ppDn > 0) root.ppTokensPerSec = ppDn / ppDtSec
+        if (ppDtSec > 0.05 && ppDn > 0) {
+          root.ppTokensPerSec = ppDn / ppDtSec
+          root.lastRateAtMs = ppNow
+        }
       } else {
         root.ppTokensPerSec = 0
       }
@@ -4021,7 +4711,10 @@ Panel {
       if (root.lastDecodeSample && nDecoded >= root.lastDecodeSample.n) {
         var dtSec = (now - root.lastDecodeSample.t) / 1000
         var dn = nDecoded - root.lastDecodeSample.n
-        if (dtSec > 0.05 && dn > 0) root.tokensPerSec = dn / dtSec
+        if (dtSec > 0.05 && dn > 0) {
+          root.tokensPerSec = dn / dtSec
+          root.lastRateAtMs = now
+        }
       }
       root.lastDecodeSample = { n: nDecoded, t: now }
     } else {
@@ -4048,6 +4741,7 @@ Panel {
       root.ppActive = true
       root.ppPercent = progress.percent
       root.ppTokensPerSec = progress.tps
+      root.lastRateAtMs = Date.now()
       root.ppFromLog = true
       root.lastPromptSample = null
       root.lastDecodeSample = null
@@ -4061,9 +4755,11 @@ Panel {
       // once the prompt is fully processed -- so the rate is shown without a
       // percentage. metricText renders that shape correctly.
       root.ppTokensPerSec = timing.tps
+      root.lastRateAtMs = Date.now()
       root.ppActive = false
     } else {
       root.tokensPerSec = timing.tps
+      root.lastRateAtMs = Date.now()
       root.pushRate(timing.tps)
       // A completed generation means the KV cache grew a turn; save it once
       // the server goes quiet, so a crash loses at most the last turn.
@@ -4168,24 +4864,595 @@ Panel {
     // A hot reload keeps `running` without adopting again, so the running
     // argv is looked up here as well.
     else if (root.ownsUnit && root.runningArgs.length === 0) root.readRunningArgs()
+    // Every extra index is re-probed too: a server may have appeared on one
+    // since the panel was last open.
+    root.adoptExtras()
+  }
+
+  // ---- Extra instances ----
+  //
+  // One runner per index above 0: its own transient unit, process marker,
+  // port, model, build and prompt cache, over a small copy of the primary's
+  // launch / adopt / watch cycle. Argv comes from the same buildLlamaArgs, so
+  // an extra server cannot drift from the flags the primary would use for the
+  // same model.
+  //
+  // Deliberately not shared with the primary: the log view, the hooks, the
+  // restart-on-change comparison and the Tuning page all describe one server,
+  // and giving every instance a journal tail and a /proc read would multiply
+  // the panel's process count by the instance count. An extra instance
+  // reports its state and its throughput; the Model and Tuning pages stay the
+  // primary's.
+  component InstanceRunner: QtObject {
+    id: inst
+
+    property int idx: 1
+
+    readonly property var identity: root.instancePlan[inst.idx] || null
+    readonly property int port: inst.identity ? inst.identity.port : 0
+    readonly property string unitName: inst.identity ? inst.identity.unitName : ""
+    readonly property string procMarker: inst.identity ? inst.identity.procMarker : ""
+    readonly property string baseUrl: "http://" + root.host + ":" + inst.port
+    readonly property string healthUrl: inst.baseUrl + "/health"
+
+    // The model and build this index serves, kept per index in settings so a
+    // shell restart finds the same assignment the user made.
+    readonly property string model: String(root.instanceModels[String(inst.idx)] || "")
+    readonly property string build: String(root.instanceBuilds[String(inst.idx)] || "")
+    readonly property var resolvedBuild:
+      inst.build !== "" ? (Backends.findBuild(root.llamaBuilds, inst.build) || root.autoBuild)
+                        : root.autoBuild
+    readonly property string binary:
+      inst.resolvedBuild && inst.resolvedBuild.real ? inst.resolvedBuild.real : root.launchLlamaBinary
+    // The model's own resolved profile, which is what makes an extra instance
+    // tuned rather than launched on defaults.
+    readonly property var tuning:
+      Profiles.resolveFor(root.profiles, root.backend, inst.model, inst.build)
+
+    readonly property bool launchable:
+      root.backend === "llamacpp" && !root.routerMode &&
+      inst.model !== "" && inst.binary !== "" && inst.port > 0 && root.hasSystemdRun
+
+    property bool running: false
+    property bool starting: false
+    property bool stopping: false
+    property bool adopted: false
+    property bool ownsUnit: false
+    property bool failed: false
+    property bool expectedStop: false
+    property string runningModel: ""
+    property string lastError: ""
+    property int startingElapsed: 0
+    property int healthFailures: 0
+    property real tokensPerSec: 0
+    property bool ppActive: false
+    property real ppPercent: 0
+    property real ppTokensPerSec: 0
+    property real lastRateAtMs: 0
+    property var lastDecodeSample: null
+    property var lastPromptSample: null
+
+    // Everything the Server page and the bar read, in the shape Instances.js
+    // describes an instance. One binding over every displayed field, so a
+    // single handler is enough to tell the panel that this row changed.
+    readonly property var snapshotData: ({
+      index: inst.idx,
+      port: inst.port,
+      unitName: inst.unitName,
+      procMarker: inst.procMarker,
+      primary: false,
+      running: inst.running,
+      starting: inst.starting,
+      stopping: inst.stopping,
+      switching: false,
+      failed: inst.failed,
+      adopted: inst.adopted,
+      ownsUnit: inst.ownsUnit,
+      tokensPerSec: inst.tokensPerSec,
+      ppActive: inst.ppActive,
+      ppPercent: inst.ppPercent,
+      ppTokensPerSec: inst.ppTokensPerSec,
+      model: inst.runningModel !== "" ? inst.runningModel : inst.model,
+      build: Backends.buildLabel(inst.resolvedBuild),
+      lastError: inst.lastError,
+      canStop: inst.running && inst.ownsUnit,
+      launchable: inst.launchable,
+      busy: inst.stopping
+    })
+    onSnapshotDataChanged: root.publishInstance(inst.idx, inst.snapshotData)
+    Component.onDestruction: root.retireInstance(inst.idx)
+
+    // ---- Lifecycle ----
+
+    function start() {
+      if (inst.running || inst.starting || inst.stopping) return
+      if (inst.model === "") { inst.lastError = "Pick a model for this instance first"; return }
+      if (!root.hasSystemdRun) {
+        // The setsid fallback has no unit to adopt or watch, and several
+        // detached servers with no unit between them is not something this
+        // page could report on honestly.
+        inst.lastError = "Extra instances need a systemd user session"
+        return
+      }
+      if (inst.port <= 0) { inst.lastError = "No free port for this instance"; return }
+      inst.lastError = ""
+      inst.failed = false
+      inst.healthFailures = 0
+      inst.startingElapsed = 0
+      inst.starting = true
+      inst.expectedStop = false
+      // Sweep a stale unit of the same index first, exactly as the primary
+      // does: the new process carries the marker the sweep hunts for, so the
+      // two must not overlap.
+      inst.ownSweep.command = ["bash", "-lc",
+        "systemctl --user stop " + root.shellQuote(inst.unitName) + " 2>/dev/null; true"]
+      inst.ownSweep.running = false
+      inst.ownSweep.running = true
+    }
+
+    function launch() {
+      var args = root.buildLlamaArgs({
+        model: inst.model,
+        build: inst.resolvedBuild,
+        binary: inst.binary,
+        port: inst.port,
+        tuning: inst.tuning
+      })
+      var dir = expandPath(root.slotSaveDir)
+      var cudaEnv = Hardware.isCuda(root.hardware)
+        ? "GGML_CUDA_REGISTER_HOST=1 GGML_CUDA_DISABLE_GRAPHS=1 " : ""
+      var userEnv = root.envScriptPrefixFor(inst.tuning.extraEnv)
+      var script =
+        "mkdir -p -m 700 " + root.shellQuote(dir) + "; chmod 700 " + root.shellQuote(dir) + "; " +
+        cudaEnv + (userEnv !== "" ? userEnv + " " : "") +
+        "exec -a " + inst.procMarker + " " + args.map(root.shellQuote).join(" ")
+      inst.ownLaunch.command = Backends.detachedCommand(root.hasSystemdRun, inst.unitName, script)
+      inst.ownsUnit = true
+      inst.adopted = false
+      inst.runningModel = inst.model
+      inst.ownLaunch.running = false
+      inst.ownLaunch.running = true
+      inst.ownStartingTimer.restart()
+      inst.ownHealthTimer.restart()
+      inst.ownUnitTimer.restart()
+    }
+
+    function stop() {
+      if (!inst.running && !inst.starting) return
+      if (inst.running && !inst.ownsUnit) {
+        inst.lastError = "This server was not started by this widget, so it cannot be stopped from here."
+        inst.restartAfterStop = false
+        return
+      }
+      inst.expectedStop = true
+      inst.stopping = true
+      inst.ownStartingTimer.stop()
+      inst.ownHealthTimer.stop()
+      inst.ownSlotsTimer.stop()
+      inst.ownUnitTimer.stop()
+      if (root.kvPersistence && inst.running && inst.runningModel !== "" &&
+          Backends.supports(root.backend, "slotKv")) {
+        // Dump the prompt cache before the unit goes, same as the primary.
+        // The stop runs from the save's completion whether it succeeded or not.
+        inst.ownSlotSave.command = inst.slotKvCommand("save", inst.runningModel)
+        inst.ownSlotSave.running = false
+        inst.ownSlotSave.running = true
+        return
+      }
+      inst.finishStop()
+    }
+
+    function finishStop() {
+      inst.ownLaunch.running = false
+      Quickshell.execDetached(["systemctl", "--user", "stop", inst.unitName])
+      inst.running = false
+      inst.starting = false
+      inst.stopping = false
+      inst.adopted = false
+      inst.ownsUnit = false
+      inst.failed = false
+      inst.healthFailures = 0
+      inst.runningModel = ""
+      inst.resetMetrics()
+    }
+
+    // Lowering the instance count destroys this runner; the server it started
+    // holds VRAM and a port, and nothing would list it any more, so it goes
+    // with it. execDetached outlives the object.
+    function shutdownForRemoval() {
+      if (!inst.running && !inst.starting) return
+      Quickshell.execDetached(["systemctl", "--user", "stop", inst.unitName])
+    }
+
+    function restart() {
+      if (!inst.running && !inst.starting) { inst.start(); return }
+      inst.restartAfterStop = true
+      inst.stop()
+    }
+    property bool restartAfterStop: false
+
+    function resetMetrics() {
+      inst.tokensPerSec = 0
+      inst.ppActive = false
+      inst.ppPercent = 0
+      inst.ppTokensPerSec = 0
+      inst.lastDecodeSample = null
+      inst.lastPromptSample = null
+    }
+
+    function slotKvCommand(action, model) {
+      return ["python3", root.slotKvScript, action,
+              "--url", inst.baseUrl,
+              "--dir", expandPath(root.slotSaveDir),
+              "--prefix", Backends.slotPrefix(model)]
+    }
+
+    // A server on this index's port that this widget did not just launch --
+    // left behind by a previous shell, or started by hand. Health answers
+    // first, then the unit says whether it is ours to stop.
+    function adopt() {
+      if (inst.running || inst.starting || inst.port <= 0) return
+      inst.ownAdopt.running = false
+      inst.ownAdopt.running = true
+    }
+
+    function markGone(reason) {
+      if (inst.expectedStop || inst.stopping) return
+      if (!inst.running && !inst.starting) return
+      inst.ownStartingTimer.stop()
+      inst.ownHealthTimer.stop()
+      inst.ownSlotsTimer.stop()
+      inst.ownUnitTimer.stop()
+      inst.lastError = reason
+      inst.failed = true
+      inst.healthFailures = 0
+      inst.running = false
+      inst.starting = false
+      inst.adopted = false
+      inst.ownsUnit = false
+      inst.runningModel = ""
+      inst.resetMetrics()
+    }
+
+    function promoteToRunning() {
+      inst.starting = false
+      inst.running = true
+      inst.failed = false
+      inst.healthFailures = 0
+      inst.ownStartingTimer.stop()
+      inst.ownSlotsTimer.restart()
+      if (root.kvPersistence && inst.runningModel !== "" &&
+          Backends.supports(root.backend, "slotKv")) {
+        inst.ownSlotRestore.command = inst.slotKvCommand("restore", inst.runningModel)
+        inst.ownSlotRestore.running = false
+        inst.ownSlotRestore.running = true
+      }
+    }
+
+    // ---- Processes ----
+
+    property Process ownSweep: Process {
+      onExited: {
+        if (inst.expectedStop || inst.stopping) return
+        inst.launch()
+      }
+    }
+
+    property Process ownLaunch: Process { }
+
+    property Process ownAdopt: Process {
+      command: ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "1", inst.healthUrl]
+      stdout: StdioCollector {
+        waitForEnd: true
+        onStreamFinished: {
+          if (inst.running || inst.starting) return
+          if (String(text).trim() !== "200") return
+          inst.running = true
+          inst.adopted = true
+          inst.failed = false
+          inst.ownOwner.running = false
+          inst.ownOwner.running = true
+        }
+      }
+    }
+
+    property Process ownOwner: Process {
+      command: ["systemctl", "--user", "is-active", inst.unitName]
+      stdout: StdioCollector {
+        waitForEnd: true
+        onStreamFinished: {
+          inst.ownsUnit = String(text).trim() === "active"
+          if (inst.running) {
+            // Rehydrate the model from the argv the server is actually running,
+            // not from the setting -- an adopted instance may be serving
+            // something the assignment has since changed.
+            inst.ownArgs.running = false
+            inst.ownArgs.running = true
+            inst.ownHealthTimer.restart()
+            inst.ownSlotsTimer.restart()
+            if (inst.ownsUnit) inst.ownUnitTimer.restart()
+          }
+        }
+      }
+    }
+
+    property Process ownArgs: Process {
+      command: ["bash", "-c",
+        "pid=$(systemctl --user show -p MainPID --value \"$1\" 2>/dev/null); " +
+        "[ -n \"$pid\" ] && [ \"$pid\" != 0 ] || pid=$(pgrep -f -- \"^$2 \" | head -n1); " +
+        "[ -n \"$pid\" ] && [ \"$pid\" != 0 ] && tr '\\0' '\\n' < /proc/$pid/cmdline",
+        "_", inst.unitName, inst.procMarker]
+      stdout: StdioCollector {
+        waitForEnd: true
+        onStreamFinished: {
+          if (!inst.running) return
+          var argv = String(text || "").split("\n")
+          var at = argv.indexOf("--model")
+          if (at !== -1 && at + 1 < argv.length) inst.runningModel = argv[at + 1]
+        }
+      }
+    }
+
+    property Process ownHealth: Process {
+      command: ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "1", inst.healthUrl]
+      stdout: StdioCollector {
+        waitForEnd: true
+        onStreamFinished: {
+          if (String(text).trim() === "200") {
+            inst.healthFailures = 0
+            if (inst.starting) inst.promoteToRunning()
+            return
+          }
+          if (!inst.running || inst.starting || inst.stopping || inst.expectedStop) return
+          inst.healthFailures += 1
+          if (Instances.healthVerdict({ running: true, failures: inst.healthFailures }) === "gone")
+            inst.markGone("Instance " + inst.idx + " stopped answering on " + inst.healthUrl)
+        }
+      }
+    }
+
+    // The unit's own state is the decisive signal for a crash during model
+    // load, when nothing has answered /health yet and nothing ever will.
+    property Process ownUnitState: Process {
+      command: ["systemctl", "--user", "is-active", inst.unitName]
+      stdout: StdioCollector {
+        waitForEnd: true
+        onStreamFinished: {
+          var state = String(text || "").trim()
+          if (state === "active" || state === "activating" || state === "") return
+          inst.markGone("Instance " + inst.idx +
+            (state === "failed" ? " crashed" : " stopped") + " (unit " + state + ")")
+        }
+      }
+    }
+
+    property Process ownSlots: Process {
+      command: ["curl", "-s", "-m", "1", inst.baseUrl + "/slots"]
+      stdout: StdioCollector {
+        waitForEnd: true
+        onStreamFinished: inst.handleSlots(text)
+      }
+    }
+
+    // Both prompt-cache calls end the same way whatever they report: a cache
+    // that cannot be written or read only costs this instance a cold start.
+    property Process ownSlotSave: Process {
+      onExited: inst.finishStop()
+    }
+    property Process ownSlotRestore: Process { }
+
+    function handleSlots(text) {
+      var body = String(text || "").trim()
+      if (body === "") return
+      var data
+      try { data = JSON.parse(body) } catch (e) { return }
+      if (!Array.isArray(data) || data.length === 0) return
+
+      var slot = data[0]
+      for (var i = 0; i < data.length; i++) if (data[i].is_processing) { slot = data[i]; break }
+      var processing = !!slot.is_processing
+      var promptTotal = slot.n_prompt_tokens || 0
+      var promptDone = (slot.n_prompt_tokens_processed || 0) + (slot.n_prompt_tokens_cache || 0)
+      var next = slot.next_token && slot.next_token[0]
+      var decoded = (next && next.n_decoded) || 0
+      var now = Date.now()
+
+      if (processing && decoded === 0 && promptTotal > 0) {
+        if (inst.lastPromptSample && inst.lastPromptSample.total === promptTotal &&
+            promptDone >= inst.lastPromptSample.n) {
+          var dt = (now - inst.lastPromptSample.t) / 1000
+          var dn = promptDone - inst.lastPromptSample.n
+          if (dt > 0.05 && dn > 0) { inst.ppTokensPerSec = dn / dt; inst.lastRateAtMs = now }
+        } else {
+          inst.ppTokensPerSec = 0
+        }
+        inst.lastPromptSample = { n: promptDone, t: now, total: promptTotal }
+        inst.ppActive = true
+        inst.ppPercent = Math.min(100, (promptDone / promptTotal) * 100)
+        inst.lastDecodeSample = null
+        return
+      }
+
+      inst.ppActive = false
+      inst.lastPromptSample = null
+
+      if (processing && decoded > 0) {
+        if (inst.lastDecodeSample && decoded >= inst.lastDecodeSample.n) {
+          var ddt = (now - inst.lastDecodeSample.t) / 1000
+          var ddn = decoded - inst.lastDecodeSample.n
+          if (ddt > 0.05 && ddn > 0) { inst.tokensPerSec = ddn / ddt; inst.lastRateAtMs = now }
+        }
+        inst.lastDecodeSample = { n: decoded, t: now }
+      } else {
+        inst.lastDecodeSample = null
+      }
+    }
+
+    // ---- Timers ----
+
+    property Timer ownHealthTimer: Timer {
+      interval: inst.running && !inst.starting ? 3000 : 800
+      repeat: true
+      onTriggered: if (!inst.ownHealth.running) inst.ownHealth.running = true
+    }
+
+    property Timer ownUnitTimer: Timer {
+      interval: 1500
+      repeat: true
+      onTriggered: if ((inst.starting || inst.running) && !inst.ownUnitState.running)
+                     inst.ownUnitState.running = true
+    }
+
+    property Timer ownSlotsTimer: Timer {
+      // Half the primary's cadence: this is one curl per tick per instance,
+      // and at eight instances the primary's 250 ms would put eight more
+      // processes a quarter-second on a machine that is busy inferring.
+      interval: 500
+      repeat: true
+      onTriggered: if (inst.running && !inst.ownSlots.running) inst.ownSlots.running = true
+    }
+
+    property Timer ownStartingTimer: Timer {
+      interval: 1000
+      repeat: true
+      onTriggered: {
+        inst.startingElapsed += 1
+        if (inst.starting && inst.startingElapsed >= root.startupTimeoutSec) {
+          inst.markGone("Instance " + inst.idx + " gave up waiting after " +
+                        root.startupTimeoutSec + "s")
+        }
+      }
+    }
+
+    property Timer ownIdleTimer: Timer {
+      interval: 1000
+      repeat: true
+      running: inst.running && !inst.ppActive &&
+               (inst.tokensPerSec > 0 || inst.ppTokensPerSec > 0)
+      onTriggered: {
+        var idle = Date.now() - inst.lastRateAtMs
+        var tg = Instances.rateAfterIdle(inst.tokensPerSec, idle)
+        if (tg !== inst.tokensPerSec) inst.tokensPerSec = tg
+        var pp = Instances.rateAfterIdle(inst.ppTokensPerSec, idle)
+        if (pp !== inst.ppTokensPerSec) inst.ppTokensPerSec = pp
+      }
+    }
+
+    // A restart requested while the stop was still saving the cache.
+    onStoppingChanged: {
+      if (!inst.stopping && inst.restartAfterStop) {
+        inst.restartAfterStop = false
+        inst.start()
+      }
+    }
+
+    // Reclaim whatever is already on this port -- the shell restarting is the
+    // normal case and the servers outlive it on purpose.
+    //
+    // Gated on the settings rather than fired from Component.onCompleted: the
+    // port is portBase + index, the base comes from the settings file, and
+    // probing before it loads asks the wrong port whether anything is there.
+    // The primary adopts from the same moment, for the same reason.
+    property bool adoptTried: false
+    readonly property bool adoptReady:
+      !inst.adoptTried && root.settingsLoaded && root.capabilitiesProbed &&
+      inst.port > 0 && !inst.running && !inst.starting
+    onAdoptReadyChanged: if (inst.adoptReady) inst.ownAdoptTimer.restart()
+
+    property Timer ownAdoptTimer: Timer {
+      // Lets the plan settle before a probe is spent on it.
+      interval: 600
+      repeat: false
+      onTriggered: {
+        inst.adoptTried = true
+        inst.adopt()
+      }
+    }
+  }
+
+  // Lowering the count between sessions leaves no runner to notice the servers
+  // the previous, larger configuration started: they would hold a port and
+  // their VRAM with nothing in the panel that mentions them. Swept once, after
+  // the settings have loaded so the count is the user's and not the default.
+  property bool staleInstancesSwept: false
+  // Every input is a property, so this fires on its own once the last one
+  // lands -- the same shape as autoStartReady above, and for the same reason:
+  // sweeping on the default count would stop instances the user still wants.
+  readonly property bool staleSweepReady:
+    !root.staleInstancesSwept && root.settingsLoaded && root.capabilitiesProbed &&
+    root.hasSystemdRun
+  onStaleSweepReadyChanged: if (root.staleSweepReady) root.sweepStaleInstances()
+
+  function sweepStaleInstances() {
+    if (root.staleInstancesSwept || !root.staleSweepReady) return
+    root.staleInstancesSwept = true
+    var units = Instances.staleUnits({
+      pluginId: root.moduleName,
+      backendId: root.backend,
+      count: root.instanceCount,
+      unitName: Backends.unitName
+    })
+    if (units.length === 0) return
+    var parts = units.map(function(u) {
+      return "systemctl --user stop " + root.shellQuote(u) + " 2>/dev/null"
+    })
+    Quickshell.execDetached(["bash", "-lc", parts.join("; ") + "; true"])
+  }
+
+  Instantiator {
+    id: extraInstances
+    model: Math.max(0, root.instanceCount - 1)
+    delegate: InstanceRunner { idx: index + 1 }
+    // The server an index was running holds VRAM and a port, and once the
+    // index is gone nothing would list it again -- so it goes down with the
+    // runner. shutdownForRemoval only hands the stop to execDetached, which
+    // outlives the object being destroyed.
+    onObjectRemoved: function(index, object) {
+      if (object) object.shutdownForRemoval()
+    }
   }
 
   // ---- Bar widget ----
 
-  implicitWidth: button.implicitWidth
+  implicitWidth: button.showingMetric
+    ? Math.max(button.implicitWidth, root.barMetricFloor)
+    : button.implicitWidth
   implicitHeight: button.implicitHeight
+
+  // A typical full-width live readout. The bar slot never shrinks below this
+  // while a metric is showing, so the numbers ticking (9.8 → 127 t/s →
+  // 52% - 63 t/s) stop reflowing the whole bar. It is a floor, not a cap: a
+  // wider reading than this still grows the slot rather than being clipped.
+  TextMetrics {
+    id: barMetric
+    font.family: root.bar.fontFamily
+    font.pixelSize: Style.font.bodySmall
+    text: "100% - 999 t/s"
+  }
+  readonly property int barMetricFloor: Math.ceil(barMetric.advanceWidth) + Style.space(8)
 
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     readonly property string switchState: root.switchPhase
+    readonly property bool showingMetric: root.anyInstanceRunning && /\d/.test(text)
+    // One bar slot for however many servers are up: generation is summed,
+    // because that is what the machine is producing, while ingestion is a
+    // single-prompt event and the furthest-along prompt is reported instead.
     text: Model.barSwitchText(
       Model.barText(Model.BAR_ICON,
-                    root.running, root.showMetric, root.ppActive,
-                    root.ppPercent, root.tokensPerSec, root.ppTokensPerSec),
+                    root.anyInstanceRunning, root.showMetric,
+                    root.leadingPrompt !== null,
+                    root.leadingPrompt !== null ? root.leadingPrompt.ppPercent : 0,
+                    root.aggregateRate,
+                    root.leadingPrompt !== null ? root.leadingPrompt.ppTokensPerSec
+                                                : root.ppTokensPerSec),
       switchState, root.configChanged)
-    active: root.running || root.starting
+    // Idle shows the glyph in the bar's icon slot, which WidgetButton sizes on
+    // its own; the stable width for a live readout is a floor applied to the
+    // widget's implicitWidth above, so a long reading is never clipped.
+    active: root.anyInstanceRunning || root.starting
     // The live number already says the server is up; an accent colour on top
     // would be the only coloured mark in the bar.
     useActiveColor: false
@@ -4201,6 +5468,22 @@ Panel {
 
     HoverHandler {
       id: buttonHover
+    }
+
+    // Status dot: tells a stopped server from one that is up but idle, which
+    // the monochrome glyph alone cannot. Hidden while a metric is showing,
+    // since a live number already says the server is up.
+    Rectangle {
+      visible: !button.showingMetric && (root.anyInstanceRunning || root.starting)
+      width: Style.space(5)
+      height: Style.space(5)
+      radius: width / 2
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.topMargin: Style.space(3)
+      anchors.rightMargin: Style.space(3)
+      color: root.starting ? Commons.Color.warning
+        : (root.tokensPerSec > 0 || root.ppActive ? Commons.Color.accent : Commons.Color.muted)
     }
   }
 
@@ -4234,6 +5517,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           text: root.backendSpec.label
           color: root.bar.foreground
           font.family: root.bar.fontFamily
@@ -4244,6 +5528,7 @@ Panel {
         Item { Layout.fillWidth: true }
 
         Text {
+          textFormat: Text.PlainText
           text: root.starting ? "Starting…" : (root.running ? (root.tokensPerSec > 0 ? root.tokensPerSec.toFixed(1) + " t/s" : "Active") : "Stopped")
           color: root.running ? Commons.Color.accent : root.bar.foreground
           font.family: root.bar.fontFamily
@@ -4258,6 +5543,7 @@ Panel {
         spacing: Style.space(4)
 
         Text {
+          textFormat: Text.PlainText
           text: "Model:"
           color: root.bar.foreground
           font.family: root.bar.fontFamily
@@ -4266,6 +5552,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: {
             var m = root.runningModel ? Model.baseName(root.runningModel) : (root.launchModel ? Model.baseName(root.launchModel) : "")
@@ -4286,6 +5573,7 @@ Panel {
         spacing: Style.space(4)
 
         Text {
+          textFormat: Text.PlainText
           text: "Endpoint:"
           color: root.bar.foreground
           font.family: root.bar.fontFamily
@@ -4294,6 +5582,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: root.host + ":" + root.port
           color: root.bar.foreground
@@ -4310,6 +5599,7 @@ Panel {
         spacing: Style.space(4)
 
         Text {
+          textFormat: Text.PlainText
           text: "Fork:"
           color: root.bar.foreground
           font.family: root.bar.fontFamily
@@ -4318,6 +5608,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: root.resolvedBuild ? Backends.buildLabel(root.resolvedBuild) : ""
           color: root.bar.foreground
@@ -4329,48 +5620,120 @@ Panel {
       }
 
       // Generation & Prompt speeds
-      RowLayout {
+      ColumnLayout {
         Layout.fillWidth: true
-        spacing: Style.space(12)
+        spacing: Style.space(4)
         visible: root.running
 
-        ColumnLayout {
-          spacing: 1
-          Text {
-            text: "Generation"
-            color: root.bar.foreground
-            font.family: root.bar.fontFamily
-            font.pixelSize: root.fontSizeSmall
-            opacity: 0.6
+        RowLayout {
+          Layout.fillWidth: true
+          spacing: Style.space(12)
+
+          ColumnLayout {
+            spacing: 1
+            Text {
+              textFormat: Text.PlainText
+              text: "Generation"
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: root.fontSizeSmall
+              opacity: 0.6
+            }
+            Text {
+              textFormat: Text.PlainText
+              text: root.tokensPerSec > 0 ? root.tokensPerSec.toFixed(1) + " tk/s" : "idle"
+              color: root.tokensPerSec > 0 ? Commons.Color.accent : root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: root.fontSize
+              font.bold: root.tokensPerSec > 0
+            }
           }
-          Text {
-            text: root.tokensPerSec > 0 ? root.tokensPerSec.toFixed(1) + " tk/s" : "idle"
-            color: root.tokensPerSec > 0 ? Commons.Color.accent : root.bar.foreground
-            font.family: root.bar.fontFamily
-            font.pixelSize: root.fontSize
-            font.bold: root.tokensPerSec > 0
+
+          Item { Layout.fillWidth: true }
+
+          ColumnLayout {
+            spacing: 1
+            Text {
+              textFormat: Text.PlainText
+              Layout.alignment: Qt.AlignRight
+              text: "Prompt eval"
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: root.fontSizeSmall
+              opacity: 0.6
+            }
+            Text {
+              textFormat: Text.PlainText
+              Layout.alignment: Qt.AlignRight
+              // The rate and how far along it is are two different facts; this
+              // used to drop one to show the other, so during ingestion the
+              // speed vanished and afterwards the progress did. The rate lives
+              // here, the progress in the bar below.
+              text: root.ppTokensPerSec > 0
+                ? root.ppTokensPerSec.toFixed(1) + " tk/s"
+                : (root.ppActive ? "evaluating…" : "idle")
+              color: (root.ppActive || root.ppTokensPerSec > 0) ? Commons.Color.accent : root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: root.fontSize
+              font.bold: root.ppActive || root.ppTokensPerSec > 0
+            }
           }
         }
 
-        ColumnLayout {
-          spacing: 1
+        // Prompt ingestion is the one wait long enough to want a progress read
+        // at a glance, and a number says far less than a bar filling.
+        Item {
+          Layout.fillWidth: true
+          implicitHeight: Style.space(10)
+          visible: root.ppActive
+
           Text {
-            text: "Prompt eval"
-            color: root.bar.foreground
+            textFormat: Text.PlainText
+            id: ppPctLabel
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.ppPercent.toFixed(0) + "%"
+            color: Commons.Color.accent
             font.family: root.bar.fontFamily
             font.pixelSize: root.fontSizeSmall
-            opacity: 0.6
+            font.bold: true
           }
-          Text {
-            text: root.ppActive
-              ? (root.ppPercent > 0 ? root.ppPercent.toFixed(0) + "%" : "evaluating…")
-              : (root.ppTokensPerSec > 0 ? root.ppTokensPerSec.toFixed(1) + " tk/s" : "idle")
-            color: (root.ppActive || root.ppTokensPerSec > 0) ? Commons.Color.accent : root.bar.foreground
-            font.family: root.bar.fontFamily
-            font.pixelSize: root.fontSize
-            font.bold: root.ppActive || root.ppTokensPerSec > 0
+
+          Rectangle {
+            anchors.left: parent.left
+            anchors.right: ppPctLabel.left
+            anchors.rightMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            height: Style.space(4)
+            radius: height / 2
+            color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g,
+                           root.bar.foreground.b, 0.15)
+
+            Rectangle {
+              anchors.left: parent.left
+              anchors.top: parent.top
+              anchors.bottom: parent.bottom
+              width: parent.width * Math.max(0, Math.min(1, root.ppPercent / 100))
+              radius: parent.radius
+              color: Commons.Color.accent
+              Behavior on width {
+                NumberAnimation { duration: Style.duration(160); easing.type: Easing.OutCubic }
+              }
+            }
           }
         }
+      }
+
+      // The sparkline plots generation only, which nothing on the card said.
+      Text {
+        textFormat: Text.PlainText
+        Layout.fillWidth: true
+        visible: root.running && root.rateHistory.length > 1
+        text: "Recent generation"
+        color: root.bar.foreground
+        font.family: root.bar.fontFamily
+        font.pixelSize: root.fontSizeSmall
+        opacity: 0.6
       }
 
       // Graphical speed sparkline (recent token generation rate)
@@ -4404,8 +5767,7 @@ Panel {
             var val = list[j]
             var x = j * step
             var y = height - (val / maxVal) * (height - 4) - 2
-            if (j === 0) ctx.lineTo(x, y)
-            else ctx.lineTo(x, y)
+            ctx.lineTo(x, y)
           }
           ctx.lineTo(width, height)
           ctx.closePath()
@@ -4425,6 +5787,22 @@ Panel {
           ctx.lineWidth = 1.5
           ctx.stroke()
         }
+      }
+
+      // Discoverability: the bar's click actions are otherwise only in the
+      // README. A faint hint keeps the hover card the single source of truth.
+      Text {
+        textFormat: Text.PlainText
+        Layout.fillWidth: true
+        Layout.topMargin: Style.space(2)
+        text: root.running
+          ? "Click to open · right-click to " + (root.showMetric ? "hide the rate" : "show the rate")
+          : "Click to open"
+        color: root.bar.foreground
+        font.family: root.bar.fontFamily
+        font.pixelSize: root.fontSizeSmall
+        opacity: 0.45
+        elide: Text.ElideRight
       }
     }
   }
@@ -4480,6 +5858,7 @@ Panel {
             Layout.fillWidth: true
             spacing: 0
             Text {
+              textFormat: Text.PlainText
               text: Model.statusLabel(root.running, root.starting, root.startingElapsed,
                                       root.switchPhase,
                                       root.slotsProcessing) +
@@ -4492,6 +5871,7 @@ Panel {
               Layout.fillWidth: true
             }
             Text {
+              textFormat: Text.PlainText
               text: {
                 var m = Model.metricText(true, root.ppActive, root.ppPercent,
                                          root.tokensPerSec, root.ppTokensPerSec)
@@ -4567,6 +5947,7 @@ Panel {
               implicitHeight: 26
 
               Text {
+                textFormat: Text.PlainText
                 id: tabText
                 anchors.centerIn: parent
                 text: modelData
@@ -4623,6 +6004,7 @@ Panel {
             spacing: Style.space(8)
 
             Text {
+              textFormat: Text.PlainText
               text: root.showingSetup ? "Setup" : "Settings"
               color: root.bar.foreground
               font.family: root.bar.fontFamily
@@ -4630,6 +6012,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               text: "...................................................................................................."
               color: root.bar.foreground
@@ -4640,6 +6023,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               text: root.backendSpec.label
               color: root.bar.foreground
               opacity: 0.45
@@ -4664,6 +6048,7 @@ Panel {
               spacing: Style.space(4)
 
               Text {
+                textFormat: Text.PlainText
                 text: "Backend"
                 color: root.bar.foreground
                 opacity: 0.85
@@ -4671,6 +6056,7 @@ Panel {
                 font.pixelSize: root.fontSize
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: "...................................................................................................."
                 color: root.bar.foreground
@@ -4680,6 +6066,7 @@ Panel {
                 font.pixelSize: root.fontSize
               }
               Text {
+                textFormat: Text.PlainText
                 text: root.backendSpec.label
                 color: root.bar.foreground
                 opacity: 0.85
@@ -4688,6 +6075,7 @@ Panel {
                 font.pixelSize: root.fontSize
               }
               Text {
+                textFormat: Text.PlainText
                 text: root.settingsSection === "backend" ? "-" : "+"
                 color: root.bar.foreground
                 opacity: 0.5
@@ -4728,6 +6116,7 @@ Panel {
                 spacing: Style.space(4)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "Server"
                   color: root.bar.foreground
                   opacity: 0.8
@@ -4735,6 +6124,7 @@ Panel {
                   font.pixelSize: root.fontSize
                 }
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: "...................................................................................................."
                   color: root.bar.foreground
@@ -4744,6 +6134,7 @@ Panel {
                   font.pixelSize: root.fontSize
                 }
                 Text {
+                  textFormat: Text.PlainText
                   text: root.backendSpec.label
                   color: root.bar.foreground
                   opacity: (root.running || root.starting) ? 0.45 : 0.85
@@ -4807,6 +6198,7 @@ Panel {
                         spacing: Style.space(4)
 
                         Text {
+                          textFormat: Text.PlainText
                           text: "•"
                           visible: parent.parent.chosen
                           color: Commons.Color.accent
@@ -4814,6 +6206,7 @@ Panel {
                           font.pixelSize: root.fontSize
                         }
                         Text {
+                          textFormat: Text.PlainText
                           Layout.fillWidth: true
                           text: modelData.label
                           color: parent.parent.chosen ? Commons.Color.accent : root.bar.foreground
@@ -4858,6 +6251,7 @@ Panel {
                 visible: !settingsBinaryRow.editing
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "Binary"
                   color: root.bar.foreground
                   opacity: 0.8
@@ -4865,6 +6259,7 @@ Panel {
                   font.pixelSize: root.fontSize
                 }
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: "...................................................................................................."
                   color: root.bar.foreground
@@ -4874,6 +6269,7 @@ Panel {
                   font.pixelSize: root.fontSize
                 }
                 Text {
+                  textFormat: Text.PlainText
                   Layout.maximumWidth: settingsBinaryRow.width * 0.55
                   text: root.activeBinary !== ""
                         ? root.activeBinary.replace(Quickshell.env("HOME"), "~")
@@ -4952,6 +6348,7 @@ Panel {
               spacing: Style.space(4)
 
               Text {
+                textFormat: Text.PlainText
                 text: "Model folders"
                 color: root.bar.foreground
                 opacity: 0.85
@@ -4959,6 +6356,7 @@ Panel {
                 font.pixelSize: root.fontSize
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: "...................................................................................................."
                 color: root.bar.foreground
@@ -4968,6 +6366,7 @@ Panel {
                 font.pixelSize: root.fontSize
               }
               Text {
+                textFormat: Text.PlainText
                 text: root.configuredModelsDir !== ""
                       ? root.configuredModelsDir.replace(Quickshell.env("HOME"), "~")
                       : "auto"
@@ -4979,6 +6378,7 @@ Panel {
                 font.pixelSize: root.fontSizeSmall
               }
               Text {
+                textFormat: Text.PlainText
                 text: root.settingsSection === "models" ? "-" : "+"
                 color: root.bar.foreground
                 opacity: 0.5
@@ -5017,6 +6417,7 @@ Panel {
                 spacing: Style.space(4)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: root.configuredModelsDir === "" ? "•" : "·"
                   color: Commons.Color.accent
                   opacity: root.configuredModelsDir === "" ? 1.0 : 0.3
@@ -5024,6 +6425,7 @@ Panel {
                   font.pixelSize: root.fontSize
                 }
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: "All detected folders"
                   color: root.configuredModelsDir === "" ? Commons.Color.accent : root.bar.foreground
@@ -5032,6 +6434,7 @@ Panel {
                   font.pixelSize: root.fontSize
                 }
                 Text {
+                  textFormat: Text.PlainText
                   text: root.detectedModelDirs.length + " folder" + (root.detectedModelDirs.length === 1 ? "" : "s")
                   color: root.bar.foreground
                   opacity: 0.42
@@ -5072,6 +6475,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: chosen ? "•" : "·"
                     color: Commons.Color.accent
                     opacity: chosen ? 1.0 : 0.3
@@ -5079,6 +6483,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: modelData.replace(Quickshell.env("HOME"), "~")
                     color: chosen ? Commons.Color.accent : root.bar.foreground
@@ -5088,6 +6493,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: count === undefined
                           ? "…"
                           : count + " model" + (count === 1 ? "" : "s")
@@ -5097,6 +6503,7 @@ Panel {
                     font.pixelSize: root.fontSizeSmall
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "✕"
                     visible: root.extraModelDirs.indexOf(modelData) !== -1
                     color: root.bar.foreground
@@ -5138,6 +6545,7 @@ Panel {
                 visible: !settingsAddFolderRow.editing
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "Add folder"
                   color: root.bar.foreground
                   opacity: 0.8
@@ -5145,6 +6553,7 @@ Panel {
                   font.pixelSize: root.fontSize
                 }
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: "...................................................................................................."
                   color: root.bar.foreground
@@ -5154,6 +6563,7 @@ Panel {
                   font.pixelSize: root.fontSize
                 }
                 Text {
+                  textFormat: Text.PlainText
                   text: "click to add"
                   color: root.bar.foreground
                   opacity: 0.42
@@ -5215,6 +6625,7 @@ Panel {
               spacing: Style.space(4)
 
               Text {
+                textFormat: Text.PlainText
                 text: "Builds"
                 color: root.bar.foreground
                 opacity: 0.85
@@ -5222,6 +6633,7 @@ Panel {
                 font.pixelSize: root.fontSize
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: "...................................................................................................."
                 color: root.bar.foreground
@@ -5231,6 +6643,7 @@ Panel {
                 font.pixelSize: root.fontSize
               }
               Text {
+                textFormat: Text.PlainText
                 text: root.llamaBuilds.length + " found"
                 color: root.bar.foreground
                 opacity: 0.45
@@ -5238,6 +6651,7 @@ Panel {
                 font.pixelSize: root.fontSizeSmall
               }
               Text {
+                textFormat: Text.PlainText
                 text: root.settingsSection === "builds" ? "-" : "+"
                 color: root.bar.foreground
                 opacity: 0.5
@@ -5278,6 +6692,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: modelData.fork || "llama-server"
                     color: root.bar.foreground
                     opacity: 0.8
@@ -5287,6 +6702,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: Backends.buildLabel(modelData)
                     color: root.bar.foreground
                     opacity: 0.42
@@ -5296,6 +6712,7 @@ Panel {
                     font.pixelSize: root.fontSizeSmall
                   }
                   Text {
+                    textFormat: Text.PlainText
                     visible: modelData.missing === true
                     text: "missing"
                     color: Commons.Color.urgent
@@ -5304,6 +6721,7 @@ Panel {
                     font.pixelSize: root.fontSizeSmall
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "✕"
                     visible: root.extraBuildPaths.indexOf(modelData.path) !== -1
                     color: root.bar.foreground
@@ -5321,6 +6739,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: root.llamaBuilds.length === 0
               text: "No llama.cpp build detected yet."
@@ -5348,6 +6767,7 @@ Panel {
                 visible: !settingsAddForkRow.editing
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "Add fork"
                   color: root.bar.foreground
                   opacity: 0.8
@@ -5355,6 +6775,7 @@ Panel {
                   font.pixelSize: root.fontSize
                 }
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: "...................................................................................................."
                   color: root.bar.foreground
@@ -5364,6 +6785,7 @@ Panel {
                   font.pixelSize: root.fontSize
                 }
                 Text {
+                  textFormat: Text.PlainText
                   text: "click to add"
                   color: root.bar.foreground
                   opacity: 0.42
@@ -5416,6 +6838,58 @@ Panel {
             }
           }
 
+          // Prompt cache ---------------------------------------------------
+          // The only place the caches are visible at all. The sweep is offered
+          // only once a model scan has actually produced a catalogue, so an
+          // empty scan can never present every cache as orphaned.
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: Style.space(2)
+
+            RowLayout {
+              Layout.fillWidth: true
+              Layout.leftMargin: Style.space(4)
+              Layout.rightMargin: Style.space(4)
+              spacing: Style.space(4)
+
+              Text {
+                textFormat: Text.PlainText
+                text: "Prompt cache"
+                color: root.bar.foreground
+                opacity: 0.85
+                font.family: root.bar.fontFamily
+                font.pixelSize: root.fontSize
+              }
+              Text {
+                textFormat: Text.PlainText
+                Layout.fillWidth: true
+                text: "...................................................................................................."
+                color: root.bar.foreground
+                opacity: 0.15
+                elide: Text.ElideRight
+                font.family: root.bar.fontFamily
+                font.pixelSize: root.fontSize
+              }
+              Text {
+                textFormat: Text.PlainText
+                text: root.slotCacheProbed ? Model.formatBytes(root.slotCacheBytes) : "…"
+                color: root.bar.foreground
+                opacity: 0.65
+                font.family: root.bar.fontFamily
+                font.pixelSize: root.fontSizeSmall
+              }
+            }
+
+            TextAction {
+              Layout.fillWidth: true
+              visible: root.slotCacheOrphans.length > 0 && root.slotKeepProbed
+              text: "Remove " + root.slotCacheOrphans.length + " orphaned cache" +
+                    (root.slotCacheOrphans.length === 1 ? "" : "s") + " · " +
+                    Model.formatBytes(Model.totalSlotBytes(root.slotCacheOrphans))
+              onClicked: root.removeSlotOrphans()
+            }
+          }
+
           Item { Layout.fillHeight: true }
 
           RowLayout {
@@ -5428,6 +6902,15 @@ Panel {
                 if (root.showingSetup) root.skipSetup()
                 else root.closeSettings()
               }
+            }
+
+            // Re-running setup was reachable only through the `setup` IPC call
+            // documented in the README; this is the same thing without a
+            // terminal. Hidden during setup itself, where it would be a no-op.
+            TextAction {
+              visible: !root.showingSetup
+              text: "Re-run setup"
+              onClicked: root.startSetup()
             }
 
             Item { Layout.fillWidth: true }
@@ -5464,110 +6947,312 @@ Panel {
             spacing: Style.space(8)
             visible: root.currentPage === 0
 
-            // Instances section (multi-instance control) ---------------------
+            // Instances section ---------------------------------------------
+            //
+            // One row per instance the settings call for, each reporting what
+            // that server is actually doing. It used to be a single hardcoded
+            // "Instance 0" whatever `instanceCount` said, with no liveness
+            // watch behind it -- so a crashed server stayed "idle" and the
+            // rate of its last request stayed on the page.
             ColumnLayout {
               Layout.fillWidth: true
               spacing: Style.space(4)
 
-              Text {
-                text: "Instances & Status"
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSizeSmall
-                opacity: 0.6
-                font.bold: true
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: Style.space(6)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Instances & Status"
+                  color: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSizeSmall
+                  opacity: 0.6
+                  font.bold: true
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  visible: root.multiInstance
+                  text: root.instancesRunning + "/" + root.instanceCount + " up" +
+                        (root.aggregateRate > 0 ? " · " + root.aggregateRate.toFixed(1) + " t/s" : "")
+                  color: root.anyInstanceRunning ? Commons.Color.accent : root.bar.foreground
+                  opacity: root.anyInstanceRunning ? 0.9 : 0.45
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSizeSmall
+                }
+
+                Item { Layout.fillWidth: true }
+
+                // The count lives in the widget's manifest settings, so it is
+                // written through omarchy-bar and applied to the live widget.
+                Text {
+                  textFormat: Text.PlainText
+                  visible: root.canAddInstances
+                  text: "−"
+                  color: root.bar.foreground
+                  opacity: root.instanceCount > 1 ? 0.8 : 0.2
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSizeSubtitle
+                  MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -Style.space(4)
+                    cursorShape: Qt.PointingHandCursor
+                    enabled: root.instanceCount > 1
+                    onClicked: root.setWidgetSetting("instanceCount", root.instanceCount - 1)
+                  }
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  visible: root.canAddInstances
+                  text: String(root.instanceCount)
+                  color: root.bar.foreground
+                  opacity: 0.7
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSizeSmall
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  visible: root.canAddInstances
+                  text: "+"
+                  color: root.bar.foreground
+                  opacity: root.instanceCount < Instances.MAX_INSTANCES ? 0.8 : 0.2
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSizeSubtitle
+                  MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -Style.space(4)
+                    cursorShape: Qt.PointingHandCursor
+                    enabled: root.instanceCount < Instances.MAX_INSTANCES
+                    onClicked: root.setWidgetSetting("instanceCount", root.instanceCount + 1)
+                  }
+                }
+                PanelToolTip {
+                  visible: instanceCountHover.hovered
+                  text: "Number of persistent llama-server instances. Each one gets " +
+                        "its own port (" + root.port + " upwards), model and build."
+                }
+                HoverHandler { id: instanceCountHover }
               }
 
-              Rectangle {
-                Layout.fillWidth: true
-                implicitHeight: instanceRowCol.implicitHeight + Style.space(8)
-                radius: 4
-                color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.03)
-                border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
-                border.width: 1
+              // Driven by the count, which is stable, rather than by
+              // instanceStates, which is replaced on every poll that moves a
+              // rate -- a new array identity rebuilds every delegate, and a
+              // model picker rebuilt four times a second cannot be used. The
+              // row's bindings still follow the state; only the delegates
+              // stay put.
+              Repeater {
+                model: root.instanceCount
 
-                ColumnLayout {
-                  id: instanceRowCol
-                  anchors.fill: parent
-                  anchors.margins: Style.space(6)
-                  spacing: Style.space(4)
+                delegate: Rectangle {
+                  id: instRow
+                  required property int index
+                  readonly property var state: root.instanceState(instRow.index)
+                  readonly property bool isPrimary: !!instRow.state.primary
+                  readonly property bool up: !!instRow.state.running
+                  readonly property bool pending:
+                    !!instRow.state.starting || !!instRow.state.stopping
+                  readonly property string modelPath: String(instRow.state.model || "")
 
-                  RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Style.space(6)
+                  Layout.fillWidth: true
+                  implicitHeight: instCol.implicitHeight + Style.space(8)
+                  radius: 4
+                  color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.03)
+                  border.color: instRow.up
+                    ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.25)
+                    : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
+                  border.width: 1
 
-                    Rectangle {
-                      width: 8
-                      height: 8
-                      radius: 4
-                      color: root.running ? Commons.Color.accent : (root.starting ? Commons.Color.urgent : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.25))
-                    }
+                  ColumnLayout {
+                    id: instCol
+                    anchors.fill: parent
+                    anchors.margins: Style.space(6)
+                    spacing: Style.space(4)
 
-                    Text {
-                      text: "Instance 0"
-                      color: root.bar.foreground
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSize
-                      font.bold: true
-                    }
+                    RowLayout {
+                      Layout.fillWidth: true
+                      spacing: Style.space(6)
 
-                    Text {
-                      text: ":" + root.port
-                      color: root.bar.foreground
-                      opacity: 0.5
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSizeSmall
-                    }
+                      Rectangle {
+                        width: 8
+                        height: 8
+                        radius: 4
+                        color: instRow.up
+                          ? Commons.Color.accent
+                          : (instRow.pending
+                              ? Commons.Color.urgent
+                              : (instRow.state.failed
+                                  ? root.bar.urgent
+                                  : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.25)))
+                      }
 
-                    Item { Layout.fillWidth: true }
+                      Text {
+                        textFormat: Text.PlainText
+                        text: root.multiInstance ? "Instance " + instRow.index : "Server"
+                        color: root.bar.foreground
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: root.fontSize
+                        font.bold: true
+                      }
 
-                    Text {
-                      text: root.running ? (root.tokensPerSec > 0 ? root.tokensPerSec.toFixed(1) + " t/s" : "idle") : (root.starting ? "starting…" : "stopped")
-                      color: root.running ? Commons.Color.accent : root.bar.foreground
-                      opacity: root.running ? 0.9 : 0.45
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSizeSmall
-                    }
-                  }
+                      Text {
+                        textFormat: Text.PlainText
+                        text: instRow.state.port > 0 ? ":" + instRow.state.port : "no port"
+                        color: root.bar.foreground
+                        opacity: 0.5
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: root.fontSizeSmall
+                      }
 
-                  RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Style.space(6)
-                    Item { Layout.fillWidth: true }
+                      Text {
+                        textFormat: Text.PlainText
+                        visible: text !== "" && text !== "this widget"
+                        text: Instances.ownerLabel(instRow.state)
+                        color: root.bar.foreground
+                        opacity: 0.45
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: root.fontSizeSmall
+                      }
 
-                    Button {
-                      text: root.routerMode ? "Router: ON" : "Router: OFF"
-                      enabled: root.backend === "llamacpp" && !root.running
-                      onClicked: {
-                        root.routerMode = !root.routerMode
-                        root.setWidgetSetting("routerMode", root.routerMode)
+                      Item { Layout.fillWidth: true }
+
+                      Text {
+                        textFormat: Text.PlainText
+                        text: Instances.stateLabel(instRow.state)
+                        color: instRow.state.failed
+                          ? root.bar.urgent
+                          : (instRow.up ? Commons.Color.accent : root.bar.foreground)
+                        opacity: instRow.up ? 0.9 : (instRow.state.failed ? 0.9 : 0.45)
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: root.fontSizeSmall
                       }
                     }
 
-                    Button {
-                      text: root.running ? "Unload" : "Start"
-                      enabled: !root.stopping && (root.running ? root.canStop : true)
-                      onClicked: root.toggleServer()
+                    // What this instance serves. The primary follows the Model
+                    // page; an extra index is assigned here, because it is the
+                    // only place that knows the index exists.
+                    Text {
+                      textFormat: Text.PlainText
+                      Layout.fillWidth: true
+                      visible: instRow.isPrimary
+                      text: root.routerMode && root.backend === "llamacpp"
+                        ? (root.running ? "Router · " + (root.runningModel !== ""
+                              ? Model.baseName(root.runningModel) : "no model loaded yet")
+                            : "Router mode (models.ini)")
+                        : (instRow.modelPath !== ""
+                            ? (instRow.up ? "Loaded: " : "Ready: ") + Model.baseName(instRow.modelPath)
+                            : "No model selected")
+                      color: root.bar.foreground
+                      opacity: instRow.up ? 0.85 : 0.5
+                      elide: Text.ElideRight
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: root.fontSizeSmall
+                    }
+
+                    SearchableDropdown {
+                      Layout.fillWidth: true
+                      visible: !instRow.isPrimary
+                      showLabel: false
+                      enabled: !instRow.up && !instRow.pending
+                      opacity: enabled ? 1.0 : 0.5
+                      options: root.instanceModelOptions(instRow.index)
+                      value: String(root.instanceModels[String(instRow.index)] || "")
+                      placeholderText: "Search models…"
+                      emptyText: root.activeScanning ? "Scanning…" : "No models found"
+                      triggerLabel: instRow.modelPath === ""
+                        ? "Pick a model for instance " + instRow.index : ""
+                      onChanged: function(v) { root.setInstanceModel(instRow.index, v) }
+                    }
+
+                    // Build. The primary's picker writes the selected model's
+                    // profile; an extra index keeps its own choice.
+                    BuildPickerRow {
+                      Layout.fillWidth: true
+                      visible: instRow.isPrimary
+                      readOnly: root.running || root.starting
+                    }
+
+                    Dropdown {
+                      Layout.fillWidth: true
+                      visible: !instRow.isPrimary && root.backend === "llamacpp"
+                      showLabel: false
+                      enabled: !instRow.up && !instRow.pending
+                      opacity: enabled ? 1.0 : 0.5
+                      options: root.instanceBuildOptions()
+                      value: String(root.instanceBuilds[String(instRow.index)] || "")
+                      onChanged: function(v) { root.setInstanceBuild(instRow.index, v) }
+                    }
+
+                    RowLayout {
+                      Layout.fillWidth: true
+                      spacing: Style.space(6)
+                      Item { Layout.fillWidth: true }
+
+                      Button {
+                        visible: instRow.isPrimary && root.backend === "llamacpp"
+                        text: root.routerMode ? "Router: ON" : "Router: OFF"
+                        tooltipText: root.multiInstance
+                          ? "Router mode serves every model from one process, so it runs as a single instance"
+                          : "Serve every model in models.ini from one process"
+                        enabled: !root.running && !root.starting && !root.stopping
+                        onClicked: {
+                          root.routerMode = !root.routerMode
+                          root.setWidgetSetting("routerMode", root.routerMode)
+                        }
+                      }
+
+                      Button {
+                        visible: !instRow.isPrimary
+                        text: "Restart"
+                        tooltipText: "Stop and start this instance with its current model and build"
+                        enabled: instRow.up && !instRow.pending && !!instRow.state.canStop
+                        onClicked: root.restartInstance(instRow.index)
+                      }
+
+                      Button {
+                        text: instRow.up || instRow.state.starting ? "Unload" : "Start"
+                        tooltipText: instRow.isPrimary
+                          ? ""
+                          : (instRow.state.launchable || instRow.up
+                              ? ""
+                              : "Needs a model, a llama.cpp build, a free port and a systemd user session")
+                        enabled: instRow.isPrimary
+                          ? (!root.stopping && (root.running ? root.canStop : true))
+                          : (instRow.up || instRow.state.starting
+                              ? !!instRow.state.canStop && !instRow.state.stopping
+                              : !!instRow.state.launchable)
+                        onClicked: instRow.isPrimary
+                          ? root.toggleServer()
+                          : root.toggleInstance(instRow.index)
+                      }
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      Layout.fillWidth: true
+                      visible: !instRow.isPrimary && String(instRow.state.lastError || "") !== ""
+                      text: String(instRow.state.lastError || "")
+                      color: root.bar.urgent
+                      wrapMode: Text.WordWrap
+                      maximumLineCount: 2
+                      elide: Text.ElideRight
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: root.fontSizeSmall
                     }
                   }
-
-                  Text {
-                    Layout.fillWidth: true
-                    text: root.routerMode && root.backend === "llamacpp"
-                            ? (root.running ? "Router: " + root.routerPresetPath.split("/").pop() : "Router mode (models.ini)")
-                            : (root.runningModel ? ("Loaded: " + Model.baseName(root.runningModel)) : (root.launchModel ? ("Ready: " + Model.baseName(root.launchModel)) : "No model loaded"))
-                    color: root.bar.foreground
-                    opacity: root.running ? 0.85 : 0.5
-                    elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSizeSmall
-                  }
-
-                  BuildPickerRow {
-                    Layout.fillWidth: true
-                    readOnly: root.running || root.starting
-                  }
                 }
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                Layout.fillWidth: true
+                visible: root.multiInstance && !root.hasSystemdRun
+                text: "⚠ Extra instances need a systemd user session; only the first server can be managed here."
+                color: root.bar.urgent
+                wrapMode: Text.WordWrap
+                font.family: root.bar.fontFamily
+                font.pixelSize: root.fontSizeSmall
               }
             }
 
@@ -5596,6 +7281,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Backend"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -5604,6 +7290,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -5614,6 +7301,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     text: root.backendSpec.label
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -5627,13 +7315,15 @@ Panel {
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  enabled: !root.running && !root.starting
+                  // Switching while running is allowed now: requestBackend
+                  // stops the current server first, then starts the new one.
+                  enabled: !root.stopping
                   onClicked: backendPopup.open()
                 }
                 PanelToolTip {
                   visible: backendHover.containsMouse
                   text: root.running || root.starting
-                    ? "Stop the server to change the backend."
+                    ? "Switch backend — the running server is stopped first, then the new one starts."
                     : "The inference server this widget launches."
                 }
 
@@ -5660,15 +7350,13 @@ Panel {
                       options: root.installedBackends.map(function(b) { return { value: b.id, label: b.label } })
                       value: root.backend
                       onChanged: function(v) {
-                        root.backend = v
+                        root.requestBackend(v)
                         backendPopup.close()
                       }
                     }
                   }
                 }
               }
-
-              BuildPickerRow { readOnly: root.running || root.starting }
 
               Rectangle {
                 id: endpointRow
@@ -5688,6 +7376,7 @@ Panel {
                   visible: !endpointRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "host:port"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -5696,6 +7385,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -5706,11 +7396,12 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     text: root.host + ":" + root.port
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSize
-                    opacity: (root.running || root.starting) ? 0.45 : 0.85
+                    opacity: (root.anyInstanceRunning || root.starting) ? 0.45 : 0.85
                   }
                 }
 
@@ -5747,7 +7438,11 @@ Panel {
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   visible: !endpointRow.editing
-                  enabled: !root.running && !root.starting
+                  // This is the port base every index is allocated from, so a
+                  // running extra instance locks it too -- moving it would
+                  // leave that server listening on a port the page no longer
+                  // watches.
+                  enabled: !root.anyInstanceRunning && !root.starting
                   onClicked: {
                     endpointRow.editing = true
                     endpointEdit.text = root.host + ":" + root.port
@@ -5756,9 +7451,9 @@ Panel {
                 }
                 PanelToolTip {
                   visible: endpointHover.containsMouse
-                  text: root.running || root.starting
-                    ? "Stop the server to change the endpoint."
-                    : "Address the server listens on — host:port, e.g. 127.0.0.1:8080."
+                  text: root.anyInstanceRunning || root.starting
+                    ? "Stop every instance to change the endpoint — it is the port base they are allocated from."
+                    : "Address the server listens on — host:port, e.g. 127.0.0.1:8080. Extra instances take the ports above it."
                 }
               }
             }
@@ -5768,6 +7463,7 @@ Panel {
             // loopback serves the model -- and its slot save/restore API -- to
             // anyone who can reach the port.
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: !/^(127\.|localhost$|\[::1\]$|::1$)/.test(String(root.host).trim())
               text: "⚠ " + root.host + " is reachable from other machines, and the server has no API key. " +
@@ -5778,10 +7474,17 @@ Panel {
               font.pixelSize: root.fontSize
             }
 
+            // What is actually locked while a server runs. Switching backend
+            // is not: requestBackend stops the running server, saving its
+            // prompt cache, and starts the new one once its model resolves.
+            // The page used to say "stop the server to change backend, build
+            // or endpoint", which had been wrong since that path landed.
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: root.running || root.starting
-              text: "Stop the server to change backend, build or endpoint."
+              text: "Build and endpoint change on the next start. Switching backend " +
+                    "stops this server first, then starts the new one."
               color: root.bar.foreground
               opacity: 0.5
               wrapMode: Text.WordWrap
@@ -5808,6 +7511,7 @@ Panel {
                 spacing: Style.space(4)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "Keep prompt cache"
                   color: root.bar.foreground
                   font.family: root.bar.fontFamily
@@ -5815,6 +7519,7 @@ Panel {
                   opacity: 0.85
                 }
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: "...................................................................................................."
                   color: root.bar.foreground
@@ -5824,6 +7529,7 @@ Panel {
                   font.pixelSize: root.fontSize
                 }
                 Text {
+                  textFormat: Text.PlainText
                   text: root.kvPersistence ? "on" : "off"
                   color: root.kvPersistence ? Commons.Color.accent : root.bar.foreground
                   font.family: root.bar.fontFamily
@@ -5845,7 +7551,65 @@ Panel {
               }
             }
 
+            Rectangle {
+              Layout.fillWidth: true
+              implicitHeight: 26
+              radius: 3
+              color: startOnLoginHover.hovered
+                ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                : "transparent"
+
+              RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(4)
+                anchors.rightMargin: Style.space(4)
+                spacing: Style.space(4)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Start on login"
+                  color: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSize
+                  opacity: 0.85
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  Layout.fillWidth: true
+                  text: "...................................................................................................."
+                  color: root.bar.foreground
+                  opacity: 0.15
+                  elide: Text.ElideRight
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSize
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  text: root.startOnLogin ? "on" : "off"
+                  color: root.startOnLogin ? Commons.Color.accent : root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSize
+                  opacity: root.startOnLogin ? 1.0 : 0.6
+                }
+              }
+
+              HoverHandler { id: startOnLoginHover; cursorShape: Qt.PointingHandCursor }
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.startOnLogin = !root.startOnLogin
+              }
+              PanelToolTip {
+                visible: startOnLoginHover.hovered
+                fontSize: root.fontSize
+                text: root.routerMode && root.backend === "llamacpp"
+                  ? "Start the router automatically when the shell starts, a few seconds in"
+                  : "Start this server automatically when the shell starts, a few seconds in"
+              }
+            }
+
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: root.canTakeOver
               text: "Watching the " + root.backendSpec.systemUnit + " system service. " +
@@ -5859,6 +7623,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: root.ownsUnit && root.backend === "ollama" && root.systemModelsDir !== ""
               text: "Serving models from " + root.systemModelsDir +
@@ -5873,6 +7638,7 @@ Panel {
             Item { Layout.fillWidth: true; Layout.preferredHeight: Style.space(4) }
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: root.backend === "systemone"
               text: "System One"
@@ -5935,6 +7701,7 @@ Panel {
             Item { Layout.fillHeight: true }
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               text: root.hardwareSummary !== "" ? root.hardwareSummary : "Detecting hardware…"
               color: root.bar.foreground
@@ -5945,6 +7712,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: root.lastError !== ""
               text: root.lastError
@@ -5980,6 +7748,7 @@ Panel {
                 spacing: Style.space(4)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "Model"
                   color: root.bar.foreground
                   font.family: root.bar.fontFamily
@@ -5988,6 +7757,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: "...................................................................................................."
                   color: root.bar.foreground
@@ -5998,6 +7768,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   Layout.maximumWidth: modelRow.width * 0.72
                   text: root.selectedModelLabel !== ""
                         ? root.selectedModelLabel
@@ -6014,8 +7785,12 @@ Panel {
               HoverHandler { id: modelRowHover }
               PanelToolTip {
                 visible: modelRowHover.hovered
+                // A file path from the model scan, rendered by a shared
+                // tooltip whose Text format the plugin cannot set. Only the
+                // dynamic fragment is neutralised, so the plugin's own
+                // multi-line wording keeps its newlines.
                 text: root.launchModel !== ""
-                      ? root.launchModel.replace(Quickshell.env("HOME"), "~")
+                      ? Model.plainText(root.launchModel.replace(Quickshell.env("HOME"), "~"), 300)
                       : "Pick the model this server loads."
               }
             }
@@ -6041,6 +7816,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Filter"
                     color: root.bar.foreground
                     opacity: 0.7
@@ -6049,6 +7825,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -6070,6 +7847,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     visible: root.modelFilter !== ""
                     text: "×"
                     Layout.leftMargin: Style.space(8)
@@ -6139,6 +7917,7 @@ Panel {
                           spacing: Style.space(4)
 
                           Text {
+                            textFormat: Text.PlainText
                             text: isDir ? (open ? "-" : "+") : "·"
                             color: current ? Commons.Color.accent : root.bar.foreground
                             opacity: current ? 1.0 : 0.45
@@ -6147,6 +7926,7 @@ Panel {
                           }
 
                           Text {
+                            textFormat: Text.PlainText
                             Layout.fillWidth: true
                             text: isDir ? node.name : node.label
                             color: current ? Commons.Color.accent : root.bar.foreground
@@ -6161,6 +7941,7 @@ Panel {
                             spacing: Style.space(4)
 
                             Text {
+                              textFormat: Text.PlainText
                               visible: isDir
                               text: isDir ? String(node.count) : ""
                               color: current ? Commons.Color.accent : root.bar.foreground
@@ -6206,6 +7987,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   anchors.centerIn: parent
                   visible: root.modelRows.length === 0
                   text: root.activeScanning
@@ -6232,6 +8014,7 @@ Panel {
             BuildPickerRow { }
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: root.running && !root.routerMode && root.runningModel !== "" &&
                        root.launchModel !== root.runningModel &&
@@ -6245,6 +8028,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               text: {
                 if (root.activeScanning) return "Scanning…"
@@ -6279,6 +8063,7 @@ Panel {
               spacing: Style.space(6)
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: {
                   if (root.launchModel === "")
@@ -6327,6 +8112,7 @@ Panel {
                     : "transparent"
 
                   Text {
+                    textFormat: Text.PlainText
                     id: pageNumber
                     anchors.centerIn: parent
                     text: modelData
@@ -6372,6 +8158,7 @@ Panel {
                 anchors.rightMargin: Style.space(4)
 
                 Text {
+                  textFormat: Text.PlainText
                   // "Reading parameters…" only while there is nothing to
                   // offer: a removed row can be restored without any
                   // catalogue at all, and a refresh in the background should
@@ -6469,6 +8256,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "KV cache k/v"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -6476,6 +8264,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -6485,6 +8274,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.cacheTypeK + " / " + root.cacheTypeV
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -6492,6 +8282,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: cacheHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -6537,6 +8328,7 @@ Panel {
                     width: parent.width
                     spacing: 6
                     Text {
+                      textFormat: Text.PlainText
                       text: "Cache type K"
                       color: root.bar.foreground
                       opacity: 0.7
@@ -6551,6 +8343,7 @@ Panel {
                       onChanged: function(v) { root.cacheTypeK = v }
                     }
                     Text {
+                      textFormat: Text.PlainText
                       text: "Cache type V"
                       color: root.bar.foreground
                       opacity: 0.7
@@ -6568,6 +8361,7 @@ Panel {
                 }
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("cacheType") && root.rowHasIgnoredFlag("cacheType")
@@ -6595,6 +8389,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Flash attn"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -6602,6 +8397,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -6611,6 +8407,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.flashAttn
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -6618,6 +8415,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: flashHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -6655,6 +8453,7 @@ Panel {
                 }
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("flashAttn") && root.rowHasIgnoredFlag("flashAttn")
@@ -6684,6 +8483,7 @@ Panel {
                   visible: !nglRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "GPU layers"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -6691,6 +8491,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -6700,6 +8501,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.gpuLayers
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -6707,6 +8509,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: nglHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -6729,6 +8532,7 @@ Panel {
                   visible: nglRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "GPU layers"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -6785,6 +8589,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "MoE on CPU"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -6792,6 +8597,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -6801,6 +8607,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.cpuMoe ? "all" : (root.nCpuMoe !== "" ? root.nCpuMoe : "off")
                     color: root.cpuMoe ? Commons.Color.accent : root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -6808,6 +8615,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: moeHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -6855,6 +8663,7 @@ Panel {
                     width: parent.width
                     spacing: 6
                     Text {
+                      textFormat: Text.PlainText
                       text: "Layers whose experts stay on CPU"
                       color: root.bar.foreground
                       opacity: 0.7
@@ -6871,6 +8680,7 @@ Panel {
                       onEditingFinished: root.nCpuMoe = text
                     }
                     Text {
+                      textFormat: Text.PlainText
                       Layout.fillWidth: true
                       text: (root.cpuMoe ? "✓ " : "") + "All layers (--cpu-moe)"
                       color: root.cpuMoe ? Commons.Color.accent : root.bar.foreground
@@ -6890,6 +8700,7 @@ Panel {
                 }
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("cpuMoe") && root.rowHasIgnoredFlag("cpuMoe")
@@ -6919,6 +8730,7 @@ Panel {
                   visible: !ctxRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Context"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -6926,6 +8738,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -6935,6 +8748,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.contextSize !== "" ? root.contextSize : "0"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -6942,6 +8756,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: ctxHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -6964,6 +8779,7 @@ Panel {
                   visible: ctxRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Context"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7002,6 +8818,7 @@ Panel {
                 }
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("ctxSize") && root.rowHasIgnoredFlag("ctxSize")
@@ -7031,6 +8848,7 @@ Panel {
                   visible: !threadsRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Threads"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7038,6 +8856,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -7047,6 +8866,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.threads !== "" ? root.threads : "auto"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7054,6 +8874,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: threadsHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -7076,6 +8897,7 @@ Panel {
                   visible: threadsRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Threads"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7114,6 +8936,7 @@ Panel {
                 }
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("threads") && root.rowHasIgnoredFlag("threads")
@@ -7141,6 +8964,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Batch / ubatch"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7148,6 +8972,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -7157,6 +8982,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: (root.batchSize !== "" ? root.batchSize : "auto") + " / " +
                           (root.ubatchSize !== "" ? root.ubatchSize : "auto")
                     color: root.bar.foreground
@@ -7165,6 +8991,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: batchHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -7210,6 +9037,7 @@ Panel {
                     width: parent.width
                     spacing: 6
                     Text {
+                      textFormat: Text.PlainText
                       text: "Batch"
                       color: root.bar.foreground
                       opacity: 0.7
@@ -7224,6 +9052,7 @@ Panel {
                       onEditingFinished: root.batchSize = text
                     }
                     Text {
+                      textFormat: Text.PlainText
                       text: "Ubatch"
                       color: root.bar.foreground
                       opacity: 0.7
@@ -7241,6 +9070,7 @@ Panel {
                 }
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("batchSize") && root.rowHasIgnoredFlag("batchSize")
@@ -7270,6 +9100,7 @@ Panel {
                   visible: !parallelRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Slots (-np)"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7277,6 +9108,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -7286,6 +9118,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.parallel !== "" ? root.parallel : "auto"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7293,6 +9126,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: parallelHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -7315,6 +9149,7 @@ Panel {
                   visible: parallelRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Slots (-np)"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7354,6 +9189,7 @@ Panel {
                 }
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("parallel") && root.rowHasIgnoredFlag("parallel")
@@ -7381,6 +9217,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Reasoning trace"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7388,6 +9225,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -7397,6 +9235,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.reasoningPreserve
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7404,6 +9243,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: reasoningHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -7441,6 +9281,7 @@ Panel {
                 }
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("reasoning") && root.rowHasIgnoredFlag("reasoning")
@@ -7468,6 +9309,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Speculative"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7475,6 +9317,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -7484,6 +9327,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.specType
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7491,6 +9335,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: specHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -7555,6 +9400,7 @@ Panel {
                 }
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("specType") && root.rowHasIgnoredFlag("specType")
@@ -7582,6 +9428,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Vision projector"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7589,6 +9436,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -7598,6 +9446,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.mmprojMode + (root.mmprojActive ? " · offload " + root.mmprojOffload : "")
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7605,6 +9454,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: visionHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -7630,7 +9480,7 @@ Panel {
                 PanelToolTip {
                   visible: visionHoverArea.containsMouse
                   text: root.detectedMmproj !== ""
-                    ? "Found next to this model:\n" + root.detectedMmproj +
+                    ? "Found next to this model:\n" + Model.plainText(root.detectedMmproj, 300) +
                       "\n\nauto: use it · off: --no-mmproj · custom: name another file"
                     : "auto: use a projector found next to the model — none was\noff: --no-mmproj · custom: name a file"
                 }
@@ -7655,6 +9505,7 @@ Panel {
                     width: parent.width
                     spacing: 6
                     Text {
+                      textFormat: Text.PlainText
                       text: "Projector mode"
                       color: root.bar.foreground
                       opacity: 0.7
@@ -7669,6 +9520,7 @@ Panel {
                       onChanged: function(v) { root.mmprojMode = v }
                     }
                     Text {
+                      textFormat: Text.PlainText
                       text: "Offload"
                       color: root.bar.foreground
                       opacity: root.mmprojActive ? 0.7 : 0.3
@@ -7700,6 +9552,7 @@ Panel {
                 }
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("vision") && root.rowHasIgnoredFlag("vision")
@@ -7729,6 +9582,7 @@ Panel {
                   visible: !extraRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Paste args"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7736,6 +9590,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -7745,6 +9600,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.extraArgs !== "" ? "..." : "—"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7752,6 +9608,7 @@ Panel {
                     opacity: 0.5
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: extraHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -7774,6 +9631,7 @@ Panel {
                   visible: extraRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Paste args"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7812,6 +9670,7 @@ Panel {
                 }
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("extraArgs") && root.rowHasIgnoredFlag("extraArgs")
@@ -7853,6 +9712,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Environment"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -7860,6 +9720,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -7869,6 +9730,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.maximumWidth: envRow.width * 0.5
                     text: {
                       var n = root.parsedEnv.env.length
@@ -7883,6 +9745,7 @@ Panel {
                     elide: Text.ElideRight
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "v"
                     color: root.bar.foreground
                     opacity: 0.5
@@ -7890,6 +9753,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: envHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -8007,6 +9871,7 @@ Panel {
                               spacing: Style.space(4)
 
                               Text {
+                                textFormat: Text.PlainText
                                 Layout.preferredWidth: Style.space(110)
                                 text: modelData.name
                                 color: root.bar.foreground
@@ -8024,6 +9889,7 @@ Panel {
                                 onTextEdited: { envPopup.draft[index].value = text; envPopup.dirty = true }
                               }
                               Text {
+                                textFormat: Text.PlainText
                                 text: "×"
                                 Layout.leftMargin: Style.space(8)
                                 color: envVarHover.hovered ? Commons.Color.urgent : root.bar.foreground
@@ -8045,6 +9911,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       Layout.fillWidth: true
                       visible: root.parsedEnv.invalid.length > 0
                       text: "Ignored: " + root.parsedEnv.invalid.join(" ")
@@ -8081,6 +9948,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       Layout.fillWidth: true
                       visible: envPopup.error !== ""
                       text: envPopup.error
@@ -8122,6 +9990,7 @@ Panel {
                   visible: !modelAliasRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Model alias"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -8129,6 +9998,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -8138,6 +10008,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.modelAlias !== "" ? root.modelAlias : (ModelsIni.deriveDefaultAlias(root.currentModel()) || "auto")
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -8145,6 +10016,7 @@ Panel {
                     opacity: root.modelAlias !== "" ? 0.85 : 0.45
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: modelAliasHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -8167,6 +10039,7 @@ Panel {
                   visible: modelAliasRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Model alias"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -8225,6 +10098,7 @@ Panel {
                   visible: !systemoneCtxRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "System One context"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -8232,6 +10106,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -8241,6 +10116,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.systemoneCtx !== "" ? root.systemoneCtx : "0"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -8248,6 +10124,7 @@ Panel {
                     opacity: 0.85
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: systemoneCtxHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -8270,6 +10147,7 @@ Panel {
                   visible: systemoneCtxRow.editing
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "System One context"
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -8308,6 +10186,7 @@ Panel {
                 }
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("systemoneCtx") && root.rowHasIgnoredFlag("systemoneCtx")
@@ -8348,6 +10227,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: spec ? spec.label : modelData.key
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -8356,6 +10236,7 @@ Panel {
                     elide: Text.ElideRight
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: "...................................................................................................."
                     color: root.bar.foreground
@@ -8365,6 +10246,7 @@ Panel {
                     font.pixelSize: root.fontSize
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: customRow.ptype === "bool"
                       ? (modelData.value === "true" ? "on" : "off")
                       : (String(modelData.value) !== "" ? modelData.value : "—")
@@ -8376,6 +10258,7 @@ Panel {
                     Layout.maximumWidth: Style.space(140)
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: "×"
                     Layout.leftMargin: Style.space(8)
                     color: customHover.containsMouse ? Commons.Color.urgent : root.bar.foreground
@@ -8402,7 +10285,9 @@ Panel {
                 }
                 PanelToolTip {
                   visible: customHover.containsMouse
-                  text: modelData.key + (spec && spec.description ? "\n" + spec.description : "")
+                  // Both come from the build's own --help output.
+                  text: Model.plainText(modelData.key, 120) +
+                        (spec && spec.description ? "\n" + Model.plainText(spec.description, 300) : "")
                 }
 
                 Popup {
@@ -8482,6 +10367,7 @@ Panel {
             // a llama.cpp profile is not passed; name it instead of letting
             // envPrefix drop it silently.
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: root.backend === "ollama" && root.ollamaInvalidParams.length > 0
               text: "Ignored by ollama (not OLLAMA_* variables): " +
@@ -8497,6 +10383,7 @@ Panel {
             // reaches the server unannounced is the invisible state splitting
             // was meant to end.
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: root.effectiveTuningPage === 0 &&
                        String(root.extraArgs).trim() !== "" && root.paramCatalogue.length > 0
@@ -8511,6 +10398,7 @@ Panel {
             // Unlike stray args, these are dropped: a token that is not
             // NAME=value has no safe meaning in front of the server command.
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: root.builtinOnPage("envVars") && root.parsedEnv.invalid.length > 0
               text: "Ignored in Environment (not NAME=value): " + root.parsedEnv.invalid.join(" ")
@@ -8549,6 +10437,7 @@ Panel {
             spacing: Style.space(8)
 
             Text {
+              textFormat: Text.PlainText
               text: "Log"
               color: root.bar.foreground
               font.family: root.bar.fontFamily
@@ -8557,6 +10446,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               text: "...................................................................................................."
               color: root.bar.foreground
@@ -8567,6 +10457,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               text: logView.stickToBottom ? "live" : "paused"
               color: logView.stickToBottom ? Commons.Color.accent : root.bar.foreground
               opacity: logView.stickToBottom ? 1.0 : 0.5
@@ -8575,6 +10466,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               text: logModel.count + " line" + (logModel.count === 1 ? "" : "s")
               color: root.bar.foreground
               opacity: 0.45
@@ -8652,6 +10544,7 @@ Panel {
             // Say which it is: no journal for this server, or one attached
             // and simply quiet so far.
             Text {
+              textFormat: Text.PlainText
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.top: parent.top
@@ -8683,6 +10576,7 @@ Panel {
               border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
 
               Text {
+                textFormat: Text.PlainText
                 id: followLabel
                 anchors.centerIn: parent
                 text: logView.missedLines > 0

@@ -49,3 +49,12 @@ test("detached launches prefix umask 077 in both carriers", () => {
     assert.ok(argv.includes("umask 077; echo hi"), argv.join(" "))
   }
 })
+
+test("the launch declares a private umask on the unit as well as in the script", () => {
+  // Slot files hold the prompt's token ids. The shell prefix covers the
+  // setsid fallback, which has no unit; the property means the protection
+  // does not rest on that prefix alone.
+  const argv = B.detachedCommand(true, "u", "echo hi")
+  assert.ok(argv.includes("--property=UMask=0077"), argv.join(" "))
+  assert.ok(argv.includes("umask 077; echo hi"), argv.join(" "))
+})

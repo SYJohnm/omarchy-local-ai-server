@@ -1,8 +1,22 @@
 # TODO — audit fixes
 
-## Retirement du relais — étapes 1 à 4 terminées (2026-11-05)
+> **État réel au 2026-11-07.** Deux choses différentes portent le nom « router »
+> et la section ci-dessous ne parlait que de la première :
+>
+> 1. **Le relais Python de ce widget** (`router/relay.py`, `Router.js`,
+>    l'unité `*-llamacpp-router.service`) — **retiré**, comme décrit plus bas.
+> 2. **Le router natif de llama-server** (`--models-preset` + `models.ini`) —
+>    **revenu et actif** : c'est le bouton « Router: ON/OFF » de la page Server
+>    (llama.cpp seulement, modifiable serveur arrêté), piloté par `routerMode`
+>    et `ModelsIni.js`. Le cache de prompt est désactivé dans ce mode.
+>
+> Autrement dit, « le relais est retiré » reste vrai, mais « le panneau ne lance
+> qu'un llama-server direct » ne l'est plus. README.md décrit les deux modes.
 
-Fait, d'après PLAN.md : le panneau ne lance plus que le llama-server direct persistant.
+## Retirement du relais Python — étapes 1 à 4 terminées (2026-11-05)
+
+Fait, d'après PLAN.md : le panneau ne lance plus de relais Python intermédiaire.
+(Le router *natif* de llama-server, lui, est un mode à part — voir l'encadré.)
 
 - [x] `routerMode`/`directLaunch`/`routerDesired` supprimés ; start/stop/
       switch/restart sans branche relais ; `maybeAutoResume`/autoResumeTimer
@@ -18,8 +32,20 @@ Fait, d'après PLAN.md : le panneau ne lance plus que le llama-server direct per
 - [x] Extraction du `slot` dans `parseTimingLine` et `parsePromptProgressLine` (Model.js).
 - [x] Indexation par instance supportée dans `Backends.unitName` et `Backends.procMarker`.
 - [x] Tests verts (135), `omarchy plugin validate .` passe sans erreur.
-- [ ] Étape 6 du plan : multi-instances complet dans l'UI (`instanceCount`, défaut 1),
-      load/unload par ligne, fork par instance, stats/hover agrégées de l'icône de barre.
+- [x] Étape 6 du plan : multi-instances complet dans l'UI (`instanceCount`, défaut 1),
+      load/unload par ligne, fork par instance, stats agrégées de l'icône de barre.
+      `Instances.js` (pur, testé) + `InstanceRunner` par index > 0 ; l'index 0
+      reste le serveur géré par les propriétés du panel (cycle restart, logs,
+      hooks, cache KV).
+- [ ] Reste de l'étape 6 : la carte de survol (`PopupCard`) montre encore les
+      seules métriques de l'index 0 — une ligne par instance (modèle, fork,
+      port, t/s, pp%) reste à faire.
+- [ ] Un `.tmp` de slot abandonné (instance détruite pendant une sauvegarde)
+      n'est balayé par rien : `Model.slotFilePrefix` n'accepte que
+      `*.slot<N>.bin`.
+- [ ] i18n : le plugin n'a pas de `i18n/` et n'utilise pas `Commons.Translations`
+      (Omarchy tourne en 50 langues, cf. le guide des plugins). ~200 chaînes à
+      extraire en clés — chantier à part.
 
 Working checklist for the 20 findings in the 3.3.0 audit. Each item is done when
 the code is changed and the test suite still passes.
@@ -174,6 +200,69 @@ the code is changed and the test suite still passes.
 - [ ] Per-build env from profiles — deliberately global for now.
 - [x] `Service.plan()` is wired to observed `LoadState/ActiveState/UnitFileState`
       and health; desired running state is persisted as `routerDesired`.
+
+## Passe design / QoL (2026-11-07)
+
+- [x] **Marque de barre.** `BAR_ICON` passe de « AI » à un glyphe Nerd Font
+      serveur (U+F233) : `WidgetButton.isIconGlyph` lui donne la fente d'icône
+      de la barre, donc la marque s'aligne enfin sur les autres widgets.
+- [x] **Point de statut.** Un point sur la marque distingue arrêté / démarrage /
+      actif-au-repos, invisible dès qu'un débit s'affiche (le chiffre le dit
+      déjà). Règle l'ambiguïté « `AI` = arrêté ou lancé mais inactif ? ».
+- [x] **Largeur de barre stable.** `TextMetrics` mesure le plus long relevé
+      possible ; le bouton tient cette largeur tant qu'un chiffre s'affiche, donc
+      la barre ne respire plus à chaque token.
+- [x] **Découvrabilité du clic droit.** La carte de survol rappelle ce que font
+      clic et clic droit, au lieu de ne l'écrire que dans le README.
+- [x] **Changement de backend à chaud.** Le picker n'est plus désactivé pendant
+      l'exécution : `requestBackend` arrête le serveur courant (donc la bonne
+      unité, cache sauvegardé), bascule le backend une fois l'arrêt terminé, puis
+      démarre dès que le nouveau backend a un modèle (`maybeAutoStartSwitched`).
+- [x] **Re-run setup.** Action dans Settings ; l'appel IPC du README n'était pas
+      découvrable.
+- [x] **Ménage du cache de prompt.** Settings affiche la taille occupée et
+      propose de supprimer les slots orphelins. Logique pure et testée
+      (`Model.slotOrphans`, 10 tests) ; l'offre n'apparaît qu'avec un catalogue
+      non vide, et seuls les fichiers nommés sont supprimés.
+- [x] **Docs réconciliées** avec le retour du router natif (README, TODO,
+      manifest).
+- [x] Sparkline : branche `if/else` identique supprimée.
+
+## Démarrage auto + lisibilité des débits (2026-11-07)
+
+- [x] **Start on login.** Bascule sur la page Server (`startOnLogin`, persistée
+      dans `settings.json`). Le widget démarre son propre serveur — pas une
+      unité systemd séparée, qui deviendrait obsolète dès que le tuning, le
+      modèle ou le build change. En mode router, démarre le router.
+- [x] **Déclenchement sans polling.** `autoStartReady` est un binding sur toutes
+      les conditions (settings, sondes capacités/builds, binaire résolu, modèle
+      si nécessaire) ; `onAutoStartReadyChanged` arme un timer de 3 s.
+- [x] **Un seul tir par session** (`autoStartDone`) : un Stop manuel n'est pas
+      défait par un changement ultérieur d'une des entrées.
+- [x] **Garde anti-écrasement.** `adoptProbed` attend la réponse de la sonde
+      d'adoption, puis `systemctl --user is-active` tranche avant de lancer :
+      un serveur déjà debout mais encore en chargement ne répond pas à
+      `/health`, et démarrer là-dessus balayait l'unité et jetait un
+      chargement presque terminé.
+- [x] **Carte de survol.** Le débit du prompt et sa progression s'affichent
+      désormais **ensemble** (nombre + barre de progression animée) ; avant,
+      l'un chassait l'autre. Légende ajoutée au sparkline, qui ne trace que la
+      génération.
+
+### Reste de cette passe
+
+- [ ] **Découper `Panel.qml` (≈8 900 lignes).** Les trois pages
+      (`currentPage === 0/1/2`) sont les candidats évidents à
+      `ServerPage.qml` / `ModelPage.qml` / `TuningPage.qml`. Non fait ici :
+      un fichier QML séparé perd l'accès à `root.*` et aux `component` inline,
+      ce qui impose de recâbler des milliers de lignes — à faire page par page,
+      en rechargeant le shell entre chaque, pas d'un bloc.
+- [ ] **`routerMode` est écrit à deux endroits.** `setWidgetSetting("routerMode",…)`
+      l'écrit dans `shell.json`, où *rien* ne le relit (la clé est absente du
+      schéma du manifest) ; la valeur qui fait foi est celle de
+      `settings.json` (lue dans `loadSettings`). Choisir une seule source.
+- [ ] **`PLAN.md` existe encore** alors que le point 17 plus bas le déclare
+      supprimé.
 
 ## Remaining for the release
 

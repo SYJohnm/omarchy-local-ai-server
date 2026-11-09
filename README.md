@@ -3,15 +3,24 @@
 An Omarchy bar widget that starts, stops and monitors a local inference server —
 **llama.cpp** (`llama-server`) or **ollama** — with live prompt and generation
 throughput in the bar. A third **System One** backend serves decision models on
-a separate port (8081 by default). One backend runs at a time; the picker is
-disabled while the server is running, so stop it before switching.
+a separate port (8081 by default). One backend runs at a time; picking another
+one while a server is running stops it first, then starts the new one as soon as
+it has a model to launch.
 
 <a href="preview.png"><img src="preview.png" alt="Server, Model and Tuning of the panel"></a>
 
 In the bar it shows the mark while idle and the live rate while running —
 <img src="docs/screenshots/bar.png" height="20" alt="15.0 t/s"> — or, while a
 prompt is being read, how far along it is and how fast (`52% - 63 t/s`).
-Right-click to hide or show the rate again.
+Right-click to hide or show the rate again. The mark is a server glyph in the
+bar's icon slot; a dot on it separates a stopped server from one that is up and
+idle, and while a rate is showing the slot keeps a minimum width, so a ticking
+number stops reflowing the bar without ever clipping a long reading. Hovering
+the mark opens a card with the model, endpoint, build, both rates, a sparkline
+of recent generation, and a reminder of what click and right-click do. The card
+shows the prompt's **rate and its progress at the same time** — the rate as a
+number, how far along it is as a filling bar — rather than dropping one to show
+the other.
 
 ollama embeds llama.cpp, so both backends log the same timing lines and one
 parser handles both. ollama resolves the rates per completed request rather
@@ -32,7 +41,8 @@ the diff before applying.
 
 On first open the panel runs a short **setup**: pick a backend, choose a models
 folder, and start from tuning suggested for your hardware. Choices are saved to
-this widget's settings in `shell.json`; run it again any time with
+this widget's settings in `shell.json`; run it again any time from **Re-run
+setup** in Settings, or with
 `qs -p /usr/share/omarchy/shell ipc call local-ai-server setup`.
 
 ## Remove
@@ -164,6 +174,74 @@ Slot files contain the prompt's token ids, so they are private by default: the
 cache directory is `0700`, saved files are `0600`, and detached launches run
 under `umask 077`.
 
+A slot is the size of a context, and the cache of a model you later delete or
+move is not reclaimed by anything else, so the folder grows quietly. **Settings**
+shows what the caches currently occupy, and offers to remove the orphaned ones —
+those whose model file is no longer on disk. Opening Settings walks the model
+folders (the main ones plus System One's, since both backends save slots) and
+keeps every cache backed by a model found there, under both the current and the
+pre-hash file name. The offer is withheld entirely when that walk finds no
+models at all, so a folder that is missing or not yet mounted cannot present
+every cache as orphaned, and the removal passes the named files only, never a
+pattern.
+
+## Start on login
+
+**Start on login** on the Server page starts the server by itself a few seconds
+after the shell comes up, so the endpoint is there without opening the panel. In
+router mode that brings up the router, and every model in the preset is servable
+straight away.
+
+It is the widget that starts it, not a systemd unit of its own: the widget is
+what resolves the build, renders the router preset from the current profiles and
+owns the tuned argv, so a standalone unit would go stale the moment any of those
+changed.
+
+It fires once per shell session, so a manual **Stop** stays stopped. It waits
+for the binary, the build list and the model to resolve first, and it checks the
+systemd unit before launching — a server that is already up but still loading
+its weights does not answer `/health` yet, and starting on that would sweep the
+unit and throw away a load that was nearly finished.
+
+If the models live on a disk that is mounted at boot, nothing special is needed:
+`local-fs.target` is reached long before the shell starts. A models folder that
+is still missing when this fires simply leaves the server stopped.
+
+## Several servers at once
+
+**Server instances** (plugin settings, default 1) is how many persistent
+`llama-server` instances the widget manages. Each index gets its own transient
+unit, its own port (`host:port` and the ports above it), its own model and its
+own build, and the Server page lists them with per-row Start, Unload and
+Restart. The bar shows one number for the whole widget: generation rates are
+added up, since that is what the machine is producing, while a prompt being
+read is a single event and the furthest-along one is reported instead.
+
+A model already assigned to another index is not offered again — two servers on
+one model would hold the weights twice and write the same prompt-cache files.
+
+llama.cpp only, and a single instance in **router mode**, where one process
+already answers for every model in `models.ini`. Extra instances also need a
+systemd user session: the `setsid` fallback has no unit to adopt or watch, so
+with several servers there would be no honest way to report their state.
+Lowering the number stops the instances above it, including ones left running
+by a previous session.
+
+## Knowing when a server has gone
+
+A server that crashed, was OOM-killed, or was stopped from a terminal is
+reported as gone rather than left showing its last reading. `/health` keeps
+being polled after a start answers — slowly, as a liveness check rather than a
+readiness one — and three missed polls in a row (one is not enough; a server
+decoding on a loaded machine can be slower than the timeout) marks it stopped
+with the last meaningful line from its log. The transient unit's own state is
+watched as well, which is what catches a crash during model load, when nothing
+has answered `/health` yet and nothing ever will.
+
+The rate is released a few seconds after the last token, so **idle** means
+idle: it used to be cleared only by a stop, which left the rate of a request
+that finished an hour ago on the bar for as long as the server ran.
+
 ## Surviving `omarchy restart shell`
 
 The server is launched detached as a transient systemd user unit with
@@ -182,11 +260,29 @@ controls, and serves the same model store.
 
 ## Direct llama-server and prompt cache persistence
 
-llama.cpp models are served directly by `llama-server` without an intermediate
-proxy. Switching models or changing builds automatically drains active `/slots`,
-saves prompt KV caches (`slot_kv.py save`), replaces or restarts the systemd
-user unit with the target model and tuned argv, and restores the prompt cache
-once the health endpoint responds.
+llama.cpp models are served directly by `llama-server` — there is no relay
+process of this widget's own in front of it. Switching models or changing builds
+automatically drains active `/slots`, saves prompt KV caches (`slot_kv.py save`),
+replaces or restarts the systemd user unit with the target model and tuned argv,
+and restores the prompt cache once the health endpoint responds.
+
+## Router mode
+
+The Server page has a **Router** toggle (llama.cpp only, and only while the
+server is stopped). It is off by default, which is the single-model mode
+described above: one model, named on the launch line, loaded at start.
+
+Turned on, the widget launches `llama-server` with `--models-preset` instead of
+`--model`. llama-server then serves *every* model in the preset natively and
+loads or unloads them per request, so a client picks the model by name and the
+widget never has to restart to switch. The preset INI is regenerated from the
+current profiles by the launch script itself, so it always matches what the
+Tuning page holds rather than whatever was saved last; the Model page follows
+whichever model the router reports as loaded.
+
+The trade-off is the prompt cache: slot save/restore is a single-model operation
+and is **disabled while router mode is on**. Leave it off if restoring a long
+prompt across restarts matters more than switching models without one.
 
 ## Scripting
 

@@ -95,13 +95,16 @@ function metricText(showMetric, ppActive, ppPercent, tokensPerSec, ppTokensPerSe
   return ""
 }
 
-// The mark is the word itself: two letters need no badge or vendor logo, and
-// they inherit the bar's font and colour, so the widget stays monochrome.
-var BAR_ICON = "AI"
+// The mark is a Nerd Font server glyph (nf-fa-server, U+F233): it inherits the
+// bar's font and colour so the widget stays monochrome, and WidgetButton gives
+// a single PUA glyph the bar's fixed icon slot, so the idle mark lines up with
+// every other bar icon instead of being two letters of body text. Status
+// (stopped / up-idle / running) is carried by the dot overlaid on it.
+var BAR_ICON = ""
 
 // The mark identifies the widget; a live number identifies it just as well
-// and says more, so the two never share the slot. AI shows while the server
-// is idle, stopped, or has its metrics hidden; pp and tg replace it outright.
+// and says more, so the two never share the slot. The glyph shows while the
+// server is idle, stopped, or has its metrics hidden; pp and tg replace it.
 function barText(icon, running, showMetric, ppActive, ppPercent, tokensPerSec, ppTokensPerSec) {
   if (!running) return icon
   var m = metricText(showMetric, ppActive, ppPercent, tokensPerSec, ppTokensPerSec)
@@ -595,9 +598,110 @@ function paginateRows(rows, capacity, firstPageReserved) {
   return pages
 }
 
+// ---- Prompt-cache housekeeping ----
+//
+// Slot files are "<prefix>.slot<N>.bin". A cache whose model has been deleted
+// or moved is never reclaimed by anything else, and a slot is the size of a
+// context, so a library churned over a few months leaves gigabytes behind.
+
+// The prefix a slot file belongs to, or "" when the name is not a slot file.
+// Anything unrecognised returns "" so the sweep leaves it alone.
+function slotFilePrefix(name) {
+  var m = /^(.+)\.slot\d+\.bin$/.exec(String(name || ""))
+  return m ? m[1] : ""
+}
+
+// Parses "<size>\t<name>" lines (find -printf '%s\t%f\n') into {name, size}.
+function parseSlotListing(text) {
+  var out = []
+  var lines = String(text || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i]
+    if (line === "") continue
+    var tab = line.indexOf("\t")
+    if (tab <= 0) continue
+    var size = parseInt(line.slice(0, tab), 10)
+    var name = line.slice(tab + 1)
+    // A name with a path separator did not come from this flat listing.
+    if (!isFinite(size) || name === "" || name.indexOf("/") !== -1) continue
+    out.push({ name: name, size: size })
+  }
+  return out
+}
+
+// The slot files no model backs any more. `keep` holds every prefix still
+// claimed by a known model, in both the hashed and the pre-hash spelling.
+function slotOrphans(files, keep) {
+  var list = files || []
+  var keepList = keep || []
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    var prefix = slotFilePrefix(list[i] && list[i].name)
+    if (prefix === "") continue
+    if (keepList.indexOf(prefix) === -1) out.push(list[i])
+  }
+  return out
+}
+
+function totalSlotBytes(files) {
+  var list = files || []
+  var total = 0
+  for (var i = 0; i < list.length; i++) total += (list[i] && list[i].size) || 0
+  return total
+}
+
+// Bytes as the panel shows them: one decimal, binary units.
+function formatBytes(bytes) {
+  var n = Number(bytes) || 0
+  if (n <= 0) return "0 B"
+  var units = ["B", "KB", "MB", "GB", "TB"]
+  var i = 0
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++ }
+  return (i === 0 ? String(Math.round(n)) : n.toFixed(1)) + " " + units[i]
+}
+
+// ---- Untrusted text ----
+//
+// QML Text defaults to Text.AutoText, which interprets markup-shaped input as
+// rich text -- and rich text fetches what it is pointed at, so a single
+// `<img src="http://host/x">` in a string the plugin displays becomes a
+// network request from Omarchy's unsandboxed shell. The plugin's own Text
+// elements declare Text.PlainText, but the shared components it renders
+// through (tooltips, dropdown rows, button labels) own their Text and expose
+// no format, so anything dynamic handed to one of those is neutralised here
+// first. Omarchy ships no helper for this.
+//
+// Nothing the plugin displays in those places legitimately contains angle
+// brackets: model file names, build labels, flags and endpoints do not, and a
+// chat template's `<|im_start|>` only ever appears in the log view, which is
+// a plugin-owned PlainText element and is not routed through here.
+var PLAIN_TEXT_LIMIT = 400
+
+function plainText(value, limit) {
+  var s = String(value === undefined || value === null ? "" : value)
+  // Tag-shaped runs, including one left unclosed at the end of the string.
+  s = s.replace(/<[^>]*>?/g, "")
+  // Any stray bracket, so nothing can be reassembled across a replacement.
+  s = s.replace(/[<>]/g, "")
+  // Control characters, line separators and zero-width/bidi marks: a label is
+  // one line, and an invisible character is only ever there to mislead.
+  s = s.replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2028\u2029\u2066-\u2069\ufeff]/g, " ")
+  s = s.replace(/\s+/g, " ").replace(/^ | $/g, "")
+  var max = (typeof limit === "number" && limit > 0) ? Math.floor(limit) : PLAIN_TEXT_LIMIT
+  if (s.length > max) s = s.slice(0, Math.max(1, max - 1)) + "…"
+  return s
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
+    PLAIN_TEXT_LIMIT: PLAIN_TEXT_LIMIT,
+    plainText: plainText,
     statusLabel: statusLabel,
+    slotFilePrefix: slotFilePrefix,
+    parseSlotListing: parseSlotListing,
+    slotOrphans: slotOrphans,
+    totalSlotBytes: totalSlotBytes,
+    formatBytes: formatBytes,
     stopPlan: stopPlan,
     parseTimingLine: parseTimingLine,
     parsePromptProgressLine: parsePromptProgressLine,
