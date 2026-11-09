@@ -68,6 +68,7 @@ Panel {
   // When set, Start launches llama-server in its own router mode
   // (--models-preset over the converted models.ini) instead of one model.
   property bool routerMode: false
+  onRouterModeChanged: if (root.settingsLoaded) root.scheduleSettingsSave()
   property var systemoneScannedOptions: []
   property bool systemoneScanning: false
   // Blank means "auto-detect": reuse the main model scan, which already
@@ -1022,8 +1023,15 @@ Panel {
   }
 
   // Models already claimed by another index (or by the primary). Two servers
-  // on one model would write the same prompt-cache files and waste the VRAM
-  // twice over, so a row does not offer what another row already has.
+  // on one model would write the same prompt-cache files and hold the weights
+  // twice, so a row does not offer what another row already has, and
+  // InstanceRunner.start() refuses it even when the assignment arrived from a
+  // hand-edited settings file.
+  //
+  // It is one-directional: the first server's picker is the Model page's own
+  // and is not filtered, so it can still be pointed at a model an extra
+  // instance holds. The cost is a rejected cache restore and a cold start, not
+  // a corrupt file -- slot_kv.py writes to a .tmp and renames.
   // The runner object for an index above 0, or null.
   function runnerFor(index) {
     for (var i = 0; i < extraInstances.count; i++) {
@@ -3931,6 +3939,12 @@ Panel {
       // The INI is written by the launch script itself so the preset matches
       // the profiles the page holds right now, not whatever was saved last.
       var iniData = ModelsIni.fromProfiles(root.profiles, root.currentModel())
+      // Mode "auto" means "the projector sitting beside the model", which only
+      // the model scan can resolve -- so it is handed to the serialiser per
+      // entry. Without it, router mode emitted no projector for an auto model
+      // while the direct launch passed --mmproj, and vision silently stopped
+      // working for that model behind the router.
+      for (var mp in iniData.models) iniData.models[mp].autoMmproj = root.mmprojFor(mp)
       var iniText = ModelsIni.toRouterIni(iniData)
       var rArgs = ModelsIni.routerLaunchArgs(root.launchLlamaBinary, root.host, root.port,
                                              root.routerPresetPath, {
@@ -4967,6 +4981,15 @@ Panel {
     function start() {
       if (inst.running || inst.starting || inst.stopping) return
       if (inst.model === "") { inst.lastError = "Pick a model for this instance first"; return }
+      // Two servers on one model hold the weights twice and write the same
+      // prompt-cache files. The row's picker already hides a claimed model,
+      // but the assignment can also come from a hand-edited settings file.
+      var claimed = root.modelClaimedBy(inst.idx, inst.model)
+      if (claimed !== -1) {
+        inst.lastError = "That model is already served by " +
+          (claimed === 0 ? "the first server" : "instance " + claimed)
+        return
+      }
       if (!root.hasSystemdRun) {
         // The setsid fallback has no unit to adopt or watch, and several
         // detached servers with no unit between them is not something this
@@ -5007,6 +5030,10 @@ Panel {
         cudaEnv + (userEnv !== "" ? userEnv + " " : "") +
         "exec -a " + inst.procMarker + " " + args.map(root.shellQuote).join(" ")
       inst.ownLaunch.command = Backends.detachedCommand(root.hasSystemdRun, inst.unitName, script)
+      // Captured plainly: unitName is derived from instancePlan, and the
+      // teardown path runs while that plan is shrinking. The value is correct
+      // there today, but nothing in the code says it has to be.
+      inst.liveUnitName = inst.unitName
       inst.ownsUnit = true
       inst.adopted = false
       inst.runningModel = inst.model
@@ -5061,7 +5088,9 @@ Panel {
     // with it. execDetached outlives the object.
     function shutdownForRemoval() {
       if (!inst.running && !inst.starting) return
-      Quickshell.execDetached(["systemctl", "--user", "stop", inst.unitName])
+      var unit = inst.liveUnitName !== "" ? inst.liveUnitName : inst.unitName
+      if (unit === "") return
+      Quickshell.execDetached(["systemctl", "--user", "stop", unit])
     }
 
     function restart() {
@@ -5070,6 +5099,9 @@ Panel {
       inst.stop()
     }
     property bool restartAfterStop: false
+    // The unit this instance actually launched or adopted, held as a plain
+    // value so a teardown never has to re-evaluate a binding to find it.
+    property string liveUnitName: ""
 
     function resetMetrics() {
       inst.tokensPerSec = 0
@@ -7197,8 +7229,14 @@ Panel {
                           : "Serve every model in models.ini from one process"
                         enabled: !root.running && !root.starting && !root.stopping
                         onClicked: {
+                          // routerMode lives in settings.json (loadSettings /
+                          // flushSettings), not in the manifest -- it has no
+                          // schema entry and is never read through setting().
+                          // This used to call setWidgetSetting, which wrote a
+                          // key nothing reads, so the toggle was lost on the
+                          // next shell start unless an unrelated edit happened
+                          // to schedule a save.
                           root.routerMode = !root.routerMode
-                          root.setWidgetSetting("routerMode", root.routerMode)
                         }
                       }
 
@@ -7219,8 +7257,14 @@ Panel {
                               : "Needs a model, a llama.cpp build, a free port and a systemd user session")
                         enabled: instRow.isPrimary
                           ? (!root.stopping && (root.running ? root.canStop : true))
+                          // ownsUnit, not canStop: canStop requires `running`,
+                          // so Unload rendered and stayed disabled for the
+                          // whole startup window -- up to startupTimeoutSec,
+                          // ten minutes, with no way to cancel a model that
+                          // was never going to load. InstanceRunner.stop()
+                          // handles the starting case already.
                           : (instRow.up || instRow.state.starting
-                              ? !!instRow.state.canStop && !instRow.state.stopping
+                              ? !!instRow.state.ownsUnit && !instRow.state.stopping
                               : !!instRow.state.launchable)
                         onClicked: instRow.isPrimary
                           ? root.toggleServer()

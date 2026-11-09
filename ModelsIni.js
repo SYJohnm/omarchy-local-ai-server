@@ -336,7 +336,6 @@ var ROUTER_KEY_MAP = {
   parallel: "parallel",
   nCpuMoe: "n-cpu-moe",
   keepAlive: "keep-alive",
-  mmprojPath: "mmproj",
   temperature: "temperature",
   flashAttn: "flash-attn"
 }
@@ -367,18 +366,40 @@ function toRouterIni(iniData) {
     var entry = iniData.models[modelPath]
     var tuning = entry.common || {}
     var alias = String(tuning.alias || "").trim() || deriveDefaultAlias(modelPath)
-    // Stale duplicate aliases point at moved/renamed models; the first (live)
-    // profile wins, matching the model list order.
-    if (seenAliases[alias]) continue
+    // The default alias is the file's base name, so two real models with the
+    // same name in different folders collide. Skipping the second dropped it
+    // from the preset entirely -- it became unreachable by any name in router
+    // mode, with nothing saying so. A collision is suffixed instead.
+    if (seenAliases[alias]) {
+      var n = 2
+      while (seenAliases[alias + "-" + n]) n++
+      alias = alias + "-" + n
+    }
     seenAliases[alias] = true
     out += "\n[" + alias + "]\n"
     out += "model = " + modelPath + "\n"
 
-    // Projector: off means never load one; otherwise the paths the tuning
-    // page recorded decide, and GPU offload of the projector stays opt-in.
-    if (String(tuning.mmprojMode) === "off") out += "no-mmproj = true\n"
-    if (String(tuning.mmprojOffload) === "on") out += "mmproj-offload = true\n"
-    else if (tuning.mmprojPath) out += "no-mmproj-offload = true\n"
+    // Projector. The mode decides, which it did not before: mmprojPath sat in
+    // ROUTER_KEY_MAP, so the generic loop below emitted "mmproj = <path>"
+    // whenever a path was stored -- next to "no-mmproj = true" under mode
+    // "off" (contradictory), and under mode "auto" it emitted the custom path
+    // the user had already switched away from.
+    //
+    // "auto" means "the projector beside the model", which only the caller can
+    // resolve, so it is passed in as autoMmproj; without it auto emits nothing
+    // and llama.cpp applies its own default.
+    var mmprojMode = String(tuning.mmprojMode || "auto")
+    var projector = ""
+    if (mmprojMode === "custom") projector = String(tuning.mmprojPath || "").trim()
+    else if (mmprojMode === "auto") projector = String(entry.autoMmproj || "").trim()
+
+    if (mmprojMode === "off") out += "no-mmproj = true\n"
+    else if (projector !== "") out += "mmproj = " + projector + "\n"
+
+    if (mmprojMode !== "off" && projector !== "") {
+      if (String(tuning.mmprojOffload) === "on") out += "mmproj-offload = true\n"
+      else out += "no-mmproj-offload = true\n"
+    }
 
     // INI booleans take true/false, so the tri-state on/off flags become the
     // flag itself or its --no- counterpart.
@@ -401,7 +422,11 @@ function toRouterIni(iniData) {
 
     // Extra args are stored as raw llama.cpp tokens ("--flag value"); re-emit
     // them as INI pairs so a value still lands on the right flag.
-    var pieces = String(tuning.extraArgs || "").split(/[\t ]+/).filter(Boolean)
+    // Semicolons separate fragments here as they do everywhere else in the
+    // plugin (Model.splitExtraArgs). Splitting on whitespace alone turned
+    // "--temp 0.5; --no-warmup" into the value "0.5;" and a bare ";" into
+    // its own "; = true" key.
+    var pieces = String(tuning.extraArgs || "").split(/[\t ;]+/).filter(Boolean)
     for (var i = 0; i < pieces.length; i++) {
       var token = String(pieces[i])
       if (token === "--") continue

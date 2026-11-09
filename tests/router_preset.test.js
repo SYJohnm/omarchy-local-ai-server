@@ -2,6 +2,9 @@
 const test = require("node:test")
 const assert = require("node:assert")
 const ModelsIni = require("../ModelsIni.js")
+const Profiles = require("../Profiles.js")
+
+const MODEL = "/models/Router-Case-Q4_K_M.gguf"
 
 // fromProfiles() yields camelCase tuning keys.
 const iniData = ModelsIni.fromProfiles({
@@ -73,7 +76,7 @@ test("a model without a profile gets only its path, under a derived alias", () =
   assert.equal(iniValue(ini, "second", "model"), "/models/Second.gguf")
 })
 
-test("on/off flags use true/false or their no- form, and duplicate aliases collapse", () => {
+test("on/off flags use true/false or their no- form, and a duplicate alias is suffixed", () => {
   const src = ModelsIni.fromProfiles({
     "llamacpp::/models/Real.gguf": { alias: "dup", reasoningPreserve: "on" },
     "llamacpp::/models/Stale-Q4-K-M.gguf": { alias: "dup", reasoningPreserve: "off" },
@@ -84,6 +87,10 @@ test("on/off flags use true/false or their no- form, and duplicate aliases colla
   assert.equal(iniValue(ini, "dup", "reasoning-preserve"), "true")
   assert.equal(iniValue(ini, "dup", "no-reasoning-preserve"), null)
   assert.equal((ini.match(/^\[dup\]$/gm) || []).length, 1)
+  // The second model keeps its section under a suffixed alias. Dropping it
+  // made it unreachable by any name in router mode.
+  assert.equal(iniValue(ini, "dup-2", "model"), "/models/Stale-Q4-K-M.gguf")
+  assert.equal(iniValue(ini, "dup-2", "no-reasoning-preserve"), "true")
   assert.equal(iniValue(ini, "other", "no-reasoning-preserve"), "true")
 })
 
@@ -111,4 +118,50 @@ test("generated preset is accepted by llama-server", () => {
   const out = String(r.stderr || "") + String(r.stdout || "")
   assert.doesNotMatch(out, /not recognized in preset|failed to parse server config/i)
   fs.unlinkSync(file)
+})
+
+test("extra args split on semicolons, as they are stored everywhere else", () => {
+  // Model.splitExtraArgs is the storage format. Splitting on whitespace alone
+  // put the semicolon inside the value ("temp = 0.5;") and turned a bare ";"
+  // into its own key.
+  const profiles = Profiles.setFor({}, "llamacpp", MODEL, "", { extraArgs: "--temp 0.5; --no-warmup" })
+  const lines = ModelsIni.toRouterIni(ModelsIni.fromProfiles(profiles, MODEL)).split("\n")
+  assert.ok(lines.includes("temp = 0.5"), lines.join("\n"))
+  assert.ok(lines.includes("no-warmup = true"), lines.join("\n"))
+  assert.ok(!lines.some(l => /;/.test(l)), "no semicolon may survive into a key or value")
+})
+
+test("the projector follows its mode instead of any stored path", () => {
+  const stored = { mmprojPath: "/m/stale-proj.gguf" }
+  const render = (tuning, autoMmproj) => {
+    const profiles = Profiles.setFor({}, "llamacpp", MODEL, "", tuning)
+    const data = ModelsIni.fromProfiles(profiles, MODEL)
+    if (autoMmproj !== undefined) data.models[MODEL].autoMmproj = autoMmproj
+    return ModelsIni.toRouterIni(data).split("\n").filter(l => /mmproj/.test(l))
+  }
+  // "off" used to emit no-mmproj AND mmproj = <path>, which contradict.
+  assert.deepStrictEqual(render(Object.assign({ mmprojMode: "off" }, stored)), ["no-mmproj = true"])
+  // "auto" used to emit the custom path the user had switched away from.
+  assert.deepStrictEqual(render(Object.assign({ mmprojMode: "auto" }, stored)), [])
+  // "auto" with a projector beside the model must match the direct launch,
+  // which passes --mmproj <detected>; otherwise vision dies behind the router.
+  assert.deepStrictEqual(
+    render(Object.assign({ mmprojMode: "auto" }, stored), "/m/beside-proj.gguf"),
+    ["mmproj = /m/beside-proj.gguf", "no-mmproj-offload = true"])
+  assert.deepStrictEqual(render(Object.assign({ mmprojMode: "custom" }, stored)),
+    ["mmproj = /m/stale-proj.gguf", "no-mmproj-offload = true"])
+})
+
+test("two models with the same file name both reach the preset", () => {
+  // The default alias is the base name. Skipping the collision dropped the
+  // second model from the preset entirely -- unreachable by any name.
+  const a = "/models/a/Qwen3-8B-Q4_K_M.gguf"
+  const b = "/mnt/nvme/Qwen3-8B-Q4_K_M.gguf"
+  let profiles = Profiles.setFor({}, "llamacpp", a, "", { threads: "4" })
+  profiles = Profiles.setFor(profiles, "llamacpp", b, "", { threads: "8" })
+  const ini = ModelsIni.toRouterIni(ModelsIni.fromProfiles(profiles, a))
+  assert.ok(ini.includes("model = " + a), ini)
+  assert.ok(ini.includes("model = " + b), ini)
+  const sections = ini.split("\n").filter(l => l.startsWith("["))
+  assert.strictEqual(new Set(sections).size, 2, "both sections, distinct aliases: " + sections)
 })
