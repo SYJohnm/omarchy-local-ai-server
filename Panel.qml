@@ -57,9 +57,15 @@ Panel {
   // One set, written as escapes rather than literal private-use characters so
   // the source stays readable and survives a copy or a diff. These are Nerd
   // Font (nf-fa-*), the same set the bar mark already uses for its server
-  // glyph, so the panel and the bar agree. Before this they were three
-  // different sets at once: U+00D7 multiplication for remove, U+2212 minus
-  // for the stepper, and a latin letter "v" standing in for a chevron.
+  // glyph, so the panel and the bar agree. Before this they were four
+  // different sets at once: U+00D7 multiplication and U+2715 for remove,
+  // U+2212 minus for the stepper, and a latin letter "v" as a chevron.
+  //
+  // No fallback is needed. Omarchy installs JetBrainsMono Nerd Font and the
+  // shell draws in it, and every codepoint below was checked against the
+  // shipped TTF -- worth doing, because Nerd Fonts v3 relocated part of the
+  // Font Awesome block, so "the font is installed" is not the same as "this
+  // glyph exists".
   readonly property var icons: ({
     check: "\uf00c",     // nf-fa-check
     remove: "\uf00d",    // nf-fa-times
