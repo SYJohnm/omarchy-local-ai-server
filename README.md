@@ -2,10 +2,10 @@
 
 An Omarchy bar widget that starts, stops and monitors a local inference server —
 **llama.cpp** (`llama-server`) or **ollama** — with live prompt and generation
-throughput in the bar. A third **System One** backend serves decision models on
-a separate port (8081 by default). One backend runs at a time; picking another
-one while a server is running stops it first, then starts the new one as soon as
-it has a model to launch.
+throughput in the bar. One chat backend runs at a time; picking another one
+while a server is running stops it first, then starts the new one as soon as it
+has a model to launch. A **System One** decision model runs *alongside* it, on
+its own port and its own build.
 
 <a href="preview.png"><img src="preview.png" alt="Server, Model and Tuning of the panel"></a>
 
@@ -226,6 +226,27 @@ systemd user session: the `setsid` fallback has no unit to adopt or watch, so
 with several servers there would be no honest way to report their state.
 Lowering the number stops the instances above it, including ones left running
 by a previous session.
+
+## Decision model alongside the chat model
+
+A System One decision model answers typed queries (Laya, Julia-1, lev) on its
+own endpoint, costs almost no VRAM, and is most useful while a chat model is
+loaded. It used to be a third *backend*, so choosing it stopped the chat
+server — backwards for what it is. It is a companion now: **Decision model**
+on the Server page turns it on, and it runs whatever the chat side is doing,
+router mode included.
+
+**It picks its own llama.cpp build.** That is the point of it: decision models
+and their endpoints need a current llama.cpp, which is exactly what someone
+running an older optimised fork for chat does not have. The two servers are
+separate processes with separate binaries, separate ports and separate tuning
+profiles, so neither constrains the other.
+
+Its port defaults to 8081 and is held back from the chat instances, so
+`instanceCount` 2 gives the chat side 8080 and 8082 rather than colliding with
+it. A settings file that had System One selected as its backend turns the
+companion on and leaves chat on llama.cpp, which is what selecting it stood in
+for.
 
 ## Knowing when a server has gone
 

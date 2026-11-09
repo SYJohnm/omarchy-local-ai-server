@@ -52,17 +52,43 @@ function supportsMultiple(backendId, routerMode) {
 }
 
 /**
- * Port for an index, or 0 when portBase + index does not fit in a port.
- * Returning 0 rather than a wrapped number is deliberate: the caller skips an
- * instance it cannot address instead of launching one on a nonsense port.
+ * Port for an index, or 0 when it does not fit in a port.
+ *
+ * Allocation walks up from the base, skipping anything reserved. The decision
+ * companion's port is reserved, because it defaults to 8081 -- which is
+ * exactly what chat instance 1 would otherwise be handed, and both would try
+ * to bind it. Returning 0 rather than a wrapped number is deliberate: the
+ * caller skips an instance it cannot address instead of launching one on a
+ * nonsense port.
+ *
+ * @param {string|number} portBase
+ * @param {number} index
+ * @param {Array<string|number>} [reserved] ports this allocation must avoid
  */
-function portFor(portBase, index) {
+function portFor(portBase, index, reserved) {
   var base = parseInt(portBase, 10)
   var n = parseInt(index, 10)
   if (!isFinite(base) || base < 1 || !isFinite(n) || n < 0) return 0
-  var port = base + n
-  if (port < 1 || port > MAX_PORT) return 0
-  return port
+
+  var taken = {}
+  var list = reserved || []
+  for (var r = 0; r < list.length; r++) {
+    var p = parseInt(list[r], 10)
+    // The base itself is never skipped: index 0 is the server the page has
+    // always managed, and moving it would orphan whatever is already running.
+    if (isFinite(p) && p > 0 && p !== base) taken[p] = true
+  }
+
+  var port = base
+  var seen = 0
+  while (port <= MAX_PORT) {
+    if (!taken[port]) {
+      if (seen === n) return port
+      seen++
+    }
+    port++
+  }
+  return 0
 }
 
 /**
@@ -74,6 +100,8 @@ function portFor(portBase, index) {
  * @param {string|number} input.portBase
  * @param {number} input.count
  * @param {boolean} [input.routerMode]
+ * @param {Array<string|number>} [input.reserved] ports to skip (the decision
+ *        companion's, so a chat instance never collides with it)
  * @param {function} input.unitName    Backends.unitName
  * @param {function} input.procMarker  Backends.procMarker
  * @returns {Array<{index:number, port:number, unitName:string, procMarker:string, primary:boolean}>}
@@ -85,7 +113,7 @@ function plan(input) {
   var procMarker = typeof cfg.procMarker === "function" ? cfg.procMarker : function() { return "" }
   var out = []
   for (var i = 0; i < count; i++) {
-    var port = portFor(cfg.portBase, i)
+    var port = portFor(cfg.portBase, i, cfg.reserved)
     // Index 0 is the panel's own server; it is listed even if the port is
     // unusable so the page can show why, but a surplus index with no port is
     // simply not offered.

@@ -37,6 +37,10 @@ Fait, d'après PLAN.md : le panneau ne lance plus de relais Python intermédiair
       `Instances.js` (pur, testé) + `InstanceRunner` par index > 0 ; l'index 0
       reste le serveur géré par les propriétés du panel (cycle restart, logs,
       hooks, cache KV).
+- [x] System One devient un compagnon : tourne en parallèle du serveur de chat,
+      sur son propre port (réservé dans l'allocation des instances) et son
+      propre build — un fork ancien pour le chat, llama.cpp à jour pour les
+      modèles de décision. Plus un choix de backend.
 - [ ] Reste de l'étape 6 : la carte de survol (`PopupCard`) montre encore les
       seules métriques de l'index 0 — une ligne par instance (modèle, fork,
       port, t/s, pp%) reste à faire.

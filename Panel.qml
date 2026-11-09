@@ -57,8 +57,72 @@ Panel {
   readonly property string configuredSystemoneModelsDir: setting("systemoneModelsDir", "")
   // Blank means "use the preferred llama-server", the same binary the chat
   // backend runs. A separate build only matters for a fork.
+  // ---- Decision model (System One), running alongside the chat server ----
+  //
+  // System One used to be a third backend, so choosing it stopped the chat
+  // server. That is backwards for what it is: a decision model answers typed
+  // queries on its own endpoint, costs almost no VRAM, and is most useful
+  // while a chat model is loaded. It also needs a *current* llama.cpp, which
+  // is exactly the build a user running an older optimised fork for chat does
+  // not have -- so it needs its own binary as well as its own port, and both
+  // servers have to be up at once.
+  //
+  // Everything it needs was already separate: its own default port (8081), its
+  // own unit suffix (sys1), its own model and models directory, its own launch
+  // args and its own profile namespace. Only the exclusive `backend` choice
+  // stood in the way.
+  property bool decisionEnabled: false
+  onDecisionEnabledChanged: if (root.settingsLoaded) root.scheduleSettingsSave()
+  // Which llama.cpp build serves it, "" meaning the configured binary or the
+  // preferred llama-server. Separate from the chat build on purpose: this is
+  // the whole point of running it alongside an older fork.
+  property string systemoneBuild: ""
+  readonly property var systemoneResolvedBuild:
+    root.systemoneBuild !== "" ? (Backends.findBuild(root.llamaBuilds, root.systemoneBuild) || null) : null
+  readonly property string systemonePort: {
+    var stored = root.backendPorts["systemone"]
+    if (stored !== undefined && String(stored).trim() !== "") return String(stored)
+    return String(Backends.get("systemone").defaultPort)
+  }
+  readonly property string systemoneUnitName: Backends.unitName(root.moduleName, "systemone")
+  readonly property string systemoneProcMarker: Backends.procMarker(root.moduleName, "systemone")
+
+  function setSystemonePort(value) {
+    var trimmed = String(value).trim()
+    if (trimmed === root.systemonePort) return
+    var next = {}
+    for (var key in root.backendPorts) next[key] = root.backendPorts[key]
+    next["systemone"] = trimmed
+    root.backendPorts = next
+    root.scheduleSettingsSave()
+  }
+
+  function setSystemoneBuild(value) {
+    root.systemoneBuild = String(value)
+    root.scheduleSettingsSave()
+  }
+
+  function toggleDecision() {
+    var runner = root.decisionRunner()
+    if (!runner) return
+    if (runner.running || runner.starting) runner.stop()
+    else runner.start()
+  }
+
+  function decisionRunner() {
+    for (var i = 0; i < decisionInstance.count; i++) {
+      var runner = decisionInstance.objectAt(i)
+      if (runner) return runner
+    }
+    return null
+  }
+
+  readonly property var decisionState: root.extraSnapshots["decision"] || null
+
   readonly property string activeSystemoneBinary:
-    root.configuredSystemoneBinary !== "" ? expandPath(root.configuredSystemoneBinary) : root.launchLlamaBinary
+    root.systemoneResolvedBuild && String(root.systemoneResolvedBuild.path || "") !== ""
+      ? String(root.systemoneResolvedBuild.path)
+      : (root.configuredSystemoneBinary !== "" ? expandPath(root.configuredSystemoneBinary) : root.launchLlamaBinary)
   // Real path of that binary when the build probe knows it; empty otherwise.
   // Used to notice a build change, since argv[0] is the process marker.
   readonly property string activeSystemoneExe: {
@@ -994,6 +1058,10 @@ Panel {
     portBase: root.port,
     count: root.requestedInstanceCount,
     routerMode: root.routerMode,
+    // The companion's port is held back whether or not it is running: a chat
+    // instance must not be handed the port the decision model will bind when
+    // it is turned on.
+    reserved: [root.systemonePort],
     unitName: Backends.unitName,
     procMarker: Backends.procMarker
   })
@@ -1154,18 +1222,26 @@ Panel {
     root.extraSnapshots = next
   }
 
-  function retireInstance(index) {
+  function retireInstance(key) {
     var next = {}
+    // Compared as strings: the decision companion publishes under "decision",
+    // and Number("decision") is NaN, which never equals itself -- so a numeric
+    // comparison would have kept the very entry being retired.
     for (var k in root.extraSnapshots)
-      if (Number(k) !== Number(index)) next[k] = root.extraSnapshots[k]
+      if (String(k) !== String(key)) next[k] = root.extraSnapshots[k]
     root.extraSnapshots = next
   }
 
+  // The chat instances only. Driven by the count, so the decision companion's
+  // named key is not in it; the bar adds it in separately.
   readonly property var instanceStates: {
     var out = []
     for (var i = 0; i < root.instanceCount; i++) out.push(root.instanceState(i))
     return out
   }
+  // Everything this widget is running, for the bar's one number.
+  readonly property var allStates:
+    root.decisionState ? root.instanceStates.concat([root.decisionState]) : root.instanceStates
 
   // The state of one index, by index rather than by position. A runner
   // publishes a frame or two after its index appears, so until then the row
@@ -1193,9 +1269,9 @@ Panel {
   // What the bar reports for the widget as a whole. With several servers
   // decoding at once the sum is what the machine is actually doing; ingestion
   // is a single-prompt event, so the furthest-along prompt is reported instead.
-  readonly property real aggregateRate: Instances.aggregateRate(root.instanceStates)
-  readonly property var leadingPrompt: Instances.leadingPrompt(root.instanceStates)
-  readonly property int instancesRunning: Instances.runningCount(root.instanceStates)
+  readonly property real aggregateRate: Instances.aggregateRate(root.allStates)
+  readonly property var leadingPrompt: Instances.leadingPrompt(root.allStates)
+  readonly property int instancesRunning: Instances.runningCount(root.allStates)
   readonly property bool anyInstanceRunning: root.instancesRunning > 0
 
   // Set once the capability probe has reported, so the backend list and the
@@ -1207,7 +1283,10 @@ Panel {
   readonly property var installedBackends: Backends.installedBackends({
     llamacpp: root.llamaBinary !== "" || root.altBinary !== "" || root.llamaBuilds.length > 0,
     ollama: root.ollamaBinary !== "",
-    systemone: root.activeSystemoneBinary !== ""
+    // No longer a backend to switch to: the decision model is a companion
+    // that runs alongside whichever chat backend is selected, so offering it
+    // here would mean stopping the chat server to gain it.
+    systemone: false
   }, root.capabilitiesProbed)
 
   // A saved backend that is not installed here (settings copied from another
@@ -1365,7 +1444,13 @@ Panel {
   // Extra args are stored as semicolon-separated fragments ("--temp 0.5; --foo");
   // System One takes an argv token list, so parse each fragment first.
   function extraArgTokens() {
-    var pieces = Model.splitExtraArgs(root.extraArgs)
+    return root.extraArgTokensFor(root.extraArgs)
+  }
+
+  // The same split for an arbitrary profile's extra args, which is what a
+  // companion or an extra instance launches with.
+  function extraArgTokensFor(extraArgs) {
+    var pieces = Model.splitExtraArgs(extraArgs)
     var out = []
     for (var i = 0; i < pieces.length; i++) out = out.concat(Model.parseArgs(pieces[i]))
     return out
@@ -2138,6 +2223,14 @@ Panel {
     var parsed = read.parsed
     if (parsed && typeof parsed === "object") {
       if (typeof parsed.backend === "string" && Backends.ids().indexOf(parsed.backend) !== -1) root.backend = parsed.backend
+      // System One stopped being a backend choice and became a companion that
+      // runs alongside the chat server. A settings file that selected it as
+      // the backend turns the companion on and leaves chat on llama.cpp --
+      // which is what selecting it was standing in for.
+      if (root.backend === "systemone") {
+        root.backend = "llamacpp"
+        root.decisionEnabled = true
+      }
       // A file without the flag was written before setup existed, by an
       // install that is configured already.
       root.setupDone = typeof parsed.setupDone === "boolean" ? parsed.setupDone : true
@@ -2154,6 +2247,8 @@ Panel {
         seeded[root.backend] = parsed.port
         root.backendPorts = seeded
       }
+      if (typeof parsed.decisionEnabled === "boolean") root.decisionEnabled = parsed.decisionEnabled
+      if (typeof parsed.systemoneBuild === "string") root.systemoneBuild = parsed.systemoneBuild
       if (parsed.instanceModels && typeof parsed.instanceModels === "object") {
         var im = {}
         for (var mk in parsed.instanceModels) im[String(mk)] = String(parsed.instanceModels[mk])
@@ -2338,6 +2433,7 @@ Panel {
       backend: root.backend,
       host: root.host, backendPorts: root.backendPorts,
       instanceModels: root.instanceModels, instanceBuilds: root.instanceBuilds,
+      decisionEnabled: root.decisionEnabled, systemoneBuild: root.systemoneBuild,
       gpuLayers: root.gpuLayers, threads: root.threads,
       contextSize: root.contextSize, batchSize: root.batchSize, ubatchSize: root.ubatchSize,
       cacheTypeK: root.cacheTypeK, cacheTypeV: root.cacheTypeV,
@@ -4762,30 +4858,55 @@ Panel {
 
     property int idx: 1
 
-    readonly property var identity: root.instancePlan[inst.idx] || null
-    readonly property int port: inst.identity ? inst.identity.port : 0
-    readonly property string unitName: inst.identity ? inst.identity.unitName : ""
-    readonly property string procMarker: inst.identity ? inst.identity.procMarker : ""
+    // "chat" is an indexed llama.cpp instance; "decision" is the System One
+    // companion, which runs alongside whatever the chat side is doing and on
+    // its own build. Only the derived properties below differ -- the whole
+    // launch / adopt / watch lifecycle underneath is shared.
+    property string role: "chat"
+    readonly property bool decision: inst.role === "decision"
+    readonly property string backendId: inst.decision ? "systemone" : root.backend
+    // Where this runner publishes its state. A name rather than an index for
+    // the companion: it is not one of the chat instances.
+    readonly property string stateKey: inst.decision ? "decision" : String(inst.idx)
+    readonly property string title: inst.decision ? "Decision model" : "Instance " + inst.idx
+
+    readonly property var identity: inst.decision ? null : (root.instancePlan[inst.idx] || null)
+    readonly property int port: inst.decision
+      ? (parseInt(root.systemonePort, 10) || 0)
+      : (inst.identity ? inst.identity.port : 0)
+    readonly property string unitName: inst.decision
+      ? root.systemoneUnitName : (inst.identity ? inst.identity.unitName : "")
+    readonly property string procMarker: inst.decision
+      ? root.systemoneProcMarker : (inst.identity ? inst.identity.procMarker : "")
     readonly property string baseUrl: "http://" + root.host + ":" + inst.port
     readonly property string healthUrl: inst.baseUrl + "/health"
 
-    // The model and build this index serves, kept per index in settings so a
-    // shell restart finds the same assignment the user made.
-    readonly property string model: String(root.instanceModels[String(inst.idx)] || "")
-    readonly property string build: String(root.instanceBuilds[String(inst.idx)] || "")
-    readonly property var resolvedBuild:
-      inst.build !== "" ? (Backends.findBuild(root.llamaBuilds, inst.build) || root.autoBuild)
-                        : root.autoBuild
-    readonly property string binary:
-      inst.resolvedBuild && inst.resolvedBuild.real ? inst.resolvedBuild.real : root.launchLlamaBinary
-    // The model's own resolved profile, which is what makes an extra instance
-    // tuned rather than launched on defaults.
+    // The model and build this runner serves. Kept per index for a chat
+    // instance, and in the System One settings for the companion, so a shell
+    // restart finds the same assignment.
+    readonly property string model: inst.decision
+      ? root.systemoneModel : String(root.instanceModels[String(inst.idx)] || "")
+    readonly property string build: inst.decision
+      ? root.systemoneBuild : String(root.instanceBuilds[String(inst.idx)] || "")
+    readonly property var resolvedBuild: inst.decision
+      ? root.systemoneResolvedBuild
+      : (inst.build !== "" ? (Backends.findBuild(root.llamaBuilds, inst.build) || root.autoBuild)
+                           : root.autoBuild)
+    readonly property string binary: inst.decision
+      ? root.activeSystemoneBinary
+      : (inst.resolvedBuild && inst.resolvedBuild.real ? inst.resolvedBuild.real : root.launchLlamaBinary)
+    // The model's own resolved profile, which is what makes a runner tuned
+    // rather than launched on defaults. Keyed by its own backend, so the
+    // companion reads the System One namespace.
     readonly property var tuning:
-      Profiles.resolveFor(root.profiles, root.backend, inst.model, inst.build)
+      Profiles.resolveFor(root.profiles, inst.backendId, inst.model, inst.build)
 
-    readonly property bool launchable:
-      root.backend === "llamacpp" && !root.routerMode &&
-      inst.model !== "" && inst.binary !== "" && inst.port > 0 && root.hasSystemdRun
+    // The companion does not care which backend is selected or whether the
+    // chat side is in router mode: that independence is the point of it.
+    readonly property bool launchable: inst.decision
+      ? (inst.model !== "" && inst.binary !== "" && inst.port > 0 && root.hasSystemdRun)
+      : (root.backend === "llamacpp" && !root.routerMode &&
+         inst.model !== "" && inst.binary !== "" && inst.port > 0 && root.hasSystemdRun)
 
     property bool running: false
     property bool starting: false
@@ -4810,7 +4931,9 @@ Panel {
     // describes an instance. One binding over every displayed field, so a
     // single handler is enough to tell the panel that this row changed.
     readonly property var snapshotData: ({
-      index: inst.idx,
+      index: inst.decision ? -1 : inst.idx,
+      role: inst.role,
+      title: inst.title,
       port: inst.port,
       unitName: inst.unitName,
       procMarker: inst.procMarker,
@@ -4833,18 +4956,24 @@ Panel {
       launchable: inst.launchable,
       busy: inst.stopping
     })
-    onSnapshotDataChanged: root.publishInstance(inst.idx, inst.snapshotData)
-    Component.onDestruction: root.retireInstance(inst.idx)
+    onSnapshotDataChanged: root.publishInstance(inst.stateKey, inst.snapshotData)
+    Component.onDestruction: root.retireInstance(inst.stateKey)
 
     // ---- Lifecycle ----
 
     function start() {
       if (inst.running || inst.starting || inst.stopping) return
-      if (inst.model === "") { inst.lastError = "Pick a model for this instance first"; return }
+      if (inst.model === "") {
+        inst.lastError = inst.decision
+          ? "Pick a System One model first" : "Pick a model for this instance first"
+        return
+      }
       // Two servers on one model hold the weights twice and write the same
       // prompt-cache files. The row's picker already hides a claimed model,
       // but the assignment can also come from a hand-edited settings file.
-      var claimed = root.modelClaimedBy(inst.idx, inst.model)
+      // The companion serves its own namespace and its own cache prefix, so it
+      // never collides with a chat instance.
+      var claimed = inst.decision ? -1 : root.modelClaimedBy(inst.idx, inst.model)
       if (claimed !== -1) {
         inst.lastError = "That model is already served by " +
           (claimed === 0 ? "the first server" : "instance " + claimed)
@@ -4854,10 +4983,11 @@ Panel {
         // The setsid fallback has no unit to adopt or watch, and several
         // detached servers with no unit between them is not something this
         // page could report on honestly.
-        inst.lastError = "Extra instances need a systemd user session"
+        inst.lastError = (inst.decision ? "The decision model needs" : "Extra instances need") +
+          " a systemd user session"
         return
       }
-      if (inst.port <= 0) { inst.lastError = "No free port for this instance"; return }
+      if (inst.port <= 0) { inst.lastError = "No usable port for " + inst.title; return }
       inst.lastError = ""
       inst.failed = false
       inst.healthFailures = 0
@@ -4874,13 +5004,28 @@ Panel {
     }
 
     function launch() {
-      var args = root.buildLlamaArgs({
-        model: inst.model,
-        build: inst.resolvedBuild,
-        binary: inst.binary,
-        port: inst.port,
-        tuning: inst.tuning
-      })
+      var args = inst.decision
+        ? Backends.systemoneLaunchArgs(inst.binary, inst.model, root.host, inst.port,
+                                       expandPath(root.slotSaveDir), {
+            ngl: inst.tuning.gpuLayers,
+            cacheTypeK: inst.tuning.cacheTypeK,
+            cacheTypeV: inst.tuning.cacheTypeV,
+            loadMode: inst.tuning.loadMode,
+            threads: parseInt(inst.tuning.threads, 10),
+            cpuMoe: inst.tuning.cpuMoe,
+            nCpuMoe: inst.tuning.nCpuMoe,
+            parallel: inst.tuning.parallel,
+            systemoneCtx: inst.tuning.systemoneCtx,
+            extraPieces: root.extraArgTokensFor(inst.tuning.extraArgs),
+            propOverridden: function() { return false }
+          })
+        : root.buildLlamaArgs({
+            model: inst.model,
+            build: inst.resolvedBuild,
+            binary: inst.binary,
+            port: inst.port,
+            tuning: inst.tuning
+          })
       var dir = expandPath(root.slotSaveDir)
       var cudaEnv = Hardware.isCuda(root.hardware)
         ? "GGML_CUDA_REGISTER_HOST=1 GGML_CUDA_DISABLE_GRAPHS=1 " : ""
@@ -4918,7 +5063,7 @@ Panel {
       inst.ownSlotsTimer.stop()
       inst.ownUnitTimer.stop()
       if (root.kvPersistence && inst.running && inst.runningModel !== "" &&
-          Backends.supports(root.backend, "slotKv")) {
+          Backends.supports(inst.backendId, "slotKv")) {
         // Dump the prompt cache before the unit goes, same as the primary.
         // The stop runs from the save's completion whether it succeeded or not.
         inst.ownSlotSave.command = inst.slotKvCommand("save", inst.runningModel)
@@ -5014,7 +5159,7 @@ Panel {
       inst.ownStartingTimer.stop()
       inst.ownSlotsTimer.restart()
       if (root.kvPersistence && inst.runningModel !== "" &&
-          Backends.supports(root.backend, "slotKv")) {
+          Backends.supports(inst.backendId, "slotKv")) {
         inst.ownSlotRestore.command = inst.slotKvCommand("restore", inst.runningModel)
         inst.ownSlotRestore.running = false
         inst.ownSlotRestore.running = true
@@ -5098,7 +5243,7 @@ Panel {
           if (!inst.running || inst.starting || inst.stopping || inst.expectedStop) return
           inst.healthFailures += 1
           if (Instances.healthVerdict({ running: true, failures: inst.healthFailures }) === "gone")
-            inst.markGone("Instance " + inst.idx + " stopped answering on " + inst.healthUrl)
+            inst.markGone(inst.title + " stopped answering on " + inst.healthUrl)
         }
       }
     }
@@ -5112,7 +5257,7 @@ Panel {
         onStreamFinished: {
           var state = String(text || "").trim()
           if (state === "active" || state === "activating" || state === "") return
-          inst.markGone("Instance " + inst.idx +
+          inst.markGone(inst.title +
             (state === "failed" ? " crashed" : " stopped") + " (unit " + state + ")")
         }
       }
@@ -5210,7 +5355,7 @@ Panel {
       onTriggered: {
         inst.startingElapsed += 1
         if (inst.starting && inst.startingElapsed >= root.startupTimeoutSec) {
-          inst.markGone("Instance " + inst.idx + " gave up waiting after " +
+          inst.markGone(inst.title + " gave up waiting after " +
                         root.startupTimeoutSec + "s")
         }
       }
@@ -5289,6 +5434,18 @@ Panel {
       return "systemctl --user stop " + root.shellQuote(u) + " 2>/dev/null"
     })
     Quickshell.execDetached(["bash", "-lc", parts.join("; ") + "; true"])
+  }
+
+  // The decision companion. One runner, present only while it is enabled, so
+  // turning it off tears its server down the same way an index going away
+  // does. Independent of `backend` and of router mode by design.
+  Instantiator {
+    id: decisionInstance
+    model: root.decisionEnabled ? 1 : 0
+    delegate: InstanceRunner { role: "decision" }
+    onObjectRemoved: function(index, object) {
+      if (object) object.shutdownForRemoval()
+    }
   }
 
   Instantiator {
@@ -7538,68 +7695,211 @@ Panel {
               font.family: root.bar.fontFamily
               font.pixelSize: root.fontSize
             }
-            // System One section ------------------------------------------
+            // Decision model (System One) --------------------------------
+            //
+            // A companion, not a backend. It answers typed decisions on its
+            // own port, costs almost no VRAM, and is most useful while a chat
+            // model is loaded -- so choosing it used to stop the chat server,
+            // which was backwards. It also wants a current llama.cpp, which is
+            // exactly what a user running an older optimised fork for chat
+            // does not have, so it picks its own build.
             Item { Layout.fillWidth: true; Layout.preferredHeight: Style.space(4) }
 
-            Text {
-              textFormat: Text.PlainText
+            ColumnLayout {
               Layout.fillWidth: true
-              visible: root.backend === "systemone"
-              text: "System One"
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
-              font.bold: true
-            }
-
-            RowLayout {
-              Layout.fillWidth: true
-              visible: root.backend === "systemone"
               spacing: Style.space(4)
+
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: Style.space(6)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Decision model"
+                  color: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSizeSmall
+                  opacity: 0.6
+                  font.bold: true
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: root.decisionEnabled ? "on" : "off"
+                  color: root.decisionEnabled ? Commons.Color.accent : root.bar.foreground
+                  opacity: root.decisionEnabled ? 1.0 : 0.5
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSizeSmall
+                  MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -Style.space(4)
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.decisionEnabled = !root.decisionEnabled
+                  }
+                }
+                HoverHandler { id: decisionToggleHover }
+                PanelToolTip {
+                  visible: decisionToggleHover.hovered
+                  text: "Run a System One decision model alongside the chat server, " +
+                        "on its own port and its own llama.cpp build. Turning it off stops it."
+                }
+              }
+
+              Rectangle {
+                id: decisionCard
+                Layout.fillWidth: true
+                visible: root.decisionEnabled
+                implicitHeight: decisionCol.implicitHeight + Style.space(8)
+                radius: 4
+                readonly property var snap: root.decisionState
+                readonly property bool up: !!(decisionCard.snap && decisionCard.snap.running)
+                readonly property bool pending:
+                  !!(decisionCard.snap && (decisionCard.snap.starting || decisionCard.snap.stopping))
+                readonly property bool starting: !!(decisionCard.snap && decisionCard.snap.starting)
+                color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.03)
+                border.color: decisionCard.up
+                  ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.25)
+                  : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
+                border.width: 1
+
+                ColumnLayout {
+                  id: decisionCol
+                  anchors.fill: parent
+                  anchors.margins: Style.space(6)
+                  spacing: Style.space(4)
+
+                  RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Style.space(6)
+
+                    Rectangle {
+                      width: 8
+                      height: 8
+                      radius: 4
+                      color: decisionCard.up
+                        ? Commons.Color.accent
+                        : (decisionCard.pending
+                            ? Commons.Color.urgent
+                            : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.25))
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      text: "System One"
+                      color: root.bar.foreground
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: root.fontSize
+                      font.bold: true
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      text: ":" + root.systemonePort
+                      color: root.bar.foreground
+                      opacity: 0.5
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: root.fontSizeSmall
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      text: root.decisionState ? Instances.stateLabel(root.decisionState) : "stopped"
+                      color: decisionCard.up ? Commons.Color.accent : root.bar.foreground
+                      opacity: decisionCard.up ? 0.9 : 0.45
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: root.fontSizeSmall
+                    }
+                  }
+
+                  RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Style.space(4)
+
+                    SearchableDropdown {
+                      Layout.fillWidth: true
+                      showLabel: false
+                      enabled: !decisionCard.up && !decisionCard.pending
+                      opacity: enabled ? 1.0 : 0.5
+                      options: root.systemoneModelOptions
+                      value: root.systemoneModel
+                      placeholderText: "Search decision models…"
+                      emptyText: root.systemoneScanning ? "Scanning…" : "No models found"
+                      triggerLabel: root.systemoneModel === "" ? "Pick a decision model" : ""
+                      onChanged: function(v) { root.systemoneModel = v }
+                    }
+
+                    Button {
+                      text: "⟳"
+                      tooltipText: root.systemoneScanning ? "Scanning…" : "Rescan for decision models"
+                      enabled: !root.systemoneScanning
+                      onClicked: root.refreshSystemoneModels()
+                    }
+                  }
+
+                  // Its own build. The chat side can stay on an old fork.
+                  Dropdown {
+                    Layout.fillWidth: true
+                    showLabel: false
+                    enabled: !decisionCard.up && !decisionCard.pending
+                    opacity: enabled ? 1.0 : 0.5
+                    options: root.instanceBuildOptions()
+                    value: root.systemoneBuild
+                    onChanged: function(v) { root.setSystemoneBuild(v) }
+                  }
+
+                  RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Style.space(6)
+                    Item { Layout.fillWidth: true }
+
+                    Button {
+                      text: decisionCard.up || decisionCard.starting ? "Unload" : "Start"
+                      tooltipText: root.decisionState && root.decisionState.launchable
+                        ? ""
+                        : "Needs a decision model, a llama.cpp build, a free port and a systemd user session"
+                      enabled: root.decisionState
+                        ? (root.decisionState.running || root.decisionState.starting
+                            ? !!root.decisionState.ownsUnit && !root.decisionState.stopping
+                            : !!root.decisionState.launchable)
+                        : false
+                      onClicked: root.toggleDecision()
+                    }
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    Layout.fillWidth: true
+                    visible: !!(root.decisionState && String(root.decisionState.lastError || "") !== "")
+                    text: root.decisionState ? String(root.decisionState.lastError || "") : ""
+                    color: root.bar.urgent
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSizeSmall
+                  }
+                }
+              }
 
               TextField {
                 Layout.fillWidth: true
+                visible: root.decisionEnabled
                 text: root.configuredSystemoneBinary
-                placeholderText: "systemone binary path (blank = preferred llama-server)"
-                enabled: !root.running && !root.starting
-                opacity: enabled ? 1.0 : 0.45
+                placeholderText: "Binary override (blank = the build picked above)"
                 onEditingFinished: root.setSystemoneBinary(text)
               }
-            }
 
-            RowLayout {
-              Layout.fillWidth: true
-              visible: root.backend === "systemone"
-              spacing: Style.space(4)
-
-              SearchableDropdown {
+              TextField {
                 Layout.fillWidth: true
-                label: "System One Model"
-                showLabel: false
-                options: root.systemoneModelOptions
-                value: root.systemoneModel
-                placeholderText: "Select a System One model…"
-                emptyText: root.systemoneScanning ? "Scanning…" : "No models found"
-                triggerLabel: root.systemoneModel === "" ? "Select a System One model" : ""
-                onChanged: function(v) { root.systemoneModel = v }
+                visible: root.decisionEnabled
+                text: root.configuredSystemoneModelsDir
+                placeholderText: "Decision models directory (blank = main model scan)"
+                onEditingFinished: root.setSystemoneModelsDir(text)
               }
-
-              Button {
-                text: "⟳"
-                tooltipText: root.systemoneScanning ? "Scanning…" : "Rescan for System One models"
-                enabled: !root.systemoneScanning
-                onClicked: root.refreshSystemoneModels()
-              }
-            }
-
-            TextField {
-              Layout.fillWidth: true
-              visible: root.backend === "systemone"
-              text: root.configuredSystemoneModelsDir
-              placeholderText: "System One models directory (blank = main model scan)"
-              enabled: !root.running && !root.starting
-              opacity: enabled ? 1.0 : 0.45
-              onEditingFinished: root.setSystemoneModelsDir(text)
             }
 
             Item { Layout.fillHeight: true }

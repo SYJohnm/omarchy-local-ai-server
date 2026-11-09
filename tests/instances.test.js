@@ -13,6 +13,7 @@ function planFor(overrides) {
     backendId: "llamacpp",
     portBase: 8080,
     count: 1,
+    reserved: [],
     unitName: Backends.unitName,
     procMarker: Backends.procMarker
   }, overrides || {}))
@@ -59,6 +60,34 @@ test("a port that would not fit in 16 bits is refused, not wrapped", () => {
   assert.strictEqual(Instances.portFor(65535, 1), 0)
   assert.strictEqual(Instances.portFor(65534, 2), 0)
   assert.strictEqual(Instances.portFor(65534, 1), 65535)
+})
+
+test("a reserved port is skipped, so the decision companion is never collided with", () => {
+  // System One defaults to 8081, which is exactly what chat instance 1 would
+  // otherwise be handed from a base of 8080 -- and both would bind it.
+  assert.strictEqual(Instances.portFor(8080, 0, [8081]), 8080)
+  assert.strictEqual(Instances.portFor(8080, 1, [8081]), 8082)
+  assert.strictEqual(Instances.portFor(8080, 2, [8081]), 8083)
+  // Several reserved ports, in any order.
+  assert.strictEqual(Instances.portFor(8080, 1, [8083, 8081]), 8082)
+  assert.strictEqual(Instances.portFor(8080, 2, [8083, 8081]), 8084)
+})
+
+test("the base port is never skipped, even if it is reserved", () => {
+  // Index 0 is the server the page has always managed; moving it would orphan
+  // whatever is already running on it.
+  assert.strictEqual(Instances.portFor(8080, 0, [8080]), 8080)
+  assert.strictEqual(Instances.portFor(8080, 1, [8080]), 8081)
+})
+
+test("reserved ports are ignored when they are not ports", () => {
+  assert.strictEqual(Instances.portFor(8080, 1, ["", null, "abc", 0, -1]), 8081)
+  assert.strictEqual(Instances.portFor(8080, 1, undefined), 8081)
+})
+
+test("the plan routes around the companion's port", () => {
+  const rows = planFor({ count: 3, reserved: [8081] })
+  assert.deepStrictEqual(rows.map(r => r.port), [8080, 8082, 8083])
 })
 
 test("a nonsense base yields no port", () => {

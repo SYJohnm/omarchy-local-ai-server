@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.syjohnm.local-ai-server",
   "name": "Local AI Server",
-  "version": "3.8.0",
+  "version": "3.9.0",
   "author": "SYJohnm",
   "license": "MIT",
-  "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts. Direct llama-server, or native router mode serving every model from one process.",
+  "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts. Direct llama-server, or native router mode serving every model from one process. Several instances at once, plus a System One decision model alongside them on its own build.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Local AI Server",
-    "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts. Direct llama-server, or native router mode serving every model from one process.",
+    "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts. Direct llama-server, or native router mode serving every model from one process. Several instances at once, plus a System One decision model alongside them on its own build.",
     "category": "Dev",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -33,7 +33,7 @@
         "key": "backend",
         "type": "enum",
         "label": "Backend",
-        "description": "Which local server to manage. Can also be switched from the panel.",
+        "description": "Which chat server to manage. Can also be switched from the panel. A System One decision model runs alongside it, on its own port and its own build, and is turned on from the Server page.",
         "defaultValue": "llamacpp",
         "options": [
           {
@@ -45,11 +45,6 @@
             "value": "ollama",
             "label": "ollama",
             "description": "ollama serve; throughput per completed request"
-          },
-          {
-            "value": "systemone",
-            "label": "System One",
-            "description": "System One decision models (Laya, Julia-1, lev); minimal resources, no context/speculative/vision"
           }
         ]
       },
@@ -85,14 +80,14 @@
         "key": "systemoneBinary",
         "type": "path",
         "label": "System One binary",
-        "description": "llama.cpp build for System One decision models. Leave blank to use the preferred llama-server.",
+        "description": "Binary override for the decision model. Normally left blank: its build is picked on the Server page, which is the point of running it alongside an older chat fork.",
         "defaultValue": ""
       },
       {
         "key": "systemoneModelsDir",
         "type": "path",
         "label": "System One models directory",
-        "description": "Leave blank to auto-detect. Separate from chat models.",
+        "description": "Where the decision models live. Leave blank to use the main model scan.",
         "defaultValue": ""
       },
       {
