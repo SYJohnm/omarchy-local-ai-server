@@ -81,7 +81,11 @@ function build(cfg) {
   var mtp = autoMtp
   var mtpActive = mtp !== "" && T("specType") === "draft-mtp"
 
+  // Declared before the closure that writes them, not after: `var` hoists, so
+  // the old order worked at call time, but QML's compiler warns about the
+  // use-before-declaration and a reader has to know the hoisting rule.
   var ignoredFlags = []
+  var emittedFlags = {}
 
   var emitFlag = function(b, flag, value, args) {
     if (supportsFlag(b, flag)) {
@@ -97,8 +101,6 @@ function build(cfg) {
   }
 
   var ngl = parseInt(T("gpuLayers"), 10)
-  ignoredFlags = []
-  var emittedFlags = {}
   var currentBuild = buildDesc
 
   if (!isFinite(ngl)) ngl = 0

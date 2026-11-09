@@ -248,6 +248,45 @@ it. A settings file that had System One selected as its backend turns the
 companion on and leaves chat on llama.cpp, which is what selecting it stood in
 for.
 
+## When something breaks
+
+`qs -p /usr/share/omarchy/shell ipc call local-ai-server diagnose` returns one
+JSON document with everything needed to work out why a server is not running,
+so neither a person nor an agent has to guess:
+
+- **ready** — the probes that gate a launch (settings loaded, settings
+  readable, capabilities, builds, adoption, systemd, model count). A "nothing
+  happens when I press Start" is usually one of these.
+- **binaries** — every detected build with its fork, commit and GPU, the one
+  the chat side resolved to, and the decision model's.
+- **servers** — one entry per managed server: port, unit name, state, owner,
+  model, build, last error, and the `journalctl` command that holds its output.
+- **runningNow** — what is actually running, read from `/proc`, beside what the
+  page *would* launch. A mismatch means the server was adopted rather than
+  started from this configuration, which is easy to chase in the wrong
+  direction otherwise.
+- **ignoredFlags** — flags the resolved build does not describe, which is why a
+  tuning row can look set and change nothing.
+- **nextLaunchArgs** — the exact argv of the next start, so it can be run by
+  hand.
+- **events** — the last 40 lifecycle events (`started`, `adopted`, `gone`,
+  `crash`) with timestamps, because `lastError` holds one string and the next
+  event overwrites it.
+- **log** — the last 40 lines the server wrote.
+
+Crashes and disappearances are also written to the shell's own log, so they
+land in `qs log` beside whatever else was happening.
+
+**A crash loop is reported rather than hidden.** The transient unit carries
+`Restart=on-failure`, which keeps a server alive across a transient fault — and
+hid the opposite case: a model the build cannot load cycles active → failed →
+active every few seconds, and `is-active` answers "active" every time it is
+asked. That read as "starting…" for the full ten-minute timeout while systemd
+restarted it twenty times. The restart count is watched now: two restarts above
+the count at launch means it is looping, so the unit is stopped and the reason
+is read out of its journal — for example `unknown model architecture: 'lfm3'`,
+which is what an older fork says about a model only current llama.cpp knows.
+
 ## Knowing when a server has gone
 
 A server that crashed, was OOM-killed, or was stopped from a terminal is

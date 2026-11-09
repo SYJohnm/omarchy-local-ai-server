@@ -1013,6 +1013,34 @@ Panel {
   // server stopped from outside. The Server page says "crashed" rather than
   // "stopped" for it, and a plain Start clears it.
   property bool lastExitWasCrash: false
+
+  // ---- Diagnostics ----
+  //
+  // lastError holds one string and the next event overwrites it, so by the
+  // time anyone looks, the thing that went wrong is usually gone. This keeps
+  // the last few lifecycle events with a timestamp and which server they came
+  // from, and `ipc call local-ai-server diagnose` returns them with the rest
+  // of the state as one JSON document -- which is what makes a failure
+  // something a person or an agent can read rather than guess at.
+  property var events: []
+  readonly property int eventsMax: 40
+
+  function note(who, kind, detail) {
+    var entry = {
+      at: new Date().toISOString(),
+      who: String(who),
+      kind: String(kind),
+      detail: Model.plainText(detail, 300)
+    }
+    var next = root.events.slice()
+    next.push(entry)
+    if (next.length > root.eventsMax) next = next.slice(next.length - root.eventsMax)
+    root.events = next
+    // Also to the shell's own log, so it lands in `qs log` beside whatever
+    // else was happening at that moment.
+    if (kind === "crash" || kind === "gone")
+      console.warn("local-ai-server: " + entry.who + " " + entry.kind + ": " + entry.detail)
+  }
   // Consecutive failed liveness polls. A single miss is not a dead server:
   // curl's timeout is one second and a server decoding on a loaded machine can
   // be slower than that, so it takes a few in a row (Instances.healthVerdict).
@@ -2840,6 +2868,28 @@ Panel {
 
   // ---- Scripting ----
   //
+  // Shared by the IpcHandler below and by its per-instance entry points, so
+  // index 0 goes through exactly the guards `start`/`stop` always had.
+  function scriptStart() {
+    if (!root.running && !root.starting && !root.stopping) root.startServer()
+  }
+  function scriptStop() {
+    if ((root.running || root.starting) && !root.stopping) root.stopServer()
+  }
+
+  // Turning the companion on creates its runner, which cannot be started in
+  // the same tick; this waits for it to exist.
+  Timer {
+    id: decisionStartTimer
+    interval: 300
+    repeat: false
+    onTriggered: {
+      var runner = root.decisionRunner()
+      if (runner && !runner.running && !runner.starting) runner.start()
+    }
+  }
+
+  //
   // The panel's own open/close/toggle live on the base Panel's handler (target
   // "io.github.syjohnm.local-ai-server"); server control gets its own target so keybindings
   // and scripts can drive it without the panel open:
@@ -2847,8 +2897,8 @@ Panel {
   IpcHandler {
     target: "local-ai-server"
 
-    function start(): void { if (!root.running && !root.starting && !root.stopping) root.startServer() }
-    function stop(): void { if ((root.running || root.starting) && !root.stopping) root.stopServer() }
+    function start(): void { root.scriptStart() }
+    function stop(): void { root.scriptStop() }
     // Applies a changed model or tuning the same way the Restart button does;
     // called again while it waits for running requests, it forces (Force).
     function restart(): void {
@@ -2856,6 +2906,27 @@ Panel {
       else if (root.configChanged) root.switchServer()
     }
     function model(path: string): void { root.selectActiveModel(path) }
+
+    // Per-instance and companion control, so a keybinding or a script can
+    // drive the servers the Server page shows rows for -- not just the first
+    // one. Index 0 is the primary, the same server start/stop act on.
+    function startInstance(index: int): void {
+      if (index === 0) { root.scriptStart(); return }
+      var runner = root.runnerFor(index)
+      if (runner && !runner.running && !runner.starting) runner.start()
+    }
+    function stopInstance(index: int): void {
+      if (index === 0) { root.scriptStop(); return }
+      var runner = root.runnerFor(index)
+      if (runner && (runner.running || runner.starting)) runner.stop()
+    }
+    // The decision model: "on" creates the companion and starts it, "off"
+    // stops it and takes it away.
+    function decision(state: string): void {
+      var want = String(state) !== "off" && String(state) !== "0" && String(state) !== "false"
+      root.decisionEnabled = want
+      if (want) decisionStartTimer.restart()
+    }
     function page(name: string): void {
       var i = root.pageNames.map(function(n) { return n.toLowerCase() }).indexOf(String(name).toLowerCase())
       if (i === -1) return
@@ -2866,6 +2937,98 @@ Panel {
     }
     function settings(): void { root.openSettings(); root.open() }
     function setup(): void { root.startSetup(); root.open() }
+    // Everything needed to work out why something is not running, as one
+    // JSON document:
+    //   qs -p /usr/share/omarchy/shell ipc call local-ai-server diagnose
+    //
+    // The point is that nobody should have to guess, or know to go and read
+    // `systemctl --user status` and `journalctl --user -u <unit>` by hand, to
+    // find out that a build cannot load a model. Every unit name is in here,
+    // so those commands are the obvious next step when they are needed.
+    function diagnose(): string {
+      return JSON.stringify({
+        plugin: { id: root.moduleName, version: "3.9.0" },
+        at: new Date().toISOString(),
+        // Whether the probes that gate a launch have finished. A "nothing
+        // happens when I press Start" question is usually one of these.
+        ready: {
+          settingsLoaded: root.settingsLoaded,
+          settingsBroken: root.settingsBroken,
+          capabilitiesProbed: root.capabilitiesProbed,
+          buildsProbed: root.buildsProbed,
+          adoptProbed: root.adoptProbed,
+          hasSystemdRun: root.hasSystemdRun,
+          scanning: root.activeScanning,
+          modelsFound: root.activeModelOptions.length
+        },
+        config: {
+          backend: root.backend,
+          routerMode: root.routerMode,
+          host: root.host,
+          instanceCount: root.instanceCount,
+          requestedInstanceCount: root.requestedInstanceCount,
+          decisionEnabled: root.decisionEnabled,
+          kvPersistence: root.kvPersistence,
+          startOnLogin: root.startOnLogin,
+          settingsPath: root.settingsPath,
+          slotDir: expandPath(root.slotSaveDir)
+        },
+        binaries: {
+          llamaServer: root.llamaBinary,
+          ollama: root.ollamaBinary,
+          decision: root.activeSystemoneBinary,
+          resolvedChatBuild: root.resolvedBuild ? root.resolvedBuild.real : "",
+          detectedBuilds: root.llamaBuilds.map(function(b) {
+            return { path: b.path, fork: b.fork, commit: b.commit, gpu: b.gpu }
+          })
+        },
+        hardware: root.hardware,
+        // One entry per server this widget manages, each naming the unit and
+        // the journal that holds its output.
+        servers: root.allStates.map(function(i) {
+          return {
+            role: i.role || (i.primary ? "primary" : "chat"),
+            title: i.title || (i.primary ? "Server" : "Instance " + i.index),
+            index: i.index,
+            port: i.port,
+            unit: i.unitName,
+            procMarker: i.procMarker,
+            state: Instances.stateLabel(i),
+            running: !!i.running,
+            starting: !!i.starting,
+            failed: !!i.failed,
+            owner: Instances.ownerLabel(i),
+            model: i.model,
+            build: i.build,
+            launchable: i.launchable !== undefined ? !!i.launchable : true,
+            lastError: String(i.lastError || ""),
+            journal: i.unitName
+              ? "journalctl --user -u " + i.unitName + " -n 200 -o cat"
+              : ""
+          }
+        }),
+        // What is actually running, read from /proc, beside what the page
+        // would launch now. A mismatch means the server was adopted rather
+        // than started from this configuration -- which is the difference
+        // that sent one of these investigations in the wrong direction.
+        runningNow: {
+          adopted: root.adopted,
+          ownsUnit: root.ownsUnit,
+          exe: root.runningExe,
+          model: root.runningModel,
+          args: root.runningArgs,
+          configChanged: root.configChanged
+        },
+        // Flags the resolved build does not describe, which is why a tuning
+        // row can look set and change nothing.
+        ignoredFlags: root.ignoredFlags,
+        // What the next start would run, so a launch can be reproduced by hand.
+        nextLaunchArgs: root.backend === "ollama" ? [] : root.currentLaunchArgs(),
+        events: root.events,
+        log: root.logLinesArray().slice(-40)
+      }, null, 2)
+    }
+
     function status(): string {
       return JSON.stringify({
         running: root.running, starting: root.starting, stopping: root.stopping,
@@ -2874,8 +3037,9 @@ Panel {
         build: root.backend === "llamacpp" ? Backends.buildLabel(root.resolvedBuild) : "",
         endpoint: root.host + ":" + root.port,
         pp: root.ppTokensPerSec, tg: root.tokensPerSec,
-        instances: root.instanceStates.map(function(i) {
-          return { index: i.index, port: i.port, state: Instances.stateLabel(i),
+        instances: root.allStates.map(function(i) {
+          return { index: i.index, role: i.role || "primary",
+                   port: i.port, state: Instances.stateLabel(i),
                    model: i.model, build: i.build, running: !!i.running }
         }),
         totalTg: root.aggregateRate
@@ -3596,6 +3760,10 @@ Panel {
         root.running = true
         root.adopted = true
         root.healthUrl = Backends.healthUrl(root.backend, root.host, root.port)
+        // Adopted, not launched: it is running whatever it was started with,
+        // which is not necessarily the build or the tuning configured now.
+        // Recorded as its own kind so that difference is never a mystery.
+        root.note("server", "adopted", root.host + ":" + root.port)
         root.runHook("started")
         // Determine whether this is our own transient unit (stoppable) or an
         // externally managed server such as a root-owned ollama.service.
@@ -3972,6 +4140,10 @@ Panel {
     // `quickshell kill`. A systemd transient unit is preferred over bare
     // setsid because it also routes output to journald, which is what lets
     // throughput still be read after this widget is torn down and rebuilt.
+    // Restart count before this launch, so a count left by a previous run is
+    // not read as this one looping.
+    restartBaselineProc.running = false
+    restartBaselineProc.running = true
     serverProc.command = Backends.detachedCommand(root.hasSystemdRun, root.unitName, script)
     root.ownsUnit = root.hasSystemdRun
     // The router loads whatever a request asks for, so nothing is loaded yet.
@@ -4033,19 +4205,69 @@ Panel {
                    unitStateProc.running = true
   }
 
+  // NRestarts as well as ActiveState. The unit carries Restart=on-failure,
+  // which is what keeps a server alive across a transient fault -- and what
+  // hid the opposite case: a model the build cannot load goes active ->
+  // failed -> active every few seconds, and `is-active` answers "active" or
+  // "activating" every time it is asked. The panel said "starting..." for ten
+  // minutes while systemd restarted it twenty times. The count is the signal.
+  property int unitRestartBaseline: 0
   Process {
     id: unitStateProc
-    command: ["systemctl", "--user", "is-active", root.activeUnitName]
+    command: ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "NRestarts",
+              "--value", root.activeUnitName]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var state = String(text || "").trim()
+        var unit = Model.parseUnitState(text)
+        if (Model.isCrashLooping(unit.restarts, root.unitRestartBaseline)) {
+          root.reportCrashLoop(unit.restarts - root.unitRestartBaseline)
+          return
+        }
+        var state = unit.activeState
         if (state === "active" || state === "activating" || state === "") return
         // "failed", "inactive": the unit is gone. Report why, using the last
         // meaningful line the journal produced.
         root.reportUnitStopped(state)
       }
     }
+  }
+
+  Process {
+    id: restartBaselineProc
+    command: ["systemctl", "--user", "show", "-p", "NRestarts", "--value", root.activeUnitName]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var n = parseInt(String(text || "").trim(), 10)
+        root.unitRestartBaseline = isFinite(n) && n >= 0 ? n : 0
+      }
+    }
+  }
+
+  // A looping unit has to be taken down as well as reported: left alone it
+  // keeps restarting for as long as the session lives, holding the port.
+  function reportCrashLoop(count) {
+    if (root.expectedStop || root.stopping) return
+    if (!root.starting && !root.running) return
+    root.expectedStop = true
+    Quickshell.execDetached(["systemctl", "--user", "stop", root.activeUnitName])
+    startingTimer.stop()
+    healthPollTimer.stop()
+    unitWatchTimer.stop()
+    root.stopMetrics()
+    var detail = root.lastErrorLine()
+    root.lastError = "Server keeps crashing on start (" + count + " restarts)" +
+      (detail ? ": " + detail : " — see the log") + ". Stopped."
+    root.note("server", "crash", root.lastError)
+    root.lastExitWasCrash = true
+    root.healthFailures = 0
+    root.runHook("stopped")
+    root.starting = false
+    root.running = false
+    root.clearRestartState()
+    root.resetMetrics()
+    root.expectedStop = false
   }
 
   function reportUnitStopped(state) {
@@ -4058,6 +4280,7 @@ Panel {
     var detail = root.lastErrorLine()
     root.lastError = (root.starting ? "Server failed to start" : "Server stopped") +
       (state === "failed" ? " (crashed)" : "") + (detail ? ": " + detail : "")
+    root.note("server", "gone", root.lastError)
     root.lastExitWasCrash = true
     root.healthFailures = 0
     root.runHook("stopped")
@@ -4363,6 +4586,7 @@ Panel {
             root.restoreSlots()
             // What Restart compares the page against.
             root.readRunningArgs()
+            root.note("server", "started", root.runningModel)
             root.runHook("started")
             root.lastDecodeSample = null
             root.startMetrics()
@@ -4393,6 +4617,7 @@ Panel {
     var detail = root.lastErrorLine()
     root.lastError = "Server stopped answering on " + root.healthUrl +
       (detail ? ": " + detail : "")
+    root.note("server", "gone", root.lastError)
     root.lastExitWasCrash = true
     root.runHook("stopped")
     root.starting = false
@@ -5034,6 +5259,8 @@ Panel {
         "mkdir -p -m 700 " + root.shellQuote(dir) + "; chmod 700 " + root.shellQuote(dir) + "; " +
         cudaEnv + (userEnv !== "" ? userEnv + " " : "") +
         "exec -a " + inst.procMarker + " " + args.map(root.shellQuote).join(" ")
+      inst.ownBaseline.running = false
+      inst.ownBaseline.running = true
       inst.ownLaunch.command = Backends.detachedCommand(root.hasSystemdRun, inst.unitName, script)
       // Captured plainly: unitName is derived from instancePlan, and the
       // teardown path runs while that plan is shrinking. The value is correct
@@ -5133,6 +5360,13 @@ Panel {
       inst.ownAdopt.running = true
     }
 
+    // The crash-loop path has already set expectedStop, because it stops the
+    // unit itself; it still has to report.
+    function markGoneForced(reason) {
+      inst.expectedStop = false
+      inst.markGone(reason)
+    }
+
     function markGone(reason) {
       if (inst.expectedStop || inst.stopping) return
       if (!inst.running && !inst.starting) return
@@ -5141,6 +5375,7 @@ Panel {
       inst.ownSlotsTimer.stop()
       inst.ownUnitTimer.stop()
       inst.lastError = reason
+      root.note(inst.title, reason.indexOf("crashing") !== -1 ? "crash" : "gone", reason)
       inst.failed = true
       inst.healthFailures = 0
       inst.running = false
@@ -5152,6 +5387,7 @@ Panel {
     }
 
     function promoteToRunning() {
+      root.note(inst.title, "started", inst.model)
       inst.starting = false
       inst.running = true
       inst.failed = false
@@ -5251,14 +5487,72 @@ Panel {
     // The unit's own state is the decisive signal for a crash during model
     // load, when nothing has answered /health yet and nothing ever will.
     property Process ownUnitState: Process {
-      command: ["systemctl", "--user", "is-active", inst.unitName]
+      command: ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "NRestarts",
+                "--value", inst.unitName]
       stdout: StdioCollector {
         waitForEnd: true
         onStreamFinished: {
-          var state = String(text || "").trim()
+          var unit = Model.parseUnitState(text)
+          // Restart=on-failure keeps a server alive across a transient fault
+          // and hides a model the build cannot load: that unit cycles active
+          // -> failed -> active every few seconds and reads as "active" every
+          // time it is asked. The restart count is what tells the two apart.
+          if (Model.isCrashLooping(unit.restarts, inst.restartBaseline)) {
+            inst.reportCrashLoop(unit.restarts - inst.restartBaseline)
+            return
+          }
+          var state = unit.activeState
           if (state === "active" || state === "activating" || state === "") return
           inst.markGone(inst.title +
             (state === "failed" ? " crashed" : " stopped") + " (unit " + state + ")")
+        }
+      }
+    }
+
+    // The restart count before this launch, so a previous run's count is not
+    // read as this one looping.
+    property int restartBaseline: 0
+    property int loopRestarts: 0
+    property Process ownBaseline: Process {
+      command: ["systemctl", "--user", "show", "-p", "NRestarts", "--value", inst.unitName]
+      stdout: StdioCollector {
+        waitForEnd: true
+        onStreamFinished: {
+          var n = parseInt(String(text || "").trim(), 10)
+          inst.restartBaseline = isFinite(n) && n >= 0 ? n : 0
+        }
+      }
+    }
+
+    // A looping unit is stopped as well as reported -- left alone it restarts
+    // for as long as the session lives, holding its port -- and the reason is
+    // read out of its journal, which is the one thing that says why.
+    function reportCrashLoop(count) {
+      if (inst.expectedStop || inst.stopping) return
+      if (!inst.starting && !inst.running) return
+      inst.expectedStop = true
+      inst.loopRestarts = count
+      Quickshell.execDetached(["systemctl", "--user", "stop", inst.unitName])
+      inst.ownStartingTimer.stop()
+      inst.ownHealthTimer.stop()
+      inst.ownSlotsTimer.stop()
+      inst.ownUnitTimer.stop()
+      inst.ownWhy.running = false
+      inst.ownWhy.running = true
+    }
+
+    // One-shot journal read, only on a crash. An instance has no log tail of
+    // its own by design; this is the exception, because "it crashed" without
+    // the reason is not a report anyone can act on.
+    property Process ownWhy: Process {
+      command: ["journalctl", "--user", "-u", inst.unitName, "-n", "80", "-o", "cat", "--no-pager"]
+      stdout: StdioCollector {
+        waitForEnd: true
+        onStreamFinished: {
+          var detail = Model.pickErrorLine(String(text || "").split("\n"), "")
+          inst.markGoneForced(inst.title + " keeps crashing on start (" +
+            inst.loopRestarts + " restarts)" +
+            (detail ? ": " + detail : "") + ". Stopped.")
         }
       }
     }
@@ -5415,9 +5709,12 @@ Panel {
   // Every input is a property, so this fires on its own once the last one
   // lands -- the same shape as autoStartReady above, and for the same reason:
   // sweeping on the default count would stop instances the user still wants.
+  // Deliberately does not mention staleInstancesSwept: the sweep sets that
+  // flag, which would re-evaluate this binding, which is the loop QML
+  // reported. "Has it already run" is a guard inside the function, not an
+  // input to the readiness it triggers.
   readonly property bool staleSweepReady:
-    !root.staleInstancesSwept && root.settingsLoaded && root.capabilitiesProbed &&
-    root.hasSystemdRun
+    root.settingsLoaded && root.capabilitiesProbed && root.hasSystemdRun
   onStaleSweepReadyChanged: if (root.staleSweepReady) root.sweepStaleInstances()
 
   function sweepStaleInstances() {

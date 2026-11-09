@@ -660,6 +660,54 @@ function formatBytes(bytes) {
   return (i === 0 ? String(Math.round(n)) : n.toFixed(1)) + " " + units[i]
 }
 
+// ---- Crash loops ----
+//
+// The transient unit carries Restart=on-failure, which is what keeps a server
+// alive across a transient fault. It also hides the opposite case: a server
+// that cannot start at all goes active -> failed -> active every few seconds,
+// and a watch that only asks `is-active` sees "active" or "activating" every
+// time. A model the build cannot load therefore read as "starting..." until
+// the ten-minute startup timeout, while systemd restarted it twenty times.
+//
+// systemd counts the restarts, so the count is the signal: climbing while we
+// are still waiting for the endpoint means it is looping, not starting.
+
+// Two restarts rather than one: a single retry is what Restart=on-failure is
+// for, and a server that comes up on the second go is working.
+var RESTARTS_BEFORE_LOOP = 2
+
+/**
+ * Parses `systemctl show -p ActiveState -p NRestarts --value` output, which is
+ * one value per line in the order asked for.
+ * @returns {{activeState: string, restarts: number}}
+ */
+function parseUnitState(text) {
+  var lines = String(text || "").split("\n")
+  var out = { activeState: "", restarts: 0 }
+  if (lines.length > 0) out.activeState = String(lines[0] || "").trim()
+  if (lines.length > 1) {
+    var n = parseInt(String(lines[1] || "").trim(), 10)
+    if (isFinite(n) && n >= 0) out.restarts = n
+  }
+  return out
+}
+
+/**
+ * Whether a unit is restarting in a loop rather than starting up.
+ *
+ * @param {number} restarts  NRestarts now
+ * @param {number} baseline  NRestarts when this launch began
+ * @param {number} [threshold]
+ */
+function isCrashLooping(restarts, baseline, threshold) {
+  var now = parseInt(restarts, 10)
+  var base = parseInt(baseline, 10)
+  if (!isFinite(now)) return false
+  if (!isFinite(base) || base < 0) base = 0
+  var limit = isFinite(threshold) && threshold > 0 ? threshold : RESTARTS_BEFORE_LOOP
+  return (now - base) >= limit
+}
+
 // ---- Settings file ----
 
 // Whether a settings file can be read, and what it holds.
@@ -723,6 +771,9 @@ function plainText(value, limit) {
 
 if (typeof module !== "undefined") {
   module.exports = {
+    RESTARTS_BEFORE_LOOP: RESTARTS_BEFORE_LOOP,
+    parseUnitState: parseUnitState,
+    isCrashLooping: isCrashLooping,
     readSettings: readSettings,
     PLAIN_TEXT_LIMIT: PLAIN_TEXT_LIMIT,
     plainText: plainText,
