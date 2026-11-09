@@ -9,18 +9,13 @@ its own port and its own build.
 
 <a href="preview.png"><img src="preview.png" alt="Server, Model and Tuning of the panel"></a>
 
-In the bar it shows the mark while idle and the live rate while running —
+In the bar it shows a server glyph while idle and the live rate while running —
 <img src="docs/screenshots/bar.png" height="20" alt="15.0 t/s"> — or, while a
-prompt is being read, how far along it is and how fast (`52% - 63 t/s`).
-Right-click to hide or show the rate again. The mark is a server glyph in the
-bar's icon slot; a dot on it separates a stopped server from one that is up and
-idle, and while a rate is showing the slot keeps a minimum width, so a ticking
-number stops reflowing the bar without ever clipping a long reading. Hovering
-the mark opens a card with the model, endpoint, build, both rates, a sparkline
-of recent generation, and a reminder of what click and right-click do. The card
-shows the prompt's **rate and its progress at the same time** — the rate as a
-number, how far along it is as a filling bar — rather than dropping one to show
-the other.
+prompt is being read, how far along it is and how fast (`52% - 63 t/s`). A dot
+on the glyph separates a stopped server from one that is up and idle. Click
+opens the panel, right-click hides or shows the rate, and hovering opens a card
+with the model, endpoint, build, both rates and a sparkline of recent
+generation.
 
 ollama embeds llama.cpp, so both backends log the same timing lines and one
 parser handles both. ollama resolves the rates per completed request rather
@@ -66,6 +61,7 @@ GB, so delete that folder too if you are done with it.
 | `bash`, `curl`, `python3`, `find` | Launch, health, model probing. |
 | `systemd-run` (recommended) | Keeps the server a detached **systemd** user unit, which is what makes it survive `omarchy restart shell`. Without it the launch falls back to `setsid`. |
 | `git`, `nvidia-smi` or `rocm-smi` | Optional: name builds after their checkout; VRAM-aware suggestions. |
+| A Nerd Font | For the bar glyph and the panel's icons. Omarchy installs JetBrainsMono Nerd Font and the shell draws in it, so nothing to do. |
 
 The server runs as your user and only listens on `127.0.0.1` unless you change
 the host; the panel warns when the host is not loopback, because llama-server
