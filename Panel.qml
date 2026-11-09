@@ -34,9 +34,54 @@ Panel {
 
   // Two points above the shell's caption size. The panel is read at a glance
   // from a desk away, and the dotted rows have room to spare.
-  readonly property int fontSize: Style.font.caption + 2
-  readonly property int fontSizeSmall: Style.font.bodySmall + 2
-  readonly property int fontSizeSubtitle: Style.font.subtitle + 2
+  // ---- Scale ----
+  //
+  // Steps from the shell's type scale rather than hand offsets. The previous
+  // values were caption/bodySmall/subtitle each "+2", which had two problems:
+  // the offset does not follow a theme's own font scale, so a user who sized
+  // the shell up got a panel that did not move with it; and bodySmall + 2 (13)
+  // came out larger than caption + 2 (12), so every "small" label rendered
+  // bigger than the text it was secondary to. The intent -- a panel read at a
+  // glance from a desk away, a step above the shell default -- is kept by
+  // taking the step above, not by adding to it.
+  readonly property int fontSize: Style.font.subtitle            // 13
+  readonly property int fontSizeSmall: Style.font.body           // 12
+  readonly property int fontSizeSubtitle: Style.font.title       // 14
+
+  // One height for every dotted row, on the 4px grid. It was 26 in 36 places,
+  // with 22 and 24 for rows of the same kind elsewhere.
+  readonly property int rowHeight: 24
+
+  // ---- Icons ----
+  //
+  // One set, written as escapes rather than literal private-use characters so
+  // the source stays readable and survives a copy or a diff. These are Nerd
+  // Font (nf-fa-*), the same set the bar mark already uses for its server
+  // glyph, so the panel and the bar agree. Before this they were three
+  // different sets at once: U+00D7 multiplication for remove, U+2212 minus
+  // for the stepper, and a latin letter "v" standing in for a chevron.
+  readonly property var icons: ({
+    check: "\uf00c",     // nf-fa-check
+    remove: "\uf00d",    // nf-fa-times
+    refresh: "\uf021",   // nf-fa-refresh
+    chevron: "\uf078",   // nf-fa-chevron_down
+    plus: "\uf067",      // nf-fa-plus
+    minus: "\uf068",     // nf-fa-minus
+    warning: "\uf071"    // nf-fa-warning
+  })
+  // Icons take the size of the text they sit beside, one step down, and the
+  // colour of their text role -- never a colour of their own.
+  readonly property int iconSize: Style.font.body
+
+  // Tabular figures, so a ticking rate does not change width between frames.
+  // This is what the bar's minimum-width floor was working around.
+  readonly property var tabularFigures: ({ "tnum": 1 })
+
+  // The dotted leader that carries every label to its value. The plugin's own
+  // device, and the one thing in the bar that looks like this -- so it lives
+  // in one place rather than as a 100-character literal repeated 33 times.
+  readonly property string leaderDots:
+    "...................................................................................................."
 
   // ---- Configuration (manifest settings) ----
 
@@ -1800,7 +1845,7 @@ Panel {
     property bool readOnly: false
 
     Layout.fillWidth: true
-    implicitHeight: 26
+    implicitHeight: root.rowHeight
     visible: root.backend === "llamacpp"
     radius: 3
     color: rowHover.containsMouse && !row.readOnly
@@ -1825,7 +1870,7 @@ Panel {
       Text {
         textFormat: Text.PlainText
         Layout.fillWidth: true
-        text: "...................................................................................................."
+        text: root.leaderDots
         color: root.bar.foreground
         opacity: 0.15
         elide: Text.ElideRight
@@ -1852,11 +1897,11 @@ Panel {
 
       Text {
         textFormat: Text.PlainText
-        text: "v"
+        text: root.icons.chevron
         color: root.bar.foreground
         opacity: 0.5
         font.family: root.bar.fontFamily
-        font.pixelSize: root.fontSize
+        font.pixelSize: root.iconSize
       }
     }
 
@@ -1908,7 +1953,7 @@ Panel {
               (modelData.value === "" && Backends.findBuild(root.llamaBuilds, root.llamaBuild) === null)
 
             Layout.fillWidth: true
-            implicitHeight: 26
+            implicitHeight: root.rowHeight
             radius: 3
             color: choiceHover.hovered
               ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -5879,6 +5924,7 @@ Panel {
           color: root.running ? Commons.Color.accent : root.bar.foreground
           font.family: root.bar.fontFamily
           font.pixelSize: root.fontSizeSmall
+          font.features: root.tabularFigures
           opacity: 0.8
         }
       }
@@ -5991,6 +6037,7 @@ Panel {
               color: root.tokensPerSec > 0 ? Commons.Color.accent : root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: root.fontSize
+              font.features: root.tabularFigures
               font.bold: root.tokensPerSec > 0
             }
           }
@@ -6021,6 +6068,7 @@ Panel {
               color: (root.ppActive || root.ppTokensPerSec > 0) ? Commons.Color.accent : root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: root.fontSize
+              font.features: root.tabularFigures
               font.bold: root.ppActive || root.ppTokensPerSec > 0
             }
           }
@@ -6042,6 +6090,7 @@ Panel {
             color: Commons.Color.accent
             font.family: root.bar.fontFamily
             font.pixelSize: root.fontSizeSmall
+            font.features: root.tabularFigures
             font.bold: true
           }
 
@@ -6227,6 +6276,7 @@ Panel {
               opacity: 0.65
               font.family: root.bar.fontFamily
               font.pixelSize: root.fontSize
+              font.features: root.tabularFigures
               elide: Text.ElideRight
               Layout.fillWidth: true
             }
@@ -6290,7 +6340,7 @@ Panel {
               readonly property bool current: root.currentPage === index
 
               Layout.fillWidth: true
-              implicitHeight: 26
+              implicitHeight: root.rowHeight
 
               Text {
                 textFormat: Text.PlainText
@@ -6360,7 +6410,7 @@ Panel {
             Text {
               textFormat: Text.PlainText
               Layout.fillWidth: true
-              text: "...................................................................................................."
+              text: root.leaderDots
               color: root.bar.foreground
               opacity: 0.15
               elide: Text.ElideRight
@@ -6381,7 +6431,7 @@ Panel {
           // Backend section ---------------------------------------------
           Rectangle {
             Layout.fillWidth: true
-            implicitHeight: 26
+            implicitHeight: root.rowHeight
             radius: 3
             color: settingsBackendHover.hovered
               ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -6404,7 +6454,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 Layout.fillWidth: true
-                text: "...................................................................................................."
+                text: root.leaderDots
                 color: root.bar.foreground
                 opacity: 0.15
                 elide: Text.ElideRight
@@ -6449,7 +6499,7 @@ Panel {
             Rectangle {
               id: settingsBackendRow
               Layout.fillWidth: true
-              implicitHeight: 26
+              implicitHeight: root.rowHeight
               radius: 3
               color: settingsBackendPickHover.hovered
                 ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -6472,7 +6522,7 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   Layout.fillWidth: true
-                  text: "...................................................................................................."
+                  text: root.leaderDots
                   color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
@@ -6531,7 +6581,7 @@ Panel {
                       readonly property bool chosen: root.backend === modelData.id
 
                       Layout.fillWidth: true
-                      implicitHeight: 26
+                      implicitHeight: root.rowHeight
                       radius: 3
                       color: settingsBackendChoiceHover.hovered
                         ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -6582,7 +6632,7 @@ Panel {
             Rectangle {
               id: settingsBinaryRow
               Layout.fillWidth: true
-              implicitHeight: 26
+              implicitHeight: root.rowHeight
               radius: 3
               property bool editing: false
               color: settingsBinaryHover.hovered
@@ -6607,7 +6657,7 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   Layout.fillWidth: true
-                  text: "...................................................................................................."
+                  text: root.leaderDots
                   color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
@@ -6681,7 +6731,7 @@ Panel {
           // Models section ----------------------------------------------
           Rectangle {
             Layout.fillWidth: true
-            implicitHeight: 26
+            implicitHeight: root.rowHeight
             radius: 3
             color: settingsModelsHover.hovered
               ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -6704,7 +6754,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 Layout.fillWidth: true
-                text: "...................................................................................................."
+                text: root.leaderDots
                 color: root.bar.foreground
                 opacity: 0.15
                 elide: Text.ElideRight
@@ -6750,7 +6800,7 @@ Panel {
             // Auto: every detected folder.
             Rectangle {
               Layout.fillWidth: true
-              implicitHeight: 26
+              implicitHeight: root.rowHeight
               radius: 3
               color: settingsAutoHover.hovered
                 ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -6808,7 +6858,7 @@ Panel {
                   expandPath(root.configuredModelsDir) === modelData
 
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 color: settingsDirHover.hovered
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -6850,7 +6900,7 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "✕"
+                    text: root.icons.remove
                     visible: root.extraModelDirs.indexOf(modelData) !== -1
                     color: root.bar.foreground
                     opacity: 0.45
@@ -6876,7 +6926,7 @@ Panel {
             Rectangle {
               id: settingsAddFolderRow
               Layout.fillWidth: true
-              implicitHeight: 26
+              implicitHeight: root.rowHeight
               radius: 3
               property bool editing: false
               color: settingsAddFolderHover.hovered
@@ -6901,7 +6951,7 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   Layout.fillWidth: true
-                  text: "...................................................................................................."
+                  text: root.leaderDots
                   color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
@@ -6950,7 +7000,7 @@ Panel {
               }
               PanelToolTip {
                 visible: settingsAddFolderHover.hovered
-                text: "Add a folder that holds .gguf files."
+                text: "Add a folder that holds .gguf files"
               }
             }
           }
@@ -6958,7 +7008,7 @@ Panel {
           // Builds section ----------------------------------------------
           Rectangle {
             Layout.fillWidth: true
-            implicitHeight: 26
+            implicitHeight: root.rowHeight
             radius: 3
             color: settingsBuildsHover.hovered
               ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -6981,7 +7031,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 Layout.fillWidth: true
-                text: "...................................................................................................."
+                text: root.leaderDots
                 color: root.bar.foreground
                 opacity: 0.15
                 elide: Text.ElideRight
@@ -7027,7 +7077,7 @@ Panel {
                 required property var modelData
 
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 color: "transparent"
 
@@ -7068,7 +7118,7 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "✕"
+                    text: root.icons.remove
                     visible: root.extraBuildPaths.indexOf(modelData.path) !== -1
                     color: root.bar.foreground
                     opacity: 0.45
@@ -7088,7 +7138,7 @@ Panel {
               textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: root.llamaBuilds.length === 0
-              text: "No llama.cpp build detected yet."
+              text: "No llama.cpp build detected yet"
               color: root.bar.foreground
               opacity: 0.45
               font.family: root.bar.fontFamily
@@ -7098,7 +7148,7 @@ Panel {
             Rectangle {
               id: settingsAddForkRow
               Layout.fillWidth: true
-              implicitHeight: 26
+              implicitHeight: root.rowHeight
               radius: 3
               property bool editing: false
               color: settingsAddForkHover.hovered
@@ -7123,7 +7173,7 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   Layout.fillWidth: true
-                  text: "...................................................................................................."
+                  text: root.leaderDots
                   color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
@@ -7173,7 +7223,7 @@ Panel {
               }
               PanelToolTip {
                 visible: settingsAddForkHover.hovered
-                text: "Path to another llama-server build."
+                text: "Path to another llama-server build"
               }
             }
 
@@ -7209,7 +7259,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 Layout.fillWidth: true
-                text: "...................................................................................................."
+                text: root.leaderDots
                 color: root.bar.foreground
                 opacity: 0.15
                 elide: Text.ElideRight
@@ -7223,6 +7273,7 @@ Panel {
                 opacity: 0.65
                 font.family: root.bar.fontFamily
                 font.pixelSize: root.fontSizeSmall
+                font.features: root.tabularFigures
               }
             }
 
@@ -7310,7 +7361,7 @@ Panel {
 
                 Text {
                   textFormat: Text.PlainText
-                  text: "Instances & Status"
+                  text: "Instances"
                   color: root.bar.foreground
                   font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSizeSmall
@@ -7327,6 +7378,7 @@ Panel {
                   opacity: root.anyInstanceRunning ? 0.9 : 0.45
                   font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSizeSmall
+                  font.features: root.tabularFigures
                 }
 
                 Item { Layout.fillWidth: true }
@@ -7336,11 +7388,11 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   visible: root.canAddInstances
-                  text: "−"
+                  text: root.icons.minus
                   color: root.bar.foreground
                   opacity: root.instanceCount > 1 ? 0.8 : 0.2
                   font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSizeSubtitle
+                  font.pixelSize: root.iconSize
                   MouseArea {
                     anchors.fill: parent
                     anchors.margins: -Style.space(4)
@@ -7361,11 +7413,11 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   visible: root.canAddInstances
-                  text: "+"
+                  text: root.icons.plus
                   color: root.bar.foreground
                   opacity: root.instanceCount < Instances.MAX_INSTANCES ? 0.8 : 0.2
                   font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSizeSubtitle
+                  font.pixelSize: root.iconSize
                   MouseArea {
                     anchors.fill: parent
                     anchors.margins: -Style.space(4)
@@ -7472,6 +7524,7 @@ Panel {
                         opacity: instRow.up ? 0.9 : (instRow.snap.failed ? 0.9 : 0.45)
                         font.family: root.bar.fontFamily
                         font.pixelSize: root.fontSizeSmall
+                        font.features: root.tabularFigures
                       }
                     }
 
@@ -7537,7 +7590,7 @@ Panel {
 
                       Button {
                         visible: instRow.isPrimary && root.backend === "llamacpp"
-                        text: root.routerMode ? "Router: ON" : "Router: OFF"
+                        text: root.routerMode ? "Router: on" : "Router: off"
                         tooltipText: root.multiInstance
                           ? "Router mode serves every model from one process, so it runs as a single instance"
                           : "Serve every model in models.ini from one process"
@@ -7606,7 +7659,7 @@ Panel {
                 textFormat: Text.PlainText
                 Layout.fillWidth: true
                 visible: root.multiInstance && !root.hasSystemdRun
-                text: "⚠ Extra instances need a systemd user session; only the first server can be managed here."
+                text: root.icons.warning + " Extra instances need a systemd user session; only the first server can be managed here."
                 color: root.bar.urgent
                 wrapMode: Text.WordWrap
                 font.family: root.bar.fontFamily
@@ -7626,7 +7679,7 @@ Panel {
               Rectangle {
                 id: backendRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 color: backendHover.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -7650,7 +7703,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -7719,7 +7772,7 @@ Panel {
               Rectangle {
                 id: endpointRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 property bool editing: false
                 color: endpointHover.containsMouse
@@ -7745,7 +7798,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -7824,7 +7877,7 @@ Panel {
               textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: !/^(127\.|localhost$|\[::1\]$|::1$)/.test(String(root.host).trim())
-              text: "⚠ " + root.host + " is reachable from other machines, and the server has no API key. " +
+              text: root.icons.warning + " " + root.host + " is reachable from other machines, and the server has no API key. " +
                     "Use 127.0.0.1 unless you mean to share it."
               color: root.bar.urgent
               wrapMode: Text.WordWrap
@@ -7855,7 +7908,7 @@ Panel {
             // page does not read as a different kind of control.
             Rectangle {
               Layout.fillWidth: true
-              implicitHeight: 26
+              implicitHeight: root.rowHeight
               radius: 3
               visible: Backends.supports(root.backend, "slotKv")
               color: kvPersistenceHover.hovered
@@ -7879,7 +7932,7 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   Layout.fillWidth: true
-                  text: "...................................................................................................."
+                  text: root.leaderDots
                   color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
@@ -7911,7 +7964,7 @@ Panel {
 
             Rectangle {
               Layout.fillWidth: true
-              implicitHeight: 26
+              implicitHeight: root.rowHeight
               radius: 3
               color: startOnLoginHover.hovered
                 ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -7934,7 +7987,7 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   Layout.fillWidth: true
-                  text: "...................................................................................................."
+                  text: root.leaderDots
                   color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
@@ -8109,6 +8162,7 @@ Panel {
                       opacity: decisionCard.up ? 0.9 : 0.45
                       font.family: root.bar.fontFamily
                       font.pixelSize: root.fontSizeSmall
+                      font.features: root.tabularFigures
                     }
                   }
 
@@ -8130,7 +8184,7 @@ Panel {
                     }
 
                     Button {
-                      text: "⟳"
+                      text: root.icons.refresh
                       tooltipText: root.systemoneScanning ? "Scanning…" : "Rescan for decision models"
                       enabled: !root.systemoneScanning
                       onClicked: root.refreshSystemoneModels()
@@ -8210,6 +8264,7 @@ Panel {
               wrapMode: Text.WordWrap
               font.family: root.bar.fontFamily
               font.pixelSize: root.fontSize
+              font.features: root.tabularFigures
             }
 
             Text {
@@ -8238,7 +8293,7 @@ Panel {
             Rectangle {
               id: modelRow
               Layout.fillWidth: true
-              implicitHeight: 26
+              implicitHeight: root.rowHeight
               radius: 3
               color: "transparent"
 
@@ -8260,7 +8315,7 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   Layout.fillWidth: true
-                  text: "...................................................................................................."
+                  text: root.leaderDots
                   color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
@@ -8328,7 +8383,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -8339,7 +8394,7 @@ Panel {
                   TextField {
                     id: modelFilterField
                     Layout.preferredWidth: Math.max(Style.space(130), modelRow.width * 0.45)
-                    implicitHeight: 22
+                    implicitHeight: root.rowHeight
                     font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSize
                     placeholderText: "name or folder"
@@ -8350,12 +8405,12 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     visible: root.modelFilter !== ""
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: root.bar.foreground
                     opacity: filterClearHover.hovered ? 0.9 : 0.45
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     HoverHandler { id: filterClearHover; cursorShape: Qt.PointingHandCursor }
                     MouseArea {
                       anchors.fill: parent
@@ -8403,7 +8458,7 @@ Panel {
                         readonly property bool open: isDir && root.expandedModelDirs[node.path] === true
 
                         width: modelColumn.width
-                        height: 26
+                        height: root.rowHeight
                         radius: 3
                         color: current
                           ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.10)
@@ -8606,7 +8661,7 @@ Panel {
                   required property var modelData
 
                   implicitWidth: pageNumber.implicitWidth + Style.space(12)
-                  implicitHeight: 22
+                  implicitHeight: root.rowHeight
                   radius: 3
                   color: pageHover.hovered
                     ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
@@ -8646,7 +8701,7 @@ Panel {
             // page, and a bordered box here was the heaviest thing on it.
             Rectangle {
               Layout.fillWidth: true
-              implicitHeight: 26
+              implicitHeight: root.rowHeight
               radius: 3
               visible: !addParamOpen
               color: addHover.hovered && root.addableCount > 0
@@ -8723,14 +8778,14 @@ Panel {
               }
 
               Button {
-                text: "×"
+                text: root.icons.remove
                 tooltipText: "Cancel"
                 onClicked: addParamOpen = false
               }
             }
 
             // One row per built-in flag, in the same shape as the endpoint:
-            // label, dotted leader, value, and a × that takes the row off the
+            // label, dotted leader, value, and a remove icon that takes the row off the
             // page. The value is the thing to click -- a number opens an inline
             // field, an enum opens a list -- so the page reads as a list of
             // settings rather than a form of boxes.
@@ -8743,7 +8798,7 @@ Panel {
               Rectangle {
                 id: cacheRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("cacheType")
                 color: cacheHoverArea.containsMouse
@@ -8767,7 +8822,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -8784,12 +8839,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: cacheHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: cacheHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -8866,9 +8921,8 @@ Panel {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("cacheType") && root.rowHasIgnoredFlag("cacheType")
-                text: "⚠ not in this build"
+                text: root.icons.warning + " not in this build"
                 font.pixelSize: root.fontSizeSmall
-                font.italic: true
                 color: Commons.Color.urgent
               }
 
@@ -8876,7 +8930,7 @@ Panel {
               Rectangle {
                 id: flashRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("flashAttn")
                 color: flashHoverArea.containsMouse
@@ -8900,7 +8954,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -8917,12 +8971,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: flashHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: flashHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -8958,9 +9012,8 @@ Panel {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("flashAttn") && root.rowHasIgnoredFlag("flashAttn")
-                text: "⚠ not in this build"
+                text: root.icons.warning + " not in this build"
                 font.pixelSize: root.fontSizeSmall
-                font.italic: true
                 color: Commons.Color.urgent
               }
 
@@ -8968,7 +9021,7 @@ Panel {
               Rectangle {
                 id: nglRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("ngl")
                 property bool editing: false
@@ -8994,7 +9047,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -9011,12 +9064,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: nglHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: nglHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -9076,7 +9129,7 @@ Panel {
               Rectangle {
                 id: moeRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("cpuMoe")
                 color: moeHoverArea.containsMouse
@@ -9100,7 +9153,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -9117,12 +9170,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: moeHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: moeHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -9183,7 +9236,7 @@ Panel {
                     Text {
                       textFormat: Text.PlainText
                       Layout.fillWidth: true
-                      text: (root.cpuMoe ? "✓ " : "") + "All layers (--cpu-moe)"
+                      text: (root.cpuMoe ? root.icons.check + " " : "") + "All layers (--cpu-moe)"
                       color: root.cpuMoe ? Commons.Color.accent : root.bar.foreground
                       opacity: root.cpuMoe ? 1.0 : 0.7
                       font.family: root.bar.fontFamily
@@ -9205,9 +9258,8 @@ Panel {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("cpuMoe") && root.rowHasIgnoredFlag("cpuMoe")
-                text: "⚠ not in this build"
+                text: root.icons.warning + " not in this build"
                 font.pixelSize: root.fontSizeSmall
-                font.italic: true
                 color: Commons.Color.urgent
               }
 
@@ -9215,7 +9267,7 @@ Panel {
               Rectangle {
                 id: ctxRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("ctxSize")
                 property bool editing: false
@@ -9241,7 +9293,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -9258,12 +9310,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: ctxHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: ctxHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -9323,9 +9375,8 @@ Panel {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("ctxSize") && root.rowHasIgnoredFlag("ctxSize")
-                text: "⚠ not in this build"
+                text: root.icons.warning + " not in this build"
                 font.pixelSize: root.fontSizeSmall
-                font.italic: true
                 color: Commons.Color.urgent
               }
 
@@ -9333,7 +9384,7 @@ Panel {
               Rectangle {
                 id: threadsRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("threads")
                 property bool editing: false
@@ -9359,7 +9410,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -9376,12 +9427,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: threadsHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: threadsHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -9441,9 +9492,8 @@ Panel {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("threads") && root.rowHasIgnoredFlag("threads")
-                text: "⚠ not in this build"
+                text: root.icons.warning + " not in this build"
                 font.pixelSize: root.fontSizeSmall
-                font.italic: true
                 color: Commons.Color.urgent
               }
 
@@ -9451,7 +9501,7 @@ Panel {
               Rectangle {
                 id: batchRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("batchSize")
                 color: batchHoverArea.containsMouse
@@ -9475,7 +9525,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -9493,12 +9543,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: batchHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: batchHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -9575,9 +9625,8 @@ Panel {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("batchSize") && root.rowHasIgnoredFlag("batchSize")
-                text: "⚠ not in this build"
+                text: root.icons.warning + " not in this build"
                 font.pixelSize: root.fontSizeSmall
-                font.italic: true
                 color: Commons.Color.urgent
               }
 
@@ -9585,7 +9634,7 @@ Panel {
               Rectangle {
                 id: parallelRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("parallel")
                 property bool editing: false
@@ -9611,7 +9660,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -9628,12 +9677,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: parallelHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: parallelHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -9694,9 +9743,8 @@ Panel {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("parallel") && root.rowHasIgnoredFlag("parallel")
-                text: "⚠ not in this build"
+                text: root.icons.warning + " not in this build"
                 font.pixelSize: root.fontSizeSmall
-                font.italic: true
                 color: Commons.Color.urgent
               }
 
@@ -9704,7 +9752,7 @@ Panel {
               Rectangle {
                 id: reasoningRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("reasoning")
                 color: reasoningHoverArea.containsMouse
@@ -9728,7 +9776,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -9745,12 +9793,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: reasoningHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: reasoningHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -9786,9 +9834,8 @@ Panel {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("reasoning") && root.rowHasIgnoredFlag("reasoning")
-                text: "⚠ not in this build"
+                text: root.icons.warning + " not in this build"
                 font.pixelSize: root.fontSizeSmall
-                font.italic: true
                 color: Commons.Color.urgent
               }
 
@@ -9796,7 +9843,7 @@ Panel {
               Rectangle {
                 id: specRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("specType")
                 color: specHoverArea.containsMouse
@@ -9820,7 +9867,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -9837,12 +9884,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: specHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: specHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -9905,9 +9952,8 @@ Panel {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("specType") && root.rowHasIgnoredFlag("specType")
-                text: "⚠ not in this build"
+                text: root.icons.warning + " not in this build"
                 font.pixelSize: root.fontSizeSmall
-                font.italic: true
                 color: Commons.Color.urgent
               }
 
@@ -9915,7 +9961,7 @@ Panel {
               Rectangle {
                 id: visionRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("vision")
                 color: visionHoverArea.containsMouse
@@ -9939,7 +9985,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -9956,12 +10002,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: visionHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: visionHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -10057,9 +10103,8 @@ Panel {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("vision") && root.rowHasIgnoredFlag("vision")
-                text: "⚠ not in this build"
+                text: root.icons.warning + " not in this build"
                 font.pixelSize: root.fontSizeSmall
-                font.italic: true
                 color: Commons.Color.urgent
               }
 
@@ -10067,7 +10112,7 @@ Panel {
               Rectangle {
                 id: extraRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("extraArgs")
                 property bool editing: false
@@ -10093,7 +10138,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -10110,12 +10155,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: extraHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: extraHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -10175,9 +10220,8 @@ Panel {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("extraArgs") && root.rowHasIgnoredFlag("extraArgs")
-                text: "⚠ not in this build"
+                text: root.icons.warning + " not in this build"
                 font.pixelSize: root.fontSizeSmall
-                font.italic: true
                 color: Commons.Color.urgent
               }
 
@@ -10188,14 +10232,14 @@ Panel {
               Rectangle {
                 id: envRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("envVars")
                 color: envHoverArea.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
                   : "transparent"
 
-                // Declared before the row so the × child sits above it and
+                // Declared before the row so the remove icon sits above it and
                 // gets the click that removes the row, not the editor.
                 MouseArea {
                   id: envHoverArea
@@ -10223,7 +10267,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -10247,20 +10291,20 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "v"
+                    text: root.icons.chevron
                     color: root.bar.foreground
                     opacity: 0.5
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: envHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: envHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -10359,7 +10403,7 @@ Panel {
                             required property int index
 
                             width: envList.width
-                            height: 26
+                            height: root.rowHeight
                             radius: 3
                             color: envVarHover.hovered
                               ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -10391,12 +10435,12 @@ Panel {
                               }
                               Text {
                                 textFormat: Text.PlainText
-                                text: "×"
+                                text: root.icons.remove
                                 Layout.leftMargin: Style.space(8)
                                 color: envVarHover.hovered ? Commons.Color.urgent : root.bar.foreground
                                 opacity: envVarHover.hovered ? 0.8 : 0.3
                                 font.family: root.bar.fontFamily
-                                font.pixelSize: root.fontSize
+                                font.pixelSize: root.iconSize
                                 MouseArea {
                                   anchors.fill: parent
                                   cursorShape: Qt.PointingHandCursor
@@ -10475,7 +10519,7 @@ Panel {
               Rectangle {
                 id: modelAliasRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("modelAlias")
                 property bool editing: false
@@ -10501,7 +10545,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -10518,12 +10562,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: modelAliasHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: modelAliasHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -10575,7 +10619,7 @@ Panel {
                 }
                 PanelToolTip {
                   visible: modelAliasHoverArea.containsMouse
-                  text: "Friendly name exposed via --alias for OpenAI-compatible clients and the UI."
+                  text: "Friendly name exposed via --alias for OpenAI-compatible clients and the UI"
                 }
               }
 
@@ -10583,7 +10627,7 @@ Panel {
               Rectangle {
                 id: systemoneCtxRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 visible: root.builtinOnPage("systemoneCtx")
                 property bool editing: false
@@ -10609,7 +10653,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -10626,12 +10670,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: systemoneCtxHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: systemoneCtxHoverArea.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -10683,7 +10727,7 @@ Panel {
                 }
                 PanelToolTip {
                   visible: systemoneCtxHoverArea.containsMouse
-                  text: "Context window for the System One backend, in tokens."
+                  text: "Context window for the System One backend, in tokens"
                 }
               }
               Text {
@@ -10691,9 +10735,8 @@ Panel {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("systemoneCtx") && root.rowHasIgnoredFlag("systemoneCtx")
-                text: "⚠ not in this build"
+                text: root.icons.warning + " not in this build"
                 font.pixelSize: root.fontSizeSmall
-                font.italic: true
                 color: Commons.Color.urgent
               }
             }
@@ -10709,7 +10752,7 @@ Panel {
                 required property var modelData
                 id: customRow
                 Layout.fillWidth: true
-                implicitHeight: 26
+                implicitHeight: root.rowHeight
                 radius: 3
                 color: customHover.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -10739,7 +10782,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: "...................................................................................................."
+                    text: root.leaderDots
                     color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
@@ -10760,12 +10803,12 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: "×"
+                    text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: customHover.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: customHover.containsMouse ? 0.8 : 0.3
                     font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
+                    font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
@@ -10776,7 +10819,7 @@ Panel {
 
                 MouseArea {
                   id: customHover
-                  // Below the row content, like every built-in row, so the ✕
+                  // Below the row content, like every built-in row, so the remove icon
                   // is reachable instead of only opening the editor.
                   z: -1
                   anchors.fill: parent
@@ -10949,7 +10992,7 @@ Panel {
             Text {
               textFormat: Text.PlainText
               Layout.fillWidth: true
-              text: "...................................................................................................."
+              text: root.leaderDots
               color: root.bar.foreground
               opacity: 0.15
               elide: Text.ElideRight
