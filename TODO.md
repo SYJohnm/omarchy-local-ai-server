@@ -44,6 +44,14 @@ Fait, d'après PLAN.md : le panneau ne lance plus de relais Python intermédiair
 - [ ] Reste de l'étape 6 : la carte de survol (`PopupCard`) montre encore les
       seules métriques de l'index 0 — une ligne par instance (modèle, fork,
       port, t/s, pp%) reste à faire.
+- [ ] Rien ne retire le profil d'un modèle qui n'existe plus : il reste dans
+      `profiles`/`models.ini` et donc dans le preset du routeur. Inoffensif
+      (llama-server enregistre la section et n'échoue qu'à la demande), mais
+      c'est ce qui avait laissé 6 entrées fantômes `Q4-K-M`/`Q8-0` chez un
+      utilisateur. Pas de balayage automatique : les modèles vivent souvent
+      sur un disque amovible (`/run/media/...`) et un disque démonté ferait
+      disparaître tous les profils — il faudrait une action manuelle, avec le
+      même garde-fou que le balayage des caches (`slotKeepProbed`).
 - [ ] Un `.tmp` de slot abandonné (instance détruite pendant une sauvegarde)
       n'est balayé par rien : `Model.slotFilePrefix` n'accepte que
       `*.slot<N>.bin`.
