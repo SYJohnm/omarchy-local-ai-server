@@ -65,8 +65,19 @@ GB, so delete that folder too if you are done with it.
 
 The server runs as your user and only listens on `127.0.0.1` unless you change
 the host; the panel warns when the host is not loopback, because llama-server
-has no API key. Nothing else in your configuration is written to — see
-*Hooks* for wiring other tools to it.
+has no API key.
+
+**Privileges.** The widget never uses `sudo`. Servers are launched as your own
+transient **systemd user** units (`systemd-run --user`), or with `setsid` where
+there is no user session. The one privileged action is **Take over**, which
+stops a distribution-managed `ollama.service` so the widget can run its own in
+its place; that is a system unit, so `systemctl` raises a polkit prompt and you
+authorise it. It happens only when you press that button.
+
+**What it writes.** Its own settings and prompt caches under
+`~/.local/state/omarchy/io.github.syjohnm.local-ai-server/`, and this widget's
+own entry in `shell.json`. Nothing else in your configuration is touched — see
+*Hooks* for wiring other tools to the running server.
 
 ## Settings
 
