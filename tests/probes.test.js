@@ -239,8 +239,9 @@ const SNITCH = (extra) => [
   '  --help)',
   '    caps=$(awk \'/CapEff/{print ($2 == "0000000000000000") ? "nocaps" : "hascaps"}\' /proc/self/status)',
   '    home=$([ -d /home ] && echo sawhome || echo nohome)',
+  '    pw=$([ -r /etc/passwd ] && echo sawetcpw || echo noetcpw)',
   '    printf "%s\\n" "  -ctk,  --cache-type-k TYPE" \\',
-  '      "                 allowed values: uid$(id -u), $home, $caps"',
+  '      "                 allowed values: uid$(id -u), $home, $caps, $pw"',
   '    ;;',
   "esac",
   ...(extra || []),
@@ -278,6 +279,9 @@ test("a build under ~/Downloads is identified in a sandbox, not launched", () =>
       "the user's home was reachable from inside: " + build.cacheTypes.join(" "))
     assert.ok(build.cacheTypes.includes("nocaps"),
       "kept capabilities: " + build.cacheTypes.join(" "))
+    // The sandbox shows only what linking needs, not the account config.
+    assert.ok(build.cacheTypes.includes("noetcpw"),
+      "/etc/passwd was readable from inside: " + build.cacheTypes.join(" "))
 
     // Identified is not launchable. `missing` is what keeps it out of Auto.
     assert.strictEqual(build.needsApproval, true)

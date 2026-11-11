@@ -87,3 +87,49 @@ test("flag kept in profile but ignored at launch on build B", () => {
   assert.strictEqual(Backends.supportsFlag(oldBuild, "--flash-attn"), false)
   assert.strictEqual(Backends.supportsFlag(dummyBuild, "--flash-attn"), true)
 })
+
+// ---- The gate blocks a launch, not just the list ----
+//
+// A build held for approval carries `missing: true`, which is the flag the
+// launch paths already key on. These assert that, because the whole gate rests
+// on it: if a held build could win Auto, it would be started unconfined with
+// the models and the network, which is the one thing approval exists to stop.
+
+const heldBuild = {
+  path: "/home/u/Downloads/llama-x/llama-server",
+  fork: "llama-x",
+  cacheTypes: ["f16", "q8_0"],
+  flags: ["--ctx-size"],
+  missing: true,
+  needsApproval: true,
+  why: ["is in ~/Downloads, so its presence only shows that something was downloaded"]
+}
+const okBuild = {
+  path: "/usr/bin/llama-server",
+  fork: "llama.cpp (system package)",
+  cacheTypes: ["f16", "q8_0"],
+  flags: ["--ctx-size"]
+}
+
+test("a build held for approval is not available to launch", () => {
+  assert.strictEqual(Backends.buildAvailable(heldBuild), false)
+  assert.strictEqual(Backends.buildAvailable(okBuild), true)
+})
+
+test("a build held for approval cannot serve a model's tuning", () => {
+  // Its --help said it supports these types; being held still rules it out.
+  assert.strictEqual(Backends.buildSupports(heldBuild, ["f16", "f16"]), false)
+  assert.strictEqual(Backends.buildSupports(okBuild, ["f16", "f16"]), true)
+})
+
+test("Auto never resolves to a build held for approval", () => {
+  assert.strictEqual(Backends.resolveBuild([heldBuild], "", "f16", "f16"), null)
+  assert.strictEqual(
+    Backends.resolveBuild([heldBuild, okBuild], "", "f16", "f16").path, okBuild.path)
+})
+
+test("picking a held build explicitly does not launch it either", () => {
+  // Selecting it by hand is not approval: the Build picker can still name a
+  // path that the gate has not cleared.
+  assert.strictEqual(Backends.resolveBuild([heldBuild], heldBuild.path, "f16", "f16"), null)
+})

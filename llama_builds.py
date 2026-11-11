@@ -194,9 +194,14 @@ def sandbox(argv, allow_dir):
     """argv confined so that identifying a build cannot double as running it.
 
     No network, nothing writable, no $HOME, no environment, no capabilities,
-    its own PID namespace, and uid 65534 inside. The binary's own directory is
-    bound read-only because its sibling .so files are what it links against;
-    /opt comes along for CUDA and ROCm runtimes, which live there.
+    its own PID namespace, and uid 65534 inside.
+
+    What it does see is only enough to link and print: the loader and the
+    shared libraries, the three linker files under /etc, /opt for the CUDA and
+    ROCm runtimes that live there, and its own directory, because the .so
+    files it links against sit beside it. Not the rest of /etc, which is where
+    the account and ssh configuration is, and not /usr/share or /usr/include.
+    Measured: 202 visible /etc entries become 3.
 
     Returns None when bwrap is absent, which callers read as "cannot identify
     this safely" rather than falling back to running it unconfined.
@@ -213,8 +218,13 @@ def sandbox(argv, allow_dir):
             # mounted over a parent afterwards would hide the binary, which
             # looks exactly like "not a llama-server".
             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-            "--ro-bind", "/usr", "/usr",
-            "--ro-bind-try", "/etc", "/etc",
+            # /usr/lib for the loader and the libraries; /usr/bin because the
+            # confined caller may be git, which is an executable.
+            "--ro-bind", "/usr/lib", "/usr/lib",
+            "--ro-bind", "/usr/bin", "/usr/bin",
+            "--ro-bind-try", "/etc/ld.so.cache", "/etc/ld.so.cache",
+            "--ro-bind-try", "/etc/ld.so.conf", "/etc/ld.so.conf",
+            "--ro-bind-try", "/etc/ld.so.conf.d", "/etc/ld.so.conf.d",
             "--ro-bind-try", "/opt", "/opt",
             "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64",
             "--symlink", "usr/bin", "/bin", "--symlink", "usr/bin", "/sbin",

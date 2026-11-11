@@ -2461,7 +2461,20 @@ Panel {
         var savedBuilds = []
         for (var sb = 0; sb < parsed.llamaBuilds.length; sb++) {
           var build = parsed.llamaBuilds[sb]
-          if (build && typeof build.path === "string") savedBuilds.push(build)
+          if (!build || typeof build.path !== "string") continue
+          // The cached list is restored before the probe can re-check it, and
+          // a file written by a version that predates the gate carries no
+          // verdict at all -- so every restored build is held until this
+          // session's probe says otherwise. With startOnLogin that window is
+          // long enough to launch one, and the path it names need not even
+          // still be the build that was identified.
+          if (root.approvedBuilds.indexOf(build.path) === -1) {
+            build = Object.assign({}, build)
+            build.missing = true
+            build.needsApproval = true
+            build.why = ["has not been re-checked since the panel started"]
+          }
+          savedBuilds.push(build)
         }
         root.llamaBuilds = Backends.mergeBuilds(savedBuilds, root.llamaBuilds)
       }
@@ -3115,9 +3128,18 @@ Panel {
           ollama: root.ollamaBinary,
           decision: root.activeSystemoneBinary,
           resolvedChatBuild: root.resolvedBuild ? root.resolvedBuild.real : "",
+          // The gate verdict is reported because "why will this build not
+          // start" is otherwise invisible from outside the panel.
           detectedBuilds: root.llamaBuilds.map(function(b) {
-            return { path: b.path, fork: b.fork, commit: b.commit, gpu: b.gpu }
-          })
+            return {
+              path: b.path, fork: b.fork, commit: b.commit, gpu: b.gpu,
+              gate: b.blocked === true ? "blocked"
+                : (b.needsApproval === true ? "needs approval"
+                  : (b.missing === true ? "missing" : "launchable")),
+              why: b.why || []
+            }
+          }),
+          approvedBuilds: root.approvedBuilds
         },
         hardware: root.hardware,
         // One entry per server this widget manages, each naming the unit and
