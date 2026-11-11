@@ -59,6 +59,7 @@ GB, so delete that folder too if you are done with it.
 |---|---|
 | `llama-server` or `ollama` | The backend itself. Every build is detected; see below. |
 | `bash`, `curl`, `python3`, `find` | Launch, health, model probing. |
+| `bwrap` (recommended) | Sandboxes the `--version`/`--help` probe that identifies a build, so a binary you have not vouched for can be identified without being let loose. Shipped with **bubblewrap**, a dependency of flatpak. Without it, builds found by scanning are listed unidentified. |
 | `systemd-run` (recommended) | Keeps the server a detached **systemd** user unit, which is what makes it survive `omarchy restart shell`. Without it the launch falls back to `setsid`. |
 | `git`, `nvidia-smi` or `rocm-smi` | Optional: name builds after their checkout; VRAM-aware suggestions. |
 | A Nerd Font | For the bar glyph and the panel's icons. Omarchy installs JetBrainsMono Nerd Font and the shell draws in it, so nothing to do. |
@@ -99,13 +100,37 @@ Selected model, tuning values, host and port are runtime state in
 ## Models and builds
 
 Many people run more than one `llama-server` (upstream, a fork, the package).
-`llama_builds.py` finds them all — install paths, `PATH`, and git checkouts
-with a `build/bin/` under `~`. A fork that names its server `beellama-server`
-is accepted too. Identifying a build means running it (`--version`, `--help`),
-so the scan only picks up binaries you installed or built yourself; it does not
-look in `~/Downloads`, where a file's presence only means something was
-downloaded. An extracted release archive is added by naming it in **Extra
-llama-server binary**, which is taken as given. Each build is identified by
+`llama_builds.py` finds them all — install paths, `PATH`, `build/bin/` under
+`~`, release archives under `~/Downloads`, and `/opt`. A fork that names its
+server `beellama-server` is accepted too. Each build is identified by remote,
+commit, date and GPU backend, plus the flags its `--help` accepts.
+
+### Identifying a build runs it
+
+Nothing on disk carries a build's version or its KV cache types: `--version`
+and `--help` are the only source, so identifying a build means executing it.
+That is done inside a `bwrap` sandbox — uid 65534, all capabilities dropped,
+no network, no environment, read-only system paths, its own PID namespace, and
+nothing of `$HOME` but the build's own directory. So a build is safe to *look*
+at before you know anything about it, which is the point: you cannot judge a
+fork you cannot see.
+
+**Trusting a build is a separate step, and it is the one the sandbox cannot do
+for you.** A trusted build runs as your server for real — your files, your
+models, the network, your account. The plugin holds back anything it found by
+scanning and shows a `trust to use` tag with the reason; one click approves it.
+
+Ownership and file mode are not evidence of intent here, which is why the
+plugin does not treat them as such: extracting a downloaded archive makes you
+the owner of every file in it, mode 0755 and all, and the archive picks its own
+directory name and can ship its own `.git`. **A forged build therefore looks
+exactly like a genuine one in the list.** Trust one because you know where it
+came from — not because it appears, and not all of them out of habit. A build
+whose file another account on the machine can rewrite is marked `blocked` and
+cannot be trusted at all, since approval could not bind what runs later.
+
+Without `bwrap` installed there is no safe way to identify an unvouched build,
+so those are listed unidentified rather than run unconfined. Each build is identified by
 remote, commit, date and GPU backend, plus the flags its `--help` accepts.
 With more than one build the Model and Server pages show a **Build** picker;
 **Auto** (the default) takes the first build that serves the model's tuning.

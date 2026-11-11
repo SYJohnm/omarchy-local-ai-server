@@ -279,6 +279,13 @@ Panel {
   // Paths added by hand through "Add fork"; keeps every added build instead of
   // replacing the single altBinary setting.
   property var extraBuildPaths: []
+
+  // Builds the user has agreed may be launched. A build is identified inside
+  // a sandbox whether or not it is in here (llama_builds.py sandbox()), so
+  // this grants running it as a real server -- unconfined, with access to the
+  // models, the network and the account. Separate from extraBuildPaths on
+  // purpose: naming a path says where to look, not that it is vouched for.
+  property var approvedBuilds: []
   property bool buildsProbed: false
   property string llamaBuild: ""
   readonly property var resolvedBuild:
@@ -2437,6 +2444,17 @@ Panel {
         }
         root.extraBuildPaths = extraPaths
       }
+      if (Array.isArray(parsed.approvedBuilds)) {
+        var okPaths = []
+        for (var ab = 0; ab < parsed.approvedBuilds.length; ab++) {
+          var abv = parsed.approvedBuilds[ab]
+          if (typeof abv === "string" && abv.trim() !== "") {
+            var abp = expandPath(abv)
+            if (okPaths.indexOf(abp) === -1) okPaths.push(abp)
+          }
+        }
+        root.approvedBuilds = okPaths
+      }
       if (Array.isArray(parsed.detectedModelDirs))
         root.detectedModelDirs = Backends.mergeDirs(parsed.detectedModelDirs, root.detectedModelDirs)
       if (Array.isArray(parsed.llamaBuilds)) {
@@ -2531,6 +2549,7 @@ Panel {
       detectedModelDirs: root.detectedModelDirs,
       extraModelDirs: root.extraModelDirs,
       extraBuildPaths: root.extraBuildPaths,
+      approvedBuilds: root.approvedBuilds,
       llamaBuilds: root.llamaBuilds,
       kvPersistence: root.kvPersistence,
       startOnLogin: root.startOnLogin,
@@ -2866,8 +2885,75 @@ Panel {
     for (var i = 0; i < root.extraBuildPaths.length; i++)
       if (root.extraBuildPaths[i] !== path) next.push(root.extraBuildPaths[i])
     root.extraBuildPaths = next
+    // Forgetting a build withdraws the approval too, so re-adding the same
+    // path later asks again rather than inheriting a decision made about
+    // whatever used to be at it.
+    root.revokeBuild(path)
     if (root.llamaBuild === path) root.llamaBuild = ""
     root.probeBuilds()
+  }
+
+  function trustBuild(path) {
+    var file = expandPath(String(path || "").trim())
+    if (file === "") return
+    var next = root.approvedBuilds.slice()
+    if (next.indexOf(file) === -1) next.push(file)
+    root.approvedBuilds = next
+    root.scheduleSettingsSave()
+    root.probeBuilds()
+    root.note("builds", "trusted", file)
+  }
+
+  function revokeBuild(path) {
+    var file = expandPath(String(path || "").trim())
+    var next = []
+    for (var i = 0; i < root.approvedBuilds.length; i++)
+      if (root.approvedBuilds[i] !== file) next.push(root.approvedBuilds[i])
+    if (next.length === root.approvedBuilds.length) return
+    root.approvedBuilds = next
+    if (root.llamaBuild === file) root.llamaBuild = ""
+    root.scheduleSettingsSave()
+    root.probeBuilds()
+    root.note("builds", "approval withdrawn", file)
+  }
+
+  // Builds that were identified but may not be launched, and why.
+  readonly property var heldBuilds: {
+    var out = []
+    for (var i = 0; i < root.llamaBuilds.length; i++) {
+      var b = root.llamaBuilds[i]
+      if (b && (b.needsApproval === true || b.blocked === true)) out.push(b)
+    }
+    return out
+  }
+
+  readonly property string trustNote: {
+    if (root.heldBuilds.length === 0) return ""
+    var why = []
+    var anyBlocked = false
+    for (var i = 0; i < root.heldBuilds.length; i++) {
+      if (root.heldBuilds[i].blocked === true) anyBlocked = true
+      var list = root.heldBuilds[i].why || []
+      for (var j = 0; j < list.length; j++) {
+        var w = String(list[j])
+        if (why.indexOf(w) === -1) why.push(w)
+      }
+    }
+    var out = "Reading a build's version means running it — nothing on disk carries the "
+      + "build number or the cache types. So the plugin runs it sandboxed: as nobody, no "
+      + "network, no reach into your home, no environment. That is this side of the "
+      + "bargain, and it is why the versions above are safe to look at even for a build "
+      + "you have never seen.\n\nTrusting one is the step the sandbox cannot do for you: "
+      + "it then runs as your server for real, with your files, your models and the "
+      + "network. A forged build looks exactly like a genuine one in this list, so trust "
+      + "a build because you know where it came from — not because it is listed, and not "
+      + "all of them out of habit. A build installed by a package manager is trusted "
+      + "already; this one " + why.join("; and this one ") + "."
+    if (anyBlocked)
+      out += "\n\nA blocked build cannot be trusted from here at all: another account on "
+        + "this machine can rewrite it, so what you approve now need not be what runs "
+        + "later. Change its owner or permissions first."
+    return out
   }
 
   readonly property var setupModelDirs: {
@@ -3153,7 +3239,10 @@ Panel {
     if (root.configuredSystemoneBinary !== "") extra.push(expandPath(root.configuredSystemoneBinary))
     if (root.detectedLlamaBinary !== "") extra.push(root.detectedLlamaBinary)
     for (var i = 0; i < root.extraBuildPaths.length; i++) extra.push(expandPath(root.extraBuildPaths[i]))
-    buildsProbe.command = ["python3", root.pluginDir + "/llama_builds.py"].concat(extra)
+    var argv = ["python3", root.pluginDir + "/llama_builds.py"].concat(extra)
+    if (root.approvedBuilds.length > 0)
+      argv = argv.concat(["--trust"]).concat(root.approvedBuilds)
+    buildsProbe.command = argv
     buildsProbe.running = true
   }
 
@@ -7115,7 +7204,10 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
+                    // A held build also carries `missing`, which is what keeps
+                    // it out of Auto; only a genuinely absent one says so.
                     visible: modelData.missing === true
+                      && modelData.needsApproval !== true && modelData.blocked !== true
                     text: "missing"
                     color: Commons.Color.urgent
                     opacity: 0.8
@@ -7124,8 +7216,41 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
+                    visible: modelData.needsApproval === true
+                    text: "trust to use"
+                    color: Commons.Color.warning
+                    opacity: 0.8
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSizeSmall
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    visible: modelData.blocked === true
+                    text: "blocked"
+                    color: Commons.Color.urgent
+                    opacity: 0.8
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSizeSmall
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    text: root.icons.check
+                    visible: modelData.needsApproval === true
+                    color: Commons.Color.warning
+                    opacity: 0.75
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSizeSmall
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.trustBuild(modelData.path)
+                    }
+                  }
+                  Text {
+                    textFormat: Text.PlainText
                     text: root.icons.remove
                     visible: root.extraBuildPaths.indexOf(modelData.path) !== -1
+                      || root.approvedBuilds.indexOf(modelData.path) !== -1
                     color: root.bar.foreground
                     opacity: 0.45
                     font.family: root.bar.fontFamily
@@ -7145,6 +7270,19 @@ Panel {
               Layout.fillWidth: true
               visible: root.llamaBuilds.length === 0
               text: "No llama.cpp build detected yet"
+              color: root.bar.foreground
+              opacity: 0.45
+              font.family: root.bar.fontFamily
+              font.pixelSize: root.fontSizeSmall
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              Layout.fillWidth: true
+              Layout.topMargin: Style.space(2)
+              visible: root.trustNote !== ""
+              text: root.trustNote
+              wrapMode: Text.WordWrap
               color: root.bar.foreground
               opacity: 0.45
               font.family: root.bar.fontFamily

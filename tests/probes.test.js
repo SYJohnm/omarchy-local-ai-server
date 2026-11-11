@@ -223,100 +223,97 @@ test("llama_builds emits both long and short flags from --help", () => {
   }
 })
 
-// Identifying a build means running it, so an unselected binary under
-// ~/Downloads must never be discovered: extracting a downloaded archive makes
-// the user the owner of every file in it (mode 0755 and all), and the archive
-// picks its own directory name, so neither ownership, mode nor a "llama" name
-// is evidence the user meant to run it. The marker file proves non-execution:
-// asserting only that the build is absent from the list would still pass if it
-// had been run and then rejected.
-test("llama_builds neither runs nor lists a binary dropped in ~/Downloads", () => {
+// Identifying a build means running it: --version carries the build number
+// and commit, --help the KV cache types, and nothing on disk carries either.
+// So the run is confined instead of avoided, and these tests prove the
+// confinement rather than assuming it -- the fake build reports its uid,
+// whether it can see /home and whether it kept any capabilities, smuggled out
+// through --cache-type-k's allowed values, which is a field the probe parses.
+// Asserting only that the build is absent from the list would prove nothing:
+// it would pass just as well if the binary had been run unconfined and then
+// rejected.
+const SNITCH = (extra) => [
+  "#!/bin/sh",
+  'case "$1" in',
+  '  --version) echo "version: 9.9 (build 42, commit abcdef0)" ;;',
+  '  --help)',
+  '    caps=$(awk \'/CapEff/{print ($2 == "0000000000000000") ? "nocaps" : "hascaps"}\' /proc/self/status)',
+  '    home=$([ -d /home ] && echo sawhome || echo nohome)',
+  '    printf "%s\\n" "  -ctk,  --cache-type-k TYPE" \\',
+  '      "                 allowed values: uid$(id -u), $home, $caps"',
+  '    ;;',
+  "esac",
+  ...(extra || []),
+  ""
+].join("\n")
+
+function fakeBuild(dir, name) {
+  fs.mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, name || "llama-server")
+  fs.writeFileSync(file, SNITCH())
+  fs.chmodSync(file, 0o755)
+  return file
+}
+
+function probe(home, args) {
+  return JSON.parse(execFileSync("python3", [BUILDS].concat(args || []), {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home }
+  }))
+}
+
+test("a build under ~/Downloads is identified in a sandbox, not launched", () => {
   const home = tmpdir()
   try {
-    const release = path.join(home, "Downloads", "llama-test-bin", "llama-test")
-    fs.mkdirSync(release, { recursive: true })
-    const marker = path.join(home, "ran")
-    const fake = path.join(release, "llama-server")
-    fs.writeFileSync(fake, [
-      "#!/bin/sh",
-      'echo "$1" >> ' + JSON.stringify(marker),
-      'case "$1" in',
-      '  --version) echo "version: 9.9 (build 42, commit abcdef0)" ;;',
-      '  --help) printf "%s\\n" "-c, --ctx-size N    context size" ;;',
-      "esac",
-      ""
-    ].join("\n"))
-    fs.chmodSync(fake, 0o755)
+    const fake = fakeBuild(path.join(home, "Downloads", "llama-test-bin", "llama-test"))
+    const build = probe(home).find((b) => b.path === fake)
 
-    const builds = JSON.parse(execFileSync("python3", [BUILDS], {
-      encoding: "utf8",
-      env: { ...process.env, HOME: home }
-    }))
-    assert.ok(!fs.existsSync(marker),
-      "executed a binary from ~/Downloads: " + (fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : ""))
-    assert.ok(!builds.some((b) => b.path === fake),
-      "offered a binary from ~/Downloads: " + JSON.stringify(builds))
+    assert.ok(build, "the build was not listed; the user cannot decide about a build they cannot see")
+    assert.strictEqual(build.version, "9.9", "it was not identified, so it was never actually run")
+
+    // What the sandbox was for.
+    assert.ok(build.cacheTypes.includes("uid65534"),
+      "ran as the desktop user, not as nobody: " + build.cacheTypes.join(" "))
+    assert.ok(build.cacheTypes.includes("nohome"),
+      "the user's home was reachable from inside: " + build.cacheTypes.join(" "))
+    assert.ok(build.cacheTypes.includes("nocaps"),
+      "kept capabilities: " + build.cacheTypes.join(" "))
+
+    // Identified is not launchable. `missing` is what keeps it out of Auto.
+    assert.strictEqual(build.needsApproval, true)
+    assert.strictEqual(build.missing, true)
+    assert.ok((build.why || []).join(" ").includes("Downloads"),
+      "no reason given for holding it: " + JSON.stringify(build.why))
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
 
-// The escape hatch the Downloads rule depends on: a path the user named is
-// taken as given, wherever it lives. Without this, dropping the Downloads glob
-// would leave an extracted release unusable rather than opt-in.
-test("llama_builds describes a configured binary under ~/Downloads", () => {
+test("--trust makes a held build launchable", () => {
   const home = tmpdir()
   try {
-    const release = path.join(home, "Downloads", "llama-test-bin")
-    fs.mkdirSync(release, { recursive: true })
-    const fake = path.join(release, "llama-server")
-    fs.writeFileSync(fake, [
-      "#!/bin/sh",
-      'case "$1" in',
-      '  --version) echo "version: 9.9 (build 42, commit abcdef0)" ;;',
-      '  --help) printf "%s\\n" "-c, --ctx-size N    context size" ;;',
-      "esac",
-      ""
-    ].join("\n"))
-    fs.chmodSync(fake, 0o755)
-
-    const builds = JSON.parse(execFileSync("python3", [BUILDS, fake], {
-      encoding: "utf8",
-      env: { ...process.env, HOME: home }
-    }))
-    const build = builds.find((b) => b.path === fake)
-    assert.ok(build, "configured release was not described: " + JSON.stringify(builds))
-    assert.ok(build.flags.includes("--ctx-size"))
+    const fake = fakeBuild(path.join(home, "Downloads", "llama-test-bin", "llama-test"))
+    const build = probe(home, ["--trust", fake]).find((b) => b.path === fake)
+    assert.ok(build, "a trusted build vanished from the list")
+    assert.strictEqual(build.version, "9.9")
+    assert.ok(!build.needsApproval, "still held after being trusted")
+    assert.ok(!build.missing, "still kept out of Auto after being trusted")
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
 
-// A real checkout is still found: the fix must not cost the feature the plugin
-// exists for -- picking among several forks built under $HOME.
-test("llama_builds still finds a git checkout built under $HOME", () => {
+// Naming a path says where to look, which is not the same as vouching for
+// what is at it -- a stale or mistyped path would otherwise carry the
+// authority of an approval.
+test("a configured path is not itself approval", () => {
   const home = tmpdir()
   try {
-    const bin = path.join(home, "ik_llama.cpp", "build", "bin")
-    fs.mkdirSync(bin, { recursive: true })
-    fs.mkdirSync(path.join(home, "ik_llama.cpp", ".git"), { recursive: true })
-    const fake = path.join(bin, "llama-server")
-    fs.writeFileSync(fake, [
-      "#!/bin/sh",
-      'case "$1" in',
-      '  --version) echo "version: 9.9 (build 42, commit abcdef0)" ;;',
-      '  --help) printf "%s\\n" "-c, --ctx-size N    context size" ;;',
-      "esac",
-      ""
-    ].join("\n"))
-    fs.chmodSync(fake, 0o755)
-
-    const builds = JSON.parse(execFileSync("python3", [BUILDS], {
-      encoding: "utf8",
-      env: { ...process.env, HOME: home }
-    }))
-    assert.ok(builds.some((b) => b.path === fake),
-      "checkout build was not discovered: " + JSON.stringify(builds))
+    const fake = fakeBuild(path.join(home, "Downloads", "llama-test-bin"))
+    const build = probe(home, [fake]).find((b) => b.path === fake)
+    assert.ok(build, "a configured build was not listed")
+    assert.strictEqual(build.version, "9.9", "a configured build was not identified")
+    assert.strictEqual(build.needsApproval, true, "a configured path approved itself")
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.syjohnm.local-ai-server",
   "name": "Local AI Server",
-  "version": "3.9.1",
+  "version": "3.10.0",
   "author": "SYJohnm",
   "license": "MIT",
   "description": "Run a local llama.cpp or ollama server from the bar: any llama.cpp build or fork (picked per model), live prompt/generation speed, per-model tuning, and the prompt cache kept across restarts. Direct llama-server, or native router mode serving every model from one process. Several instances at once, plus a System One decision model alongside them on its own build.",
