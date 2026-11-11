@@ -99,10 +99,13 @@ Selected model, tuning values, host and port are runtime state in
 ## Models and builds
 
 Many people run more than one `llama-server` (upstream, a fork, the package).
-`llama_builds.py` finds them all — install paths, `PATH`, checkouts with a
-`build/bin/` under `~`, and extracted release archives such as
-`~/Downloads/llama-b1234-bin-.../llama-b1234/llama-server`. A fork that names
-its server `beellama-server` is accepted too. Each build is identified by
+`llama_builds.py` finds them all — install paths, `PATH`, and git checkouts
+with a `build/bin/` under `~`. A fork that names its server `beellama-server`
+is accepted too. Identifying a build means running it (`--version`, `--help`),
+so the scan only picks up binaries you installed or built yourself; it does not
+look in `~/Downloads`, where a file's presence only means something was
+downloaded. An extracted release archive is added by naming it in **Extra
+llama-server binary**, which is taken as given. Each build is identified by
 remote, commit, date and GPU backend, plus the flags its `--help` accepts.
 With more than one build the Model and Server pages show a **Build** picker;
 **Auto** (the default) takes the first build that serves the model's tuning.

@@ -223,12 +223,84 @@ test("llama_builds emits both long and short flags from --help", () => {
   }
 })
 
-test("llama_builds finds an extracted prebuilt release under ~/Downloads", () => {
+// Identifying a build means running it, so an unselected binary under
+// ~/Downloads must never be discovered: extracting a downloaded archive makes
+// the user the owner of every file in it (mode 0755 and all), and the archive
+// picks its own directory name, so neither ownership, mode nor a "llama" name
+// is evidence the user meant to run it. The marker file proves non-execution:
+// asserting only that the build is absent from the list would still pass if it
+// had been run and then rejected.
+test("llama_builds neither runs nor lists a binary dropped in ~/Downloads", () => {
   const home = tmpdir()
   try {
     const release = path.join(home, "Downloads", "llama-test-bin", "llama-test")
     fs.mkdirSync(release, { recursive: true })
+    const marker = path.join(home, "ran")
     const fake = path.join(release, "llama-server")
+    fs.writeFileSync(fake, [
+      "#!/bin/sh",
+      'echo "$1" >> ' + JSON.stringify(marker),
+      'case "$1" in',
+      '  --version) echo "version: 9.9 (build 42, commit abcdef0)" ;;',
+      '  --help) printf "%s\\n" "-c, --ctx-size N    context size" ;;',
+      "esac",
+      ""
+    ].join("\n"))
+    fs.chmodSync(fake, 0o755)
+
+    const builds = JSON.parse(execFileSync("python3", [BUILDS], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home }
+    }))
+    assert.ok(!fs.existsSync(marker),
+      "executed a binary from ~/Downloads: " + (fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : ""))
+    assert.ok(!builds.some((b) => b.path === fake),
+      "offered a binary from ~/Downloads: " + JSON.stringify(builds))
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The escape hatch the Downloads rule depends on: a path the user named is
+// taken as given, wherever it lives. Without this, dropping the Downloads glob
+// would leave an extracted release unusable rather than opt-in.
+test("llama_builds describes a configured binary under ~/Downloads", () => {
+  const home = tmpdir()
+  try {
+    const release = path.join(home, "Downloads", "llama-test-bin")
+    fs.mkdirSync(release, { recursive: true })
+    const fake = path.join(release, "llama-server")
+    fs.writeFileSync(fake, [
+      "#!/bin/sh",
+      'case "$1" in',
+      '  --version) echo "version: 9.9 (build 42, commit abcdef0)" ;;',
+      '  --help) printf "%s\\n" "-c, --ctx-size N    context size" ;;',
+      "esac",
+      ""
+    ].join("\n"))
+    fs.chmodSync(fake, 0o755)
+
+    const builds = JSON.parse(execFileSync("python3", [BUILDS, fake], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home }
+    }))
+    const build = builds.find((b) => b.path === fake)
+    assert.ok(build, "configured release was not described: " + JSON.stringify(builds))
+    assert.ok(build.flags.includes("--ctx-size"))
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// A real checkout is still found: the fix must not cost the feature the plugin
+// exists for -- picking among several forks built under $HOME.
+test("llama_builds still finds a git checkout built under $HOME", () => {
+  const home = tmpdir()
+  try {
+    const bin = path.join(home, "ik_llama.cpp", "build", "bin")
+    fs.mkdirSync(bin, { recursive: true })
+    fs.mkdirSync(path.join(home, "ik_llama.cpp", ".git"), { recursive: true })
+    const fake = path.join(bin, "llama-server")
     fs.writeFileSync(fake, [
       "#!/bin/sh",
       'case "$1" in',
@@ -243,10 +315,8 @@ test("llama_builds finds an extracted prebuilt release under ~/Downloads", () =>
       encoding: "utf8",
       env: { ...process.env, HOME: home }
     }))
-    const build = builds.find((b) => b.path === fake)
-    assert.ok(build, "prebuilt release was not discovered: " + JSON.stringify(builds))
-    assert.strictEqual(build.fork, "llama-test")
-    assert.ok(build.flags.includes("--ctx-size"))
+    assert.ok(builds.some((b) => b.path === fake),
+      "checkout build was not discovered: " + JSON.stringify(builds))
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }

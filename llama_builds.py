@@ -19,8 +19,13 @@ from its path:
             differs most between forks, and the one a launch fails on
 
 EXTRA_PATH entries (the configured binaries) come first, then the usual
-install locations, then any checkout under $HOME with a build/bin/. The same
-file reached through a symlink is listed once.
+install locations, then any git checkout under $HOME with a build/bin/. The
+same file reached through a symlink is listed once.
+
+Identifying a build means running it, so discovery only picks up binaries
+whose presence is evidence the user put them there deliberately. A build
+anywhere else -- an extracted release archive, anything under ~/Downloads --
+is used by naming it in "Extra llama-server binary", which is taken as given.
 
 Prints a JSON array. Always exits 0: a build that cannot be run is skipped.
 """
@@ -49,11 +54,9 @@ FIXED = [
     "/opt/llama.cpp/bin/llama-server",
 ]
 
-# Checkouts built in place, plus extracted release archives. One and two levels
-# under $HOME cover ~/llama.cpp, ~/forks/ik_llama.cpp, ~/src/whatever;
-# build/bin/Release is the MSVC-style layout some CMake presets produce even on
-# Linux. Downloads/*/* is the usual shape of a distro tarball
-# (llama-b1234-bin-.../llama-b1234/llama-server) and was previously invisible.
+# Checkouts built in place. One and two levels under $HOME cover ~/llama.cpp,
+# ~/forks/ik_llama.cpp, ~/src/whatever; build/bin/Release is the MSVC-style
+# layout some CMake presets produce even on Linux.
 GLOBS = []
 for _name in SERVER_NAMES:
     GLOBS += [
@@ -61,9 +64,6 @@ for _name in SERVER_NAMES:
         HOME + "/*/*/build/bin/" + _name,
         HOME + "/*/build/bin/Release/" + _name,
         HOME + "/*/build-*/bin/" + _name,
-        HOME + "/Downloads/*/" + _name,
-        HOME + "/Downloads/*/*/" + _name,
-        HOME + "/Applications/*/" + _name,
         "/opt/*/bin/" + _name,
         "/opt/*/build/bin/" + _name,
     ]
@@ -73,9 +73,9 @@ GPU_LIBS = [("cuda", "CUDA"), ("hip", "ROCm"), ("vulkan", "Vulkan"),
 
 
 def trusted(path):
-    # Found builds are run (--version, --help) to identify them, so one is only
-    # picked up automatically if nobody else could have put it there: owned by
-    # this user or root, and not writable by group or others.
+    # Rules out a binary some other local user could have substituted: owned by
+    # this user or root, and not writable by group or others. It says nothing
+    # about where the file came from, so globbed paths need own_build() too.
     try:
         st = os.stat(path)
     except OSError:
@@ -83,20 +83,15 @@ def trusted(path):
     return st.st_uid in (os.getuid(), 0) and not (st.st_mode & 0o022)
 
 
-def llama_checkout(path):
-    # Globbed builds must also live in a llama-named checkout or release
-    # directory ("llama.cpp", "ik_llama.cpp", "llama-b1234-bin-...",
-    # "BeellamaCpp"): a stray repo that happens to ship a server binary is not
-    # run just for existing. Extracted releases have no build/ segment, so the
-    # directory holding the binary is the name to judge.
-    parts = os.path.realpath(path).split(os.sep)
-    if "build" in parts[1:]:
-        root = parts[parts.index("build") - 1]
-    elif len(parts) >= 2:
-        root = parts[-2]
-    else:
-        root = ""
-    return "llama" in root.lower() or "beellama" in root.lower()
+def own_build(path):
+    # A globbed build is run (--version, --help) to identify it, so it is only
+    # picked up when its presence is evidence the user built it: a git checkout
+    # above the build/ directory. Ownership and mode cannot carry that on their
+    # own -- extracting a downloaded archive makes the user the owner of
+    # everything in it, mode 0755 and all -- and neither can the directory
+    # name, which an archive chooses for itself. That is why ~/Downloads is not
+    # scanned: a file being there is evidence of a download, not of intent.
+    return bool(git_root(path))
 
 
 def candidates(extra):
@@ -124,7 +119,7 @@ def candidates(extra):
     add(shutil.which("llama-server"), trusted)
     for pattern in GLOBS:
         for p in sorted(glob.glob(pattern)):
-            add(p, lambda q: trusted(q) and (q.startswith("/opt/") or llama_checkout(q)))
+            add(p, lambda q: trusted(q) and (q.startswith("/opt/") or own_build(q)))
     return out
 
 
