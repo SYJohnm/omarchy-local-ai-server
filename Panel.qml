@@ -1480,6 +1480,30 @@ Panel {
   // server the user had just deliberately stopped.
   property bool autoStartDone: false
 
+  // When this login began, from systemd's user manager. A shell restart is
+  // not a new login: the server outlives the shell on purpose, and so does
+  // the decision to have stopped it.
+  property string sessionStamp: ""
+  // The login whose auto-start has already been spent, persisted. Without it
+  // every `omarchy restart shell` was a fresh chance to start, so a server
+  // the user had deliberately stopped came back each time the shell did.
+  property string autoStartSession: ""
+
+  onSessionStampChanged: {
+    if (root.sessionStamp !== "" && root.sessionStamp !== "unknown"
+        && root.autoStartSession === root.sessionStamp)
+      root.autoStartDone = true
+  }
+
+  function markAutoStartSpent() {
+    root.autoStartDone = true
+    if (root.sessionStamp !== "" && root.sessionStamp !== "unknown"
+        && root.autoStartSession !== root.sessionStamp) {
+      root.autoStartSession = root.sessionStamp
+      root.scheduleSettingsSave()
+    }
+  }
+
   // Everything the auto-start waits on, except the question of whether a
   // server is already there. Once these have landed the session's chance has
   // either been taken or was never needed.
@@ -1490,7 +1514,7 @@ Panel {
   // A server that is already up spends the shot, whoever started it.
   function spendAutoStart() {
     if (root.autoStartInputsReady && (root.running || root.starting))
-      root.autoStartDone = true
+      root.markAutoStartSpent()
   }
   onAutoStartInputsReadyChanged: root.spendAutoStart()
   onRunningChanged: root.spendAutoStart()
@@ -1547,7 +1571,7 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         if (!root.autoStartReady) return
-        root.autoStartDone = true
+        root.markAutoStartSpent()
         if (String(text).trim() === "active") {
           // Already up, just not answering yet: adopt it instead of replacing it.
           root.adoptRunningServer()
@@ -2568,6 +2592,7 @@ Panel {
       if (typeof parsed.keepAlive === "string") root.keepAlive = parsed.keepAlive
       if (typeof parsed.kvPersistence === "boolean") root.kvPersistence = parsed.kvPersistence
       if (typeof parsed.startOnLogin === "boolean") root.startOnLogin = parsed.startOnLogin
+      if (typeof parsed.autoStartSession === "string") root.autoStartSession = parsed.autoStartSession
       if (typeof parsed.systemoneCtx === "string") root.systemoneCtx = parsed.systemoneCtx
 
       // ids this build knows: a row renamed or dropped between versions would
@@ -2754,6 +2779,7 @@ Panel {
       llamaBuilds: root.llamaBuilds,
       kvPersistence: root.kvPersistence,
       startOnLogin: root.startOnLogin,
+      autoStartSession: root.autoStartSession,
       systemoneCtx: root.systemoneCtx,
       hiddenBuiltins: root.hiddenBuiltins, shownOptionals: root.shownOptionals,
       customParams: root.customParams,
@@ -3388,6 +3414,9 @@ Panel {
     id: capabilityProbe
     command: ["bash", "-lc",
       "command -v systemd-run >/dev/null 2>&1 && echo 'systemd=1' || echo 'systemd=0'; " +
+      // When this login began. New on every login, unchanged by a shell
+      // restart, which is the difference the auto-start has to tell apart.
+      "echo \"session=$(systemctl --user show -p ActiveEnterTimestamp --value init.scope 2>/dev/null)\"; " +
       "for b in " + Backends.llamaBinaryCandidates(Quickshell.env("HOME")).map(root.shellQuote).join(" ") + "; do " +
       "  [ -x \"$b\" ] && { echo \"llama=$b\"; break; }; done; " +
       "command -v llama-server >/dev/null 2>&1 && echo \"llamapath=$(command -v llama-server)\"; " +
@@ -3408,12 +3437,16 @@ Panel {
           var key = line.slice(0, eq)
           var value = line.slice(eq + 1)
           if (key === "systemd") root.hasSystemdRun = value === "1"
+          else if (key === "session" && value !== "") root.sessionStamp = value
           else if (key === "llama" && root.detectedLlamaBinary === "") root.detectedLlamaBinary = value
           else if (key === "llamapath" && root.detectedLlamaBinary === "") root.detectedLlamaBinary = value
           else if (key === "ollama" && root.detectedOllamaBinary === "") root.detectedOllamaBinary = value
           else if (key === "ollamapath" && root.detectedOllamaBinary === "") root.detectedOllamaBinary = value
           else if (key === "dir") dirs.push(value)
         }
+        // No systemd, or a manager too old to report it: fall back to the
+        // one-shot-per-panel rule rather than never starting again.
+        if (root.sessionStamp === "") root.sessionStamp = "unknown"
         root.detectedModelDirs = Backends.mergeDirs(root.detectedModelDirs, dirs)
         root.scheduleSettingsSave()
         root.capabilitiesProbed = true
