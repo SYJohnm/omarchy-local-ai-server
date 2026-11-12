@@ -101,3 +101,29 @@ test("valid JSON that is not a settings object is broken too", () => {
     assert.strictEqual(Model.readSettings(raw).broken, true, raw)
   }
 })
+
+test("mergeBuilds prunes a build that is gone and no longer configured", () => {
+  const stale = { path: "/home/u/beellama/llama-server", real: "/home/u/beellama/llama-server", missing: true }
+  const live = { path: "/usr/bin/llama-server", real: "/usr/bin/llama-server", missing: false }
+  const merged = B.mergeBuilds([stale, live], [live], [])
+  assert.deepStrictEqual(merged.map(b => b.path), ["/usr/bin/llama-server"])
+})
+
+test("mergeBuilds keeps a gone build the user named by hand", () => {
+  const named = { path: "/home/u/fork/llama-server", real: "/home/u/fork/llama-server", missing: true }
+  const merged = B.mergeBuilds([named], [], ["/home/u/fork/llama-server"])
+  assert.strictEqual(merged.length, 1)
+  assert.strictEqual(merged[0].missing, true)
+})
+
+test("mergeBuilds without a configured list prunes nothing (startup restore)", () => {
+  const held = { path: "/home/u/a/llama-server", real: "/home/u/a/llama-server", missing: true }
+  assert.strictEqual(B.mergeBuilds([held], []).length, 1)
+})
+
+test("mergeBuilds does not prune a build this scan only just lost", () => {
+  const wasOk = { path: "/mnt/drive/llama-server", real: "/mnt/drive/llama-server", missing: false }
+  const merged = B.mergeBuilds([wasOk], [], [])
+  assert.strictEqual(merged.length, 1)
+  assert.strictEqual(merged[0].missing, true)
+})

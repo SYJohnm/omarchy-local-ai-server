@@ -516,8 +516,9 @@ function buildAvailable(build) {
 // Merge a fresh probe into the list the widget already had. Fresh entries win
 // (they carry the current version/flags); entries only the previous list had
 // stay as `missing: true` instead of disappearing on a restart or a temporarily
-// unmounted disk.
-function mergeBuilds(previous, fresh) {
+// unmounted disk. They are dropped on the next scan that still
+// does not see them, unless `configured` names them.
+function mergeBuilds(previous, fresh, configured) {
   var out = []
   var seen = {}
   function key(build) {
@@ -539,7 +540,19 @@ function mergeBuilds(previous, fresh) {
     out.push(copy)
   }
   for (var i = 0; i < (fresh || []).length; i++) add(fresh[i], false)
-  for (var j = 0; j < (previous || []).length; j++) add(previous[j], true)
+  for (var j = 0; j < (previous || []).length; j++) {
+    var prev = previous[j]
+    // A build already flagged missing, that this scan did not report and that
+    // no setting names any more, is gone for good: it was deleted or its "Add
+    // fork" entry was removed. Carrying it forward is why a path like
+    // ~/beellama/llama-server sat in the list as `missing` for ever. The probe
+    // lists a configured path itself, present or not, so those are kept here.
+    // No `configured` means the caller cannot tell (the startup restore runs
+    // before the probe): prune nothing.
+    if (configured && prev && prev.missing === true
+        && configured.indexOf(String(prev.path || "")) === -1) continue
+    add(prev, true)
+  }
   return out
 }
 

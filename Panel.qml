@@ -3497,7 +3497,10 @@ Panel {
       onStreamFinished: {
         var builds = []
         try { builds = JSON.parse(String(text || "").trim() || "[]") } catch (e) { builds = [] }
-        root.llamaBuilds = Backends.mergeBuilds(root.llamaBuilds, Array.isArray(builds) ? builds : [])
+        var named = root.approvedBuilds.slice()
+        for (var cb = 0; cb < root.extraBuildPaths.length; cb++)
+          named.push(root.expandPath(root.extraBuildPaths[cb]))
+        root.llamaBuilds = Backends.mergeBuilds(root.llamaBuilds, Array.isArray(builds) ? builds : [], named)
         root.buildsProbed = true
         root.scheduleSettingsSave()
         if (root.settingsLoaded) root.sanitizeSettings()
