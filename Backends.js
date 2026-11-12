@@ -571,6 +571,17 @@ function buildCacheTypes(builds, chosen) {
 // parses `--help` output, so they are not the plugin's own strings. The label
 // is rendered by shared components whose Text format the plugin cannot set,
 // so markup is neutralised here rather than at each of them.
+// The same thing without the fork, for a list whose first column is already
+// the fork: "8642541 · 2026-09-02 · CUDA".
+function buildDetail(build) {
+  if (!build) return ""
+  var parts = []
+  if (build.commit) parts.push(String(build.commit).slice(0, 7))
+  if (build.date) parts.push(build.date)
+  if (build.gpu) parts.push(build.gpu)
+  return plain(parts.join(" · "), 120)
+}
+
 function buildLabel(build) {
   if (!build) return ""
   var parts = [build.fork || "llama-server"]
@@ -633,6 +644,7 @@ if (typeof module !== "undefined") {
     mergeDirs: mergeDirs,
     resolveBuild: resolveBuild,
     buildCacheTypes: buildCacheTypes,
+    buildDetail: buildDetail,
     buildLabel: buildLabel,
     plain: plain,
     installedBackends: installedBackends,

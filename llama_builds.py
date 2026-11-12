@@ -101,7 +101,9 @@ GPU_LIBS = [("cuda", "CUDA"), ("hip", "ROCm"), ("vulkan", "Vulkan"),
 # answer.
 
 def substitution_risk(path):
-    """Ways another account on this machine could change what runs.
+    """Ways another account on this machine could change what runs, in short
+    phrases: they are shown in a column, and the policy they are evidence for
+    is explained once in the panel rather than repeated per build.
 
     Never waivable. The user cannot consent on another account's behalf, and a
     build they approved yesterday could be a different program today.
@@ -112,15 +114,15 @@ def substitution_risk(path):
         return ["cannot be read"]
     out = []
     if st.st_uid not in (os.getuid(), 0):
-        out.append("is owned by another user")
+        out.append("owned by another user")
     if st.st_mode & 0o022:
-        out.append("can be rewritten by other users on this machine")
+        out.append("writable by others")
     try:
         d = os.stat(os.path.dirname(os.path.realpath(path)))
         # Without the sticky bit, write on the directory is enough to unlink
         # the binary and put another one in its place.
         if (d.st_mode & 0o022) and not (d.st_mode & 0o1000):
-            out.append("is in a directory other users can write to")
+            out.append("in a world-writable directory")
     except OSError:
         pass
     return out
@@ -142,9 +144,8 @@ def provenance_doubt(path):
         if real.startswith(d):
             return []
     if real.startswith(os.path.realpath(HOME + "/Downloads") + os.sep):
-        return ["is in ~/Downloads, so its presence only shows that something "
-                "was downloaded, not that you chose to run it"]
-    return ["was found by scanning, so nothing shows where it came from"]
+        return ["from ~/Downloads"]
+    return ["found by scanning"]
 
 
 def candidates(extra, approved):

@@ -2472,7 +2472,7 @@ Panel {
             build = Object.assign({}, build)
             build.missing = true
             build.needsApproval = true
-            build.why = ["has not been re-checked since the panel started"]
+            build.why = ["not re-checked yet"]
           }
           savedBuilds.push(build)
         }
@@ -2942,30 +2942,14 @@ Panel {
 
   readonly property string trustNote: {
     if (root.heldBuilds.length === 0) return ""
-    var why = []
+    // Each build's own reason is in its row; this says once what the rows are
+    // evidence for, which is the part a per-row phrase cannot carry.
     var anyBlocked = false
-    for (var i = 0; i < root.heldBuilds.length; i++) {
+    for (var i = 0; i < root.heldBuilds.length; i++)
       if (root.heldBuilds[i].blocked === true) anyBlocked = true
-      var list = root.heldBuilds[i].why || []
-      for (var j = 0; j < list.length; j++) {
-        var w = String(list[j])
-        if (why.indexOf(w) === -1) why.push(w)
-      }
-    }
-    var out = "Reading a build's version means running it — nothing on disk carries the "
-      + "build number or the cache types. So the plugin runs it sandboxed: as nobody, no "
-      + "network, no reach into your home, no environment. That is this side of the "
-      + "bargain, and it is why the versions above are safe to look at even for a build "
-      + "you have never seen.\n\nTrusting one is the step the sandbox cannot do for you: "
-      + "it then runs as your server for real, with your files, your models and the "
-      + "network. A forged build looks exactly like a genuine one in this list, so trust "
-      + "a build because you know where it came from — not because it is listed, and not "
-      + "all of them out of habit. A build installed by a package manager is trusted "
-      + "already; this one " + why.join("; and this one ") + "."
-    if (anyBlocked)
-      out += "\n\nA blocked build cannot be trusted from here at all: another account on "
-        + "this machine can rewrite it, so what you approve now need not be what runs "
-        + "later. Change its owner or permissions first."
+    var out = "Builds are identified in a sandbox. Trusting one lets it run for real, "
+      + "so trust only the builds you know."
+    if (anyBlocked) out += " Blocked: another account can rewrite it."
     return out
   }
 
@@ -7216,41 +7200,26 @@ Panel {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: Backends.buildLabel(modelData)
-                    color: root.bar.foreground
-                    opacity: 0.42
+                    // What is worth knowing about this build: its commit and
+                    // backend when it can be used, and otherwise why it
+                    // cannot. A held build also carries `missing`, which is
+                    // what keeps it out of Auto, so only a build that is
+                    // genuinely absent says so.
+                    text: {
+                      var reason = (modelData.why || []).join(" · ")
+                      if (modelData.blocked === true) return reason || "blocked"
+                      if (modelData.needsApproval === true) return reason || "needs approval"
+                      if (modelData.missing === true) return "missing"
+                      return Backends.buildDetail(modelData)
+                    }
+                    color: modelData.blocked === true || modelData.missing === true
+                      ? Commons.Color.urgent
+                      : (modelData.needsApproval === true ? Commons.Color.warning
+                        : root.bar.foreground)
+                    opacity: modelData.needsApproval === true || modelData.blocked === true
+                      || modelData.missing === true ? 0.8 : 0.42
                     elide: Text.ElideRight
-                    Layout.maximumWidth: Style.space(160)
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSizeSmall
-                  }
-                  Text {
-                    textFormat: Text.PlainText
-                    // A held build also carries `missing`, which is what keeps
-                    // it out of Auto; only a genuinely absent one says so.
-                    visible: modelData.missing === true
-                      && modelData.needsApproval !== true && modelData.blocked !== true
-                    text: "missing"
-                    color: Commons.Color.urgent
-                    opacity: 0.8
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSizeSmall
-                  }
-                  Text {
-                    textFormat: Text.PlainText
-                    visible: modelData.needsApproval === true
-                    text: "trust to use"
-                    color: Commons.Color.warning
-                    opacity: 0.8
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSizeSmall
-                  }
-                  Text {
-                    textFormat: Text.PlainText
-                    visible: modelData.blocked === true
-                    text: "blocked"
-                    color: Commons.Color.urgent
-                    opacity: 0.8
+                    Layout.maximumWidth: Style.space(150)
                     font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSizeSmall
                   }
