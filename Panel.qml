@@ -1459,7 +1459,30 @@ Panel {
   property bool startOnLogin: false
   // One shot per shell session. Without it a manual Stop would be undone the
   // next time any of the readiness inputs changed.
+  //
+  // It used to be set only where the auto-start actually ran, which left it
+  // false in the ordinary case: the server outlives the shell on purpose, so
+  // at most logins one is already up and the auto-start has nothing to do.
+  // The session's one shot was then still unspent, and the first manual Stop
+  // satisfied the last condition it was waiting on -- the panel restarted the
+  // server the user had just deliberately stopped.
   property bool autoStartDone: false
+
+  // Everything the auto-start waits on, except the question of whether a
+  // server is already there. Once these have landed the session's chance has
+  // either been taken or was never needed.
+  readonly property bool autoStartInputsReady:
+    root.startOnLogin && root.adoptProbed && root.settingsLoaded &&
+    root.capabilitiesProbed && (root.backend !== "llamacpp" || root.buildsProbed)
+
+  // A server that is already up spends the shot, whoever started it.
+  function spendAutoStart() {
+    if (root.autoStartInputsReady && (root.running || root.starting))
+      root.autoStartDone = true
+  }
+  onAutoStartInputsReadyChanged: root.spendAutoStart()
+  onRunningChanged: root.spendAutoStart()
+  onStartingChanged: root.spendAutoStart()
   // The adoption probe has answered, so "nothing is running" is a fact rather
   // than "not known yet". A launch sweeps the unit before starting, so firing
   // this before adoption resolves would tear down a server that was already up
