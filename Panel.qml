@@ -3134,7 +3134,7 @@ Panel {
     // so those commands are the obvious next step when they are needed.
     function diagnose(): string {
       return JSON.stringify({
-        plugin: { id: root.moduleName, version: "3.9.0" },
+        plugin: { id: root.moduleName, version: "3.10.0" },
         at: new Date().toISOString(),
         // Whether the probes that gate a launch have finished. A "nothing
         // happens when I press Start" question is usually one of these.

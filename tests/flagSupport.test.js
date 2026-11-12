@@ -2,6 +2,7 @@
 import { test, after } from "node:test"
 import assert from "node:assert"
 import Backends from "../Backends.js"
+import fs from "node:fs"
 
 const dummyBuild = {
   path: "/usr/bin/llama-server",
@@ -132,4 +133,43 @@ test("picking a held build explicitly does not launch it either", () => {
   // Selecting it by hand is not approval: the Build picker can still name a
   // path that the gate has not cleared.
   assert.strictEqual(Backends.resolveBuild([heldBuild], heldBuild.path, "f16", "f16"), null)
+})
+
+// mergeBuilds keeps a build the previous scan saw but this one did not, so it
+// sets `missing` on every entry it copies. It used to set it on fresh entries
+// too -- unconditionally false -- which silently cleared the approval gate,
+// because `missing` is exactly what every launch path keys on. A held build
+// arrived in the panel launchable, and Auto would pick it.
+
+test("mergeBuilds does not clear a held build's own verdict", () => {
+  const merged = Backends.mergeBuilds([], [heldBuild])[0]
+  assert.strictEqual(merged.missing, true, "a held build came back launchable")
+  assert.strictEqual(merged.needsApproval, true, "the reason was lost in the merge")
+  assert.strictEqual(Backends.buildAvailable(merged), false)
+  assert.strictEqual(Backends.resolveBuild([merged], "", "f16", "f16"), null,
+    "Auto picked a build that was held for approval")
+})
+
+test("mergeBuilds still clears missing for an ordinary build that came back", () => {
+  // A checkout on a drive that was unmounted and is now back.
+  const wasGone = Object.assign({}, okBuild, { missing: true })
+  const merged = Backends.mergeBuilds([wasGone], [okBuild])[0]
+  assert.strictEqual(merged.missing, false, "a build that returned stayed missing")
+  assert.strictEqual(Backends.buildAvailable(merged), true)
+})
+
+test("mergeBuilds still marks a build this scan did not find", () => {
+  const merged = Backends.mergeBuilds([okBuild], [])[0]
+  assert.strictEqual(merged.missing, true)
+})
+
+test("diagnose reports the version in manifest.json", () => {
+  // It is a literal in Panel.qml, so a version bump can leave it behind and
+  // the plugin then misreports itself to anything reading diagnose.
+  const root = new URL("..", import.meta.url)
+  const manifest = JSON.parse(fs.readFileSync(new URL("manifest.json", root), "utf8"))
+  const panel = fs.readFileSync(new URL("Panel.qml", root), "utf8")
+  const m = panel.match(/plugin:\s*\{\s*id:\s*root\.moduleName,\s*version:\s*"([^"]+)"/)
+  assert.ok(m, "diagnose no longer reports a version literal")
+  assert.strictEqual(m[1], manifest.version)
 })

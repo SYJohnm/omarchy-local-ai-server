@@ -530,7 +530,12 @@ function mergeBuilds(previous, fresh) {
     seen[k] = true
     var copy = {}
     for (var field in build) copy[field] = build[field]
-    copy.missing = missing
+    // `missing` here means only "absent from this scan". A build can also be
+    // unavailable for a reason of its own -- held for approval, or blocked --
+    // and that verdict belongs to the probe, so appearing in a fresh scan
+    // must not clear it. Without this the whole approval gate evaporates on
+    // the way into the panel: every launch path keys on `missing`.
+    copy.missing = missing || build.missing === true
     out.push(copy)
   }
   for (var i = 0; i < (fresh || []).length; i++) add(fresh[i], false)
