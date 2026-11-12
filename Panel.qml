@@ -1275,7 +1275,7 @@ Panel {
     for (var i = 0; i < root.llamaBuilds.length; i++) {
       var b = root.llamaBuilds[i]
       if (b && b.decision === true && b.missing !== true)
-        out.push({ value: b.path, label: Backends.buildLabel(b) })
+        out.push({ value: b.path, label: root.buildOptionLabel(b) })
     }
     if (out.length === 0) return root.instanceBuildOptions()
     var auto = root.decisionAutoBuild
@@ -1295,9 +1295,16 @@ Panel {
 
   function instanceBuildOptions() {
     var out = [{ value: "", label: root.autoBuild
-                   ? "Auto · " + Backends.buildLabel(root.autoBuild) : "Auto" }]
-    for (var i = 0; i < root.llamaBuilds.length; i++)
-      out.push({ value: root.llamaBuilds[i].path, label: Backends.buildLabel(root.llamaBuilds[i]) })
+                   ? "Auto · " + Backends.buildLabel(root.autoBuild)
+                   : (root.heldBuilds.length > 0 ? "Auto · trust a build first" : "Auto") }]
+    for (var i = 0; i < root.llamaBuilds.length; i++) {
+      var b = root.llamaBuilds[i]
+      // A build that cannot be launched is not offered as a choice. Listing
+      // it made Start a button that quietly did nothing, and the reason was
+      // two pages away on Settings.
+      if (!b || b.missing === true) continue
+      out.push({ value: b.path, label: root.buildOptionLabel(b) })
+    }
     return out
   }
 
@@ -7399,19 +7406,28 @@ Panel {
                     font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSizeSmall
                   }
+                  // A glyph was too quiet for the one action that decides
+                  // whether anything can run at all. The panel already says
+                  // "Rescan builds" and "click to add" in plain words; this is
+                  // the same kind of thing and now looks like it.
+                  TextAction {
+                    visible: modelData.needsApproval === true
+                    active: true
+                    text: root.icons.check + "  trust"
+                    font.pixelSize: root.fontSizeSmall
+                    onClicked: root.trustBuild(modelData.path)
+                  }
+
+                  // Once trusted, say so where the reason used to be, so the
+                  // row reads as settled rather than as one that lost its link.
                   Text {
                     textFormat: Text.PlainText
-                    text: root.icons.check
-                    visible: modelData.needsApproval === true
-                    color: Commons.Color.warning
+                    visible: root.approvedBuilds.indexOf(modelData.path) !== -1
+                    text: root.icons.check + " trusted"
+                    color: Commons.Color.accent
                     opacity: 0.75
                     font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSizeSmall
-                    MouseArea {
-                      anchors.fill: parent
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.trustBuild(modelData.path)
-                    }
                   }
                   Text {
                     textFormat: Text.PlainText

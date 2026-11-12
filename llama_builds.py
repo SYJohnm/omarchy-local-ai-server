@@ -146,8 +146,14 @@ def provenance_doubt(path):
     the user put it there by hand -- so everything else is held.
     """
     real = os.path.realpath(path)
+    given = os.path.abspath(os.path.expanduser(path))
     for d in INSTALL_DIRS:
-        if real.startswith(d):
+        # Either end counts. Putting a link in ~/.local/bin is the user saying
+        # "this one is installed" just as plainly as a package manager writing
+        # into /usr, and resolving it first threw that statement away: a
+        # hand-installed llama.cpp was held for approval because the release it
+        # points at happens to live in a folder of its own.
+        if real.startswith(d) or given.startswith(d):
             return []
     if real.startswith(os.path.realpath(HOME + "/Downloads") + os.sep):
         return ["from ~/Downloads"]

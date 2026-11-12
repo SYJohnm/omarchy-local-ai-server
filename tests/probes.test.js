@@ -424,3 +424,32 @@ test("llama_builds identifies a build reached through a symlink", () => {
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
+
+// A hand-installed llama.cpp is usually a link in ~/.local/bin pointing at an
+// unpacked release elsewhere. Resolving the link first threw away the one
+// thing that said the user meant to install it -- that they put it there --
+// and the build was held for approval on its target's location instead.
+test("llama_builds trusts a link the user placed in an install directory", () => {
+  const home = tmpdir()
+  try {
+    const real = fakeBuild(path.join(home, "llamacpp-9.9.9", "bin"))
+    const linkDir = path.join(home, ".local", "bin")
+    fs.mkdirSync(linkDir, { recursive: true })
+    const link = path.join(linkDir, "llama-server")
+    fs.symlinkSync(real, link)
+
+    const build = probe(home).find((b) => b.path === link)
+    assert.ok(build, "the installed build was not listed")
+    assert.ok(!build.needsApproval,
+      "held despite being installed in ~/.local/bin: " + JSON.stringify(build.why))
+    assert.ok(!build.missing, "installed build was kept out of Auto")
+
+    // The release it points at is still only a release: found on its own, it
+    // is not installed and still asks.
+    const direct = probe(home).find((b) => b.path === real)
+    assert.ok(!direct || direct.needsApproval === true,
+      "the target vouched for itself through the link")
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
