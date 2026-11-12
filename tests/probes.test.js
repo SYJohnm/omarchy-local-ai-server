@@ -453,3 +453,63 @@ test("llama_builds trusts a link the user placed in an install directory", () =>
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
+
+test("llama_builds caps what a build can print into the probe", () => {
+  // The sandbox bounds what a build can reach, not what it writes, and the
+  // probe reads its output into a Python process that is not confined. Under
+  // a 256 MB address-space limit this used to die with MemoryError in under a
+  // second, and four builds are identified at once.
+  const dir = tmpdir()
+  try {
+    const bin = path.join(dir, "llama-server")
+    fs.writeFileSync(bin, "#!/bin/sh\nexec dd if=/dev/zero bs=1M 2>/dev/null\n")
+    fs.chmodSync(bin, 0o755)
+    const out = execFileSync("python3", ["-I", "-c", [
+      "import resource, sys",
+      "resource.setrlimit(resource.RLIMIT_AS, (256 << 20, 256 << 20))",
+      "sys.path.insert(0, " + JSON.stringify(ROOT) + ")",
+      "import llama_builds as L",
+      "box = " + JSON.stringify(dir) + " if L.BWRAP else None",
+      "print(len(L.run([" + JSON.stringify(bin) + ", '--version'], confine=box) or ''))"
+    ].join("\n")], { encoding: "utf8", timeout: 60000 })
+    assert.strictEqual(Number(out.trim()), 1024 * 1024,
+      "the probe read more than the cap, or died trying")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("llama_builds reads a whole real-sized --help", () => {
+  // Builds here print 60-75 KB of --help, and the flags the panel reads to
+  // decide which options a build accepts are spread through all of it. A cap
+  // that merely looks generous (64 KiB did) silently drops the last ones.
+  const home = tmpdir()
+  try {
+    const dir = path.join(home, "Downloads", "llama-big-help")
+    fs.mkdirSync(dir, { recursive: true })
+    const bin = path.join(dir, "llama-server")
+    fs.writeFileSync(bin, [
+      "#!/bin/sh",
+      'case "$1" in',
+      '  --version) echo "version: 9.9 (build 42, commit abcdef0)" ;;',
+      '  --help)',
+      '    i=0',
+      '    while [ $i -lt 2000 ]; do',
+      '      echo "  --filler-$i N            padding padding padding padding padding"',
+      '      i=$((i + 1))',
+      '    done',
+      '    echo "  -ctk, --cache-type-k TYPE  the last flag in a long listing"',
+      '    ;;',
+      "esac",
+      ""
+    ].join("\n"))
+    fs.chmodSync(bin, 0o755)
+
+    const build = probe(home).find((b) => b.path === bin)
+    assert.ok(build, "the build was not listed at all")
+    assert.ok(build.flags.includes("--cache-type-k"),
+      "the end of a 100 KB --help was cut off: " + build.flags.length + " flags read")
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})

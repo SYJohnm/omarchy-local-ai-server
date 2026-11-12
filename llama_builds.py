@@ -41,9 +41,11 @@ import glob
 import json
 import os
 import re
+import selectors
 import shutil
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 HOME = os.path.expanduser("~")
@@ -245,6 +247,17 @@ def sandbox(argv, allow_dir):
             "--chdir", "/", "--"] + argv
 
 
+# What a build being identified is allowed to print. The sandbox bounds what
+# it can reach; it cannot bound what it writes, and the probe reads that into
+# this process, which is not confined. One build piping /dev/zero filled 1 GB
+# here in 0.6 s, and four are identified at once. Once the cap is reached the
+# pipe's own buffer blocks the build until it is killed.
+#
+# 1 MiB, not less: a real llama-server --help is already 60 KB, and cutting it
+# short drops flags the panel reads to decide which options the build accepts.
+OUTPUT_CAP = 1024 * 1024
+
+
 def run(argv, timeout=5, confine=None):
     # confine=<dir> runs argv in the sandbox with that directory readable.
     # Reading a repository with git is confined for the same reason the binary
@@ -255,10 +268,36 @@ def run(argv, timeout=5, confine=None):
         if argv is None:
             return None
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        return r.stdout + r.stderr
-    except (OSError, subprocess.SubprocessError):
+        # Merged into one pipe: draining two in turn is what lets a build that
+        # fills the other one deadlock the reader.
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT)
+    except OSError:
         return None
+    out = bytearray()
+    deadline = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as sel:
+            sel.register(proc.stdout, selectors.EVENT_READ)
+            while len(out) < OUTPUT_CAP:
+                left = deadline - time.monotonic()
+                # Out of time with nothing to show: a build that hangs on
+                # --version is dropped, which is what the timeout did before.
+                if left <= 0 or not sel.select(left):
+                    return None
+                chunk = proc.stdout.read1(OUTPUT_CAP - len(out))
+                if not chunk:
+                    break
+                out += chunk
+    except OSError:
+        return None
+    finally:
+        proc.stdout.close()
+        # Nothing here reads the exit status, and a build held at the cap is
+        # still writing: kill rather than wait for it to finish.
+        proc.kill()
+        proc.wait()
+    return out.decode("utf-8", "replace")
 
 
 def git_root(path):
