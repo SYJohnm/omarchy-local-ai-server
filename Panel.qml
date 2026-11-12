@@ -2060,9 +2060,42 @@ Panel {
     font.family: root.bar.fontFamily
     font.pixelSize: root.fontSize
 
+    // Everything else in the panel is a label with a value on the right, and
+    // those are clickable too, so plain text said nothing about which words
+    // do something. The outline is the only thing here that means "press me":
+    // it stays drawn rather than appearing on hover, since a thing you have
+    // to touch to discover is not an affordance.
+    leftPadding: Style.spacing.controlPaddingX
+    rightPadding: Style.spacing.controlPaddingX
+    topPadding: Style.space(1)
+    bottomPadding: Style.space(1)
+
+    Rectangle {
+      id: actionChip
+      z: -1
+      // Hugs the words, not the item: an action that fills its row would
+      // otherwise draw a panel-wide box and read as a text field.
+      width: action.contentWidth + action.leftPadding + action.rightPadding
+      height: action.contentHeight + action.topPadding + action.bottomPadding
+      x: action.horizontalAlignment === Text.AlignRight ? action.width - width
+        : (action.horizontalAlignment === Text.AlignHCenter ? (action.width - width) / 2 : 0)
+      y: (action.height - height) / 2
+      radius: 3
+      // Fill, border and width come from the kit's control tokens, the same
+      // ones Ui/Button paints with, so an inline action and a header button
+      // are one look and a theme moves both. Only the padding stays tighter:
+      // these sit inside dotted rows, not on their own line.
+      color: Style.controlFill(false, actionMouse.containsMouse, action.color, Commons.Color.accent)
+      border.width: Style.controlBorderWidth(false, actionMouse.containsMouse)
+      border.color: Style.controlBorder(false, actionMouse.containsMouse, action.color, Commons.Color.accent)
+    }
+
     MouseArea {
       id: actionMouse
-      anchors.fill: parent
+      x: actionChip.x
+      y: actionChip.y
+      width: actionChip.width
+      height: actionChip.height
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onClicked: action.clicked()
@@ -3091,6 +3124,7 @@ Panel {
     root.showingSettings = false
     root.showingSetupAgain = false
   }
+
 
   function finishSetup() {
     root.setupDone = true
@@ -6680,6 +6714,7 @@ Panel {
           }
 
           Button {
+            bordered: true
             text: {
               if (root.takingOver) return "…"
               if (root.canTakeOver) return "Take over"
@@ -6709,6 +6744,7 @@ Panel {
 
           // Stop stays reachable while the main button is Restart or Force.
           Button {
+            bordered: true
             visible: root.configChanged || root.switching
             text: "■"
             tooltipText: "Stop the server"
@@ -8054,6 +8090,7 @@ Panel {
                       Item { Layout.fillWidth: true }
 
                       Button {
+                        bordered: true
                         visible: instRow.isPrimary && root.backend === "llamacpp"
                         text: root.routerMode ? "Router: on" : "Router: off"
                         tooltipText: root.multiInstance
@@ -8073,6 +8110,7 @@ Panel {
                       }
 
                       Button {
+                        bordered: true
                         visible: !instRow.isPrimary
                         text: "Restart"
                         tooltipText: "Stop and start this instance with its current model and build"
@@ -8081,6 +8119,7 @@ Panel {
                       }
 
                       Button {
+                        bordered: true
                         text: instRow.up || instRow.snap.starting ? "Unload" : "Start"
                         tooltipText: instRow.isPrimary
                           ? ""
@@ -8955,6 +8994,7 @@ Panel {
               }
 
               Button {
+                bordered: true
                 visible: root.hasProfile
                 text: "Reset"
                 tooltipText: "Drop this model's profile and go back to defaults"
@@ -9098,6 +9138,7 @@ Panel {
               }
 
               Button {
+                bordered: true
                 text: root.icons.remove
                 tooltipText: "Cancel"
                 onClicked: addParamOpen = false
@@ -11405,6 +11446,7 @@ Panel {
                   }
 
                   Button {
+                    bordered: true
                     text: root.icons.refresh
                     tooltipText: root.systemoneScanning ? "Scanning…" : "Rescan for decision models"
                     enabled: !root.systemoneScanning
@@ -11456,6 +11498,7 @@ Panel {
                   Item { Layout.fillWidth: true }
 
                   Button {
+                    bordered: true
                     text: decisionCard.up || decisionCard.starting ? "Unload" : "Start"
                     tooltipText: root.decisionState && root.decisionState.launchable
                       ? ""
