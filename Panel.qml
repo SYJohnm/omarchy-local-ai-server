@@ -2164,10 +2164,15 @@ Panel {
         spacing: 2
 
         Repeater {
+          // Held and vanished builds are left out here too: picking one
+          // writes it into the model's profile, so offering it is how a
+          // choice that cannot run replaces one that can.
           model: [{ value: "", label: root.autoBuild
                       ? "Auto · " + Backends.buildLabel(root.autoBuild)
-                      : "Auto" }]
-            .concat(root.llamaBuilds.map(function(b) {
+                      : (root.heldBuilds.length > 0 ? "Auto · trust a build first" : "Auto") }]
+            .concat(root.llamaBuilds.filter(function(b) {
+              return b && b.missing !== true
+            }).map(function(b) {
               return { value: b.path, label: Backends.buildLabel(b) }
             }))
 
@@ -2728,6 +2733,18 @@ Panel {
     // A cache type may belong to a build the probe has not reported yet;
     // judged too early, a working fork-only choice would be thrown away.
     if (root.backend === "llamacpp" && !root.buildsProbed) return
+    // The same reasoning, for a build that is present but held for approval.
+    // It has not gone away -- its file is there and the user has simply not
+    // said yes yet -- so the types it alone accepts are not stale settings.
+    // TurboQuant's KV types are the reason to keep that fork at all, and
+    // resetting them to f16 on the way past is destroying the setting the
+    // user came for, every time the shell restarts.
+    var chosen = Backends.findBuild(root.llamaBuilds, root.llamaBuild)
+    if (chosen && chosen.missing === true) return
+    // Nothing usable to judge against: with every build held, the list falls
+    // back to the generic types and would reset a fork-only choice for a
+    // build that is still sitting right there.
+    if (root.llamaBuilds.length > 0 && root.heldBuilds.length === root.llamaBuilds.length) return
     var available = root.availableCacheTypes
     var dropped = []
     if (available.indexOf(root.cacheTypeK) === -1) {
@@ -6262,7 +6279,11 @@ Panel {
 
         Text {
           textFormat: Text.PlainText
-          text: "Model:"
+          // The card reports what the server is doing, so while it is up the
+          // label has to be about what is loaded. Stopped, naming the model
+          // that Start would load is useful -- as long as it does not claim
+          // to be loaded already.
+          text: root.running ? "Model:" : "Will load:"
           color: root.bar.foreground
           font.family: root.bar.fontFamily
           font.pixelSize: root.fontSizeSmall
@@ -6272,10 +6293,20 @@ Panel {
         Text {
           textFormat: Text.PlainText
           Layout.fillWidth: true
+          // It used to fall back to the model that would be launched whenever
+          // none was loaded, which in router mode is always: the router loads
+          // per request, so a running router with an empty slot was reported
+          // as serving whichever model the Model page happened to have
+          // selected.
           text: {
-            var m = root.runningModel ? Model.baseName(root.runningModel) : (root.launchModel ? Model.baseName(root.launchModel) : "")
-            var al = String(root.modelAlias).trim() || (m ? ModelsIni.deriveDefaultAlias(m) : "")
-            return al || m || "None"
+            var source = root.running ? root.runningModel : root.launchModel
+            var m = source ? Model.baseName(source) : ""
+            if (m === "")
+              return root.running
+                ? (root.routerMode ? "none loaded yet" : "none loaded")
+                : "None"
+            var al = String(root.modelAlias).trim() || ModelsIni.deriveDefaultAlias(m)
+            return al || m
           }
           color: root.bar.foreground
           font.family: root.bar.fontFamily
