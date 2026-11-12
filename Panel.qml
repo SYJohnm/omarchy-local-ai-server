@@ -1952,6 +1952,59 @@ Panel {
   // path containing <img src="http://..."> would make the shell fetch it), the
   // bar's font, the bar's foreground, and the panel's body size. Said once
   // here, overridden where a line genuinely differs.
+  // A popup hung under a row. Ten rows each carried their own copy of
+  // `x: 0; y: parent.height + 4` and the same six-line background, and the
+  // direction was therefore a per-row accident: one row had been hand-set to
+  // open upward with a comment saying it sat too low, while the KV cache row
+  // -- which looks high enough -- opens a Dropdown inside itself, and that
+  // list opens downward too, caps at eight rows and ran past the panel's
+  // bottom edge onto the desktop.
+  //
+  // The direction is decided here, on every open, counting the room the
+  // nested list can ask for. Measured at open rather than bound: the row's
+  // position in the panel is not something a binding tracks.
+  component RowPopup: Popup {
+    id: rpop
+    // What a nested Dropdown's list can take: Ui/Dropdown caps it at eight
+    // rows and opens it downward from its own trigger.
+    property int listRoom: Style.spacing.popupRowHeight * 8 + Style.space(16)
+    // What the content would like to be. Clamped to the panel, which is 400
+    // across while several of these were written 500 wide and hung off the
+    // right edge. Declarative on purpose: assigning width when the popup is
+    // about to show leaves it without a background.
+    property int desiredWidth: 280
+    // panel.contentWidth, not root.width: root is the bar button, about thirty
+    // pixels across, so measuring against it made every popup a sliver and
+    // sent the flip below the wrong answer every time.
+    width: Math.min(rpop.desiredWidth, panel.contentWidth - Style.space(8))
+    // Bound rather than computed in onAboutToShow: that signal never fires
+    // for this popup, so the handler that used to live here was dead code and
+    // every popup always opened downward. `visible` is what flips on open, so
+    // the binding is evaluated at exactly the right moment.
+    x: {
+      if (!parent || !rpop.visible || panel.contentWidth <= 0) return 0
+      var left = parent.mapToItem(panel, 0, 0).x
+      return Math.min(0, panel.contentWidth - Style.space(4) - left - rpop.width)
+    }
+    y: {
+      var margin = Style.space(4)
+      if (!parent) return 0
+      var below = parent.height + margin
+      if (!rpop.visible || panel.contentHeight <= 0) return below
+      var top = parent.mapToItem(panel, 0, 0).y
+      return (top + below + rpop.height + rpop.listRoom <= panel.contentHeight)
+        ? below
+        : -(rpop.height + margin)
+    }
+    padding: 8
+    background: Rectangle {
+      color: Commons.Color.menu.background
+      radius: root.radiusSurface
+      border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
+      border.width: 1
+    }
+  }
+
   component PanelText: Text {
     textFormat: Text.PlainText
     color: root.bar.foreground
@@ -2202,19 +2255,10 @@ Panel {
         : "llama.cpp fork and build used for this server. Auto picks one that accepts the model's cache types."
     }
 
-    Popup {
+    RowPopup {
       id: popup
-      x: 0
-      y: parent.height + 4
-      width: row.width
+      desiredWidth: row.width
       height: popupCol.implicitHeight + 16
-      padding: 8
-      background: Rectangle {
-        color: Commons.Color.menu.background
-        radius: root.radiusSurface
-        border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
-        border.width: 1
-      }
 
       ColumnLayout {
         id: popupCol
@@ -6956,19 +7000,10 @@ Panel {
                   : "The inference server this widget launches."
               }
 
-              Popup {
+              RowPopup {
                 id: settingsBackendPopup
-                x: 0
-                y: parent.height + 4
-                width: 500
+                desiredWidth: 280
                 height: settingsBackendPopupCol.implicitHeight + 16
-                padding: 8
-                background: Rectangle {
-                  color: Commons.Color.menu.background
-                  radius: root.radiusSurface
-                  border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
-                  border.width: 1
-                }
 
                 ColumnLayout {
                   id: settingsBackendPopupCol
@@ -8048,19 +8083,10 @@ Panel {
                     : "The inference server this widget launches."
                 }
 
-                Popup {
+                RowPopup {
                   id: backendPopup
-                  x: 0
-                  y: parent.height + 4
-                  width: 500
+                  desiredWidth: 280
                   height: backendPopupCol.implicitHeight + 16
-                  padding: 8
-                  background: Rectangle {
-                    color: Commons.Color.menu.background
-                    radius: root.radiusSurface
-                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
-                    border.width: 1
-                  }
                   ColumnLayout {
                     id: backendPopupCol
                     width: parent.width
@@ -8906,19 +8932,10 @@ Panel {
                   text: "--cache-type-k / --cache-type-v — quantization of the K and V caches. Lower than f16 trades some accuracy for less VRAM per token of context."
                 }
 
-                Popup {
+                RowPopup {
                   id: cachePopup
-                  x: 0
-                  y: parent.height + 4
-                  width: 500
+                  desiredWidth: 280
                   height: cachePopupCol.implicitHeight + 16
-                  padding: 8
-                  background: Rectangle {
-                    color: Commons.Color.menu.background
-                    radius: root.radiusSurface
-                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
-                    border.width: 1
-                  }
                   ColumnLayout {
                     id: cachePopupCol
                     width: parent.width
@@ -9184,19 +9201,10 @@ Panel {
                         "Empty and All off — neither flag is passed"
                 }
 
-                Popup {
+                RowPopup {
                   id: moePopup
-                  x: 0
-                  y: parent.height + 4
-                  width: 500
+                  desiredWidth: 280
                   height: moePopupCol.implicitHeight + 16
-                  padding: 8
-                  background: Rectangle {
-                    color: Commons.Color.menu.background
-                    radius: root.radiusSurface
-                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
-                    border.width: 1
-                  }
                   ColumnLayout {
                     id: moePopupCol
                     width: parent.width
@@ -9495,19 +9503,10 @@ Panel {
                   text: "--batch-size / --ubatch-size — tokens processed per prompt-eval pass and per physical GPU batch. Higher trades VRAM for faster prompt processing."
                 }
 
-                Popup {
+                RowPopup {
                   id: batchPopup
-                  x: 0
-                  y: parent.height + 4
-                  width: 280
+                  desiredWidth: 280
                   height: batchPopupCol.implicitHeight + 16
-                  padding: 8
-                  background: Rectangle {
-                    color: Commons.Color.menu.background
-                    radius: root.radiusSurface
-                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
-                    border.width: 1
-                  }
                   ColumnLayout {
                     id: batchPopupCol
                     width: parent.width
@@ -9781,19 +9780,10 @@ Panel {
                     : "--spec-type: draft or n-gram strategy. Only some models carry the weights a draft mode needs."
                 }
 
-                Popup {
+                RowPopup {
                   id: specPopup
-                  x: 0
-                  y: parent.height + 4
-                  width: 500
+                  desiredWidth: 280
                   height: specPopupCol.implicitHeight + 16
-                  padding: 8
-                  background: Rectangle {
-                    color: Commons.Color.menu.background
-                    radius: root.radiusSurface
-                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
-                    border.width: 1
-                  }
                   ColumnLayout {
                     id: specPopupCol
                     width: parent.width
@@ -9885,21 +9875,10 @@ Panel {
                     : "auto: use a projector found next to the model — none was\noff: --no-mmproj · custom: name a file"
                 }
 
-                Popup {
+                RowPopup {
                   id: visionPopup
-                  x: 0
-                  // This row sits low on the page: open upward rather than
-                  // past the panel's clipped bottom edge.
-                  y: -height - 4
-                  width: 300
+                  desiredWidth: 300
                   height: visionPopupCol.implicitHeight + 16
-                  padding: 8
-                  background: Rectangle {
-                    color: Commons.Color.menu.background
-                    radius: root.radiusSurface
-                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
-                    border.width: 1
-                  }
                   ColumnLayout {
                     id: visionPopupCol
                     width: parent.width
@@ -10126,13 +10105,10 @@ Panel {
                   text: "Environment variables for the server, per model. Click to edit."
                 }
 
-                Popup {
+                RowPopup {
                   id: envPopup
-                  x: 0
-                  y: parent.height + 4
-                  width: envRow.width
+                  desiredWidth: envRow.width
                   height: Math.min(Style.space(420), envPopupCol.implicitHeight + 16)
-                  padding: 8
                   focus: true
                   property string error: ""
                   // Edited here, written once when the popup closes: a field
@@ -10150,12 +10126,6 @@ Panel {
                     dirty = false
                   }
 
-                  background: Rectangle {
-                    color: Commons.Color.menu.background
-                    radius: root.radiusSurface
-                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
-                    border.width: 1
-                  }
 
                   function addVar() {
                     var name = newEnvName.text.trim()
@@ -10581,19 +10551,10 @@ Panel {
                         (spec && spec.description ? "\n" + Model.plainText(spec.description, 300) : "")
                 }
 
-                Popup {
+                RowPopup {
                   id: customPopup
-                  x: 0
-                  y: parent.height + 4
-                  width: 280
+                  desiredWidth: 280
                   height: customPopupCol.implicitHeight + 16
-                  padding: 8
-                  background: Rectangle {
-                    color: Commons.Color.menu.background
-                    radius: root.radiusSurface
-                    border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
-                    border.width: 1
-                  }
 
                   ColumnLayout {
                     id: customPopupCol
