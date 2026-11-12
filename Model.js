@@ -264,6 +264,29 @@ function ancestorDirs(path, rootDir) {
   return chain
 }
 
+/**
+ * A path cut in the middle to fit, rather than at the end.
+ *
+ * Both ends of a path carry the meaning -- which tree it is in, and which
+ * file it is -- while the middle is the part that repeats between builds.
+ * Text.ElideRight would cut off "llama-server", the half that says what the
+ * thing is, and leave the "/home/sxy/" that every row shares.
+ *
+ * @param {string} path
+ * @param {number} [max] characters, including the ellipsis
+ * @returns {string}
+ */
+function shortenPath(path, max) {
+  var s = String(path === undefined || path === null ? "" : path)
+  var limit = parseInt(max, 10)
+  if (!isFinite(limit) || limit < 8) limit = 56
+  if (s.length <= limit) return s
+  // The tail gets the odd character: the filename is what is being read.
+  var keep = limit - 1
+  var head = Math.floor(keep / 2)
+  return s.slice(0, head) + "…" + s.slice(s.length - (keep - head))
+}
+
 function baseName(path) {
   var idx = String(path).lastIndexOf("/")
   return idx >= 0 ? path.slice(idx + 1) : path
@@ -815,6 +838,7 @@ if (typeof module !== "undefined") {
     splitExtraArgs: splitExtraArgs,
     parseArgs: parseArgs,
     recommendedCacheTypeV: recommendedCacheTypeV,
-    isTurboQuantCacheType: isTurboQuantCacheType
+    isTurboQuantCacheType: isTurboQuantCacheType,
+    shortenPath: shortenPath
   }
 }

@@ -285,6 +285,11 @@ Panel {
   // replacing the single altBinary setting.
   property var extraBuildPaths: []
 
+  // The build row under the pointer, so the line below the list can show its
+  // path. A row is too narrow for one, and the path is what tells two builds
+  // of the same fork apart.
+  property string hoveredBuildPath: ""
+
   // Builds the user has agreed may be launched. A build is identified inside
   // a sandbox whether or not it is in here (llama_builds.py sandbox()), so
   // this grants running it as a real server -- unconfined, with access to the
@@ -1275,7 +1280,7 @@ Panel {
     for (var i = 0; i < root.llamaBuilds.length; i++) {
       var b = root.llamaBuilds[i]
       if (b && b.decision === true && b.missing !== true)
-        out.push({ value: b.path, label: root.buildOptionLabel(b) })
+        out.push({ value: b.path, label: Backends.buildLabel(b) })
     }
     if (out.length === 0) return root.instanceBuildOptions()
     var auto = root.decisionAutoBuild
@@ -1303,7 +1308,7 @@ Panel {
       // it made Start a button that quietly did nothing, and the reason was
       // two pages away on Settings.
       if (!b || b.missing === true) continue
-      out.push({ value: b.path, label: root.buildOptionLabel(b) })
+      out.push({ value: b.path, label: Backends.buildLabel(b) })
     }
     return out
   }
@@ -7365,6 +7370,25 @@ Panel {
                 radius: 3
                 color: "transparent"
 
+                HoverHandler {
+                  id: buildRowHover
+                  // Leaving a row fires after entering the next one, so a row
+                  // only clears the path while it is still the one showing.
+                  onHoveredChanged: {
+                    if (hovered) root.hoveredBuildPath = modelData.path
+                    else if (root.hoveredBuildPath === modelData.path)
+                      root.hoveredBuildPath = ""
+                  }
+                }
+
+                // The fork column elides -- "llama-cpp-turboquant-cu…" -- and
+                // the elided half is the part that identifies the fork.
+                PanelToolTip {
+                  visible: buildRowHover.hovered
+                  text: (modelData.fork || "llama-server")
+                    + (modelData.version ? " · " + modelData.version : "")
+                }
+
                 RowLayout {
                   anchors.fill: parent
                   anchors.leftMargin: Style.space(4)
@@ -7463,8 +7487,13 @@ Panel {
               textFormat: Text.PlainText
               Layout.fillWidth: true
               Layout.topMargin: Style.space(2)
-              visible: root.trustNote !== ""
-              text: root.trustNote
+              visible: root.trustNote !== "" || root.hoveredBuildPath !== ""
+              // Cut in the middle: the ends say which tree and which file,
+              // and every row here shares the "/home/sxy/" that eliding from
+              // the right would keep.
+              text: root.hoveredBuildPath !== ""
+                ? Model.shortenPath(root.hoveredBuildPath, 64)
+                : root.trustNote
               wrapMode: Text.WordWrap
               color: root.bar.foreground
               opacity: 0.45

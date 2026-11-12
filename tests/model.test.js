@@ -869,3 +869,24 @@ test("flattenTree hides the children of a collapsed directory", () => {
     ["alpha", "b.gguf", "zeta"]
   )
 })
+
+// A build row is too narrow for a path, so the line under the list carries it.
+// Eliding from the right would drop "llama-server" -- the half that says what
+// the file is -- and keep the "/home/sxy/" every row shares.
+test("shortenPath cuts the middle and keeps both ends", () => {
+  const p = "/home/sxy/llama-cpp-turboquant-cuda/build/bin/llama-server"
+  const s = Model.shortenPath(p, 40)
+  assert.strictEqual(s.length, 40)
+  assert.ok(s.startsWith("/home/sxy/"), s)
+  assert.ok(s.endsWith("llama-server"), "the filename was cut: " + s)
+})
+
+test("shortenPath leaves a path that already fits", () => {
+  assert.strictEqual(Model.shortenPath("/usr/bin/llama-server", 56), "/usr/bin/llama-server")
+})
+
+test("shortenPath tolerates empty and nonsense input", () => {
+  assert.strictEqual(Model.shortenPath("", 40), "")
+  assert.strictEqual(Model.shortenPath(null, 40), "")
+  assert.strictEqual(Model.shortenPath("/a/b/c", "nope"), "/a/b/c")
+})
