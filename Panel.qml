@@ -143,6 +143,22 @@ Panel {
   readonly property string systemoneUnitName: Backends.unitName(root.moduleName, "systemone")
   readonly property string systemoneProcMarker: Backends.procMarker(root.moduleName, "systemone")
 
+  // Takes what the Server page's endpoint row takes, and keeps the port. The
+  // host belongs to the panel, not to one server -- both run on this machine
+  // and share the one address -- so a different host typed here would move the
+  // chat server too, which is not what editing the companion's row means.
+  function setDecisionEndpoint(text) {
+    var value = String(text).trim()
+    var cut = value.lastIndexOf(":")
+    var portText = cut > 0 ? value.slice(cut + 1).trim() : value
+    var port = parseInt(portText, 10)
+    if (!isFinite(port) || port < 1 || port > 65535) return
+    // The chat server's own port: taking it would put two servers on one
+    // socket, and the second one to start simply fails to bind.
+    if (String(port) === String(root.port)) return
+    root.setSystemonePort(String(port))
+  }
+
   function setSystemonePort(value) {
     var trimmed = String(value).trim()
     if (trimmed === root.systemonePort) return
@@ -1937,6 +1953,11 @@ Panel {
     // Stands in for an empty value, so a row never reads as blank.
     property string hint: ""
     property var inputValidator: null
+    // A row that must not be edited right now -- a port the running server is
+    // already listening on -- still has to show its value: hiding it would
+    // lose the one thing the user came to read.
+    property bool editable: true
+    property string tooltip: ""
     signal committed(string text)
 
     Layout.fillWidth: true
@@ -2013,10 +2034,17 @@ Panel {
       }
     }
 
-    HoverHandler { id: vrowHover; cursorShape: Qt.PointingHandCursor }
+    HoverHandler {
+      id: vrowHover
+      cursorShape: vrow.editable ? Qt.PointingHandCursor : Qt.ArrowCursor
+    }
+    PanelToolTip {
+      visible: vrowHover.hovered && vrow.tooltip !== ""
+      text: vrow.tooltip
+    }
     MouseArea {
       anchors.fill: parent
-      enabled: !vrow.editing
+      enabled: !vrow.editing && vrow.editable
       onClicked: {
         vrowField.text = vrow.value
         vrow.editing = true
@@ -11535,6 +11563,21 @@ Panel {
                 // the sampling page mean nothing here. What decides whether it
                 // runs at all beside a chat model is how much of it sits on
                 // the card and how long a prompt it must hold.
+                // Where to reach it. The card's header carries the port, but a
+                // port alone is not an address, and this is the one the
+                // decision client has to be pointed at.
+                ValueRow {
+                  label: "host:port"
+                  value: root.host + ":" + root.systemonePort
+                  editable: !decisionCard.up && !decisionCard.starting
+                  tooltip: decisionCard.up || decisionCard.starting
+                    ? "Stop the companion to move it — it is listening on this port."
+                    : "Address the companion listens on. The host is the panel's and is shared with the chat server; only the port is the companion's own."
+                  onCommitted: function(committedText) {
+                    root.setDecisionEndpoint(committedText)
+                  }
+                }
+
                 ValueRow {
                   label: "GPU layers"
                   // The registry owns what "unset" means for a field;
