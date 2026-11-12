@@ -79,6 +79,14 @@ Panel {
   // colour of their text role -- never a colour of their own.
   readonly property int iconSize: Style.font.body
 
+  // Corners follow the theme. Style.cornerRadius mirrors Hyprland's
+  // decoration:rounding, which is what the rest of the shell rounds by, so a
+  // hardcoded radius made this panel the only rounded surface on a screen set
+  // to square -- and it would be the only square one on a screen set round.
+  // A row inside a card steps down from it, never below zero.
+  readonly property int radiusSurface: Style.cornerRadius
+  readonly property int radiusControl: Math.max(0, Style.cornerRadius - Style.space(2))
+
   // Tabular figures, so a ticking rate does not change width between frames.
   // This is what the bar's minimum-width floor was working around.
   readonly property var tabularFigures: ({ "tnum": 1 })
@@ -1962,7 +1970,7 @@ Panel {
 
     Layout.fillWidth: true
     implicitHeight: root.rowHeight
-    radius: 3
+    radius: root.radiusControl
     property bool editing: false
     color: vrowHover.hovered && !vrow.editing
       ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -2114,7 +2122,7 @@ Panel {
       x: action.horizontalAlignment === Text.AlignRight ? action.width - width
         : (action.horizontalAlignment === Text.AlignHCenter ? (action.width - width) / 2 : 0)
       y: (action.height - height) / 2
-      radius: 3
+      radius: root.radiusControl
       // Fill, border and width come from the kit's control tokens, the same
       // ones Ui/Button paints with, so an inline action and a header button
       // are one look and a theme moves both. Only the padding stays tighter:
@@ -2147,7 +2155,7 @@ Panel {
     Layout.fillWidth: true
     implicitHeight: root.rowHeight
     visible: root.backend === "llamacpp"
-    radius: 3
+    radius: root.radiusControl
     color: rowHover.containsMouse && !row.readOnly
       ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
       : "transparent"
@@ -2228,7 +2236,7 @@ Panel {
       padding: 8
       background: Rectangle {
         color: Commons.Color.menu.background
-        radius: 6
+        radius: root.radiusSurface
         border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
         border.width: 1
       }
@@ -2236,7 +2244,7 @@ Panel {
       ColumnLayout {
         id: popupCol
         width: parent.width
-        spacing: 2
+        spacing: Style.space(2)
 
         Repeater {
           // Held and vanished builds are left out here too: picking one
@@ -2259,7 +2267,7 @@ Panel {
 
             Layout.fillWidth: true
             implicitHeight: root.rowHeight
-            radius: 3
+            radius: root.radiusControl
             color: choiceHover.hovered
               ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
               : "transparent"
@@ -6410,7 +6418,7 @@ Panel {
         Rectangle {
           width: 8
           height: 8
-          radius: 4
+          radius: width / 2
           color: root.running ? Commons.Color.accent : (root.starting ? Commons.Color.warning : Commons.Color.muted)
         }
 
@@ -6543,7 +6551,7 @@ Panel {
           spacing: Style.space(12)
 
           ColumnLayout {
-            spacing: 1
+            spacing: Style.space(1)
             Text {
               textFormat: Text.PlainText
               text: "Generation"
@@ -6566,7 +6574,7 @@ Panel {
           Item { Layout.fillWidth: true }
 
           ColumnLayout {
-            spacing: 1
+            spacing: Style.space(1)
             Text {
               textFormat: Text.PlainText
               Layout.alignment: Qt.AlignRight
@@ -6957,7 +6965,7 @@ Panel {
           Rectangle {
             Layout.fillWidth: true
             implicitHeight: root.rowHeight
-            radius: 3
+            radius: root.radiusControl
             color: settingsBackendHover.hovered
               ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
               : "transparent"
@@ -7016,7 +7024,7 @@ Panel {
           ColumnLayout {
             Layout.fillWidth: true
             Layout.leftMargin: Style.space(8)
-            spacing: 2
+            spacing: Style.space(2)
             visible: root.settingsSection === "backend"
 
             // Which server. The list is the same installed-backends list the
@@ -7025,7 +7033,7 @@ Panel {
               id: settingsBackendRow
               Layout.fillWidth: true
               implicitHeight: root.rowHeight
-              radius: 3
+              radius: root.radiusControl
               color: settingsBackendPickHover.hovered
                 ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
                 : "transparent"
@@ -7087,7 +7095,7 @@ Panel {
                 padding: 8
                 background: Rectangle {
                   color: Commons.Color.menu.background
-                  radius: 6
+                  radius: root.radiusSurface
                   border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
                   border.width: 1
                 }
@@ -7095,7 +7103,7 @@ Panel {
                 ColumnLayout {
                   id: settingsBackendPopupCol
                   width: parent.width
-                  spacing: 2
+                  spacing: Style.space(2)
 
                   Repeater {
                     model: root.installedBackends
@@ -7107,7 +7115,7 @@ Panel {
 
                       Layout.fillWidth: true
                       implicitHeight: root.rowHeight
-                      radius: 3
+                      radius: root.radiusControl
                       color: settingsBackendChoiceHover.hovered
                         ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
                         : "transparent"
@@ -7158,7 +7166,7 @@ Panel {
               id: settingsBinaryRow
               Layout.fillWidth: true
               implicitHeight: root.rowHeight
-              radius: 3
+              radius: root.radiusControl
               property bool editing: false
               color: settingsBinaryHover.hovered
                 ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -7257,7 +7265,7 @@ Panel {
           Rectangle {
             Layout.fillWidth: true
             implicitHeight: root.rowHeight
-            radius: 3
+            radius: root.radiusControl
             color: settingsModelsHover.hovered
               ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
               : "transparent"
@@ -7319,14 +7327,14 @@ Panel {
           ColumnLayout {
             Layout.fillWidth: true
             Layout.leftMargin: Style.space(8)
-            spacing: 2
+            spacing: Style.space(2)
             visible: root.settingsSection === "models"
 
             // Auto: every detected folder.
             Rectangle {
               Layout.fillWidth: true
               implicitHeight: root.rowHeight
-              radius: 3
+              radius: root.radiusControl
               color: settingsAutoHover.hovered
                 ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
                 : "transparent"
@@ -7384,7 +7392,7 @@ Panel {
 
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 color: settingsDirHover.hovered
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
                   : "transparent"
@@ -7452,7 +7460,7 @@ Panel {
               id: settingsAddFolderRow
               Layout.fillWidth: true
               implicitHeight: root.rowHeight
-              radius: 3
+              radius: root.radiusControl
               property bool editing: false
               color: settingsAddFolderHover.hovered
                 ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -7534,7 +7542,7 @@ Panel {
           Rectangle {
             Layout.fillWidth: true
             implicitHeight: root.rowHeight
-            radius: 3
+            radius: root.radiusControl
             color: settingsBuildsHover.hovered
               ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
               : "transparent"
@@ -7592,7 +7600,7 @@ Panel {
           ColumnLayout {
             Layout.fillWidth: true
             Layout.leftMargin: Style.space(8)
-            spacing: 2
+            spacing: Style.space(2)
             visible: root.settingsSection === "builds"
 
             Repeater {
@@ -7603,7 +7611,7 @@ Panel {
 
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 color: "transparent"
 
                 HoverHandler {
@@ -7742,7 +7750,7 @@ Panel {
               id: settingsAddForkRow
               Layout.fillWidth: true
               implicitHeight: root.rowHeight
-              radius: 3
+              radius: root.radiusControl
               property bool editing: false
               color: settingsAddForkHover.hovered
                 ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -8048,7 +8056,7 @@ Panel {
 
                   Layout.fillWidth: true
                   implicitHeight: instCol.implicitHeight + Style.space(8)
-                  radius: 4
+                  radius: root.radiusSurface
                   color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.03)
                   border.color: instRow.up
                     ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.25)
@@ -8068,7 +8076,7 @@ Panel {
                       Rectangle {
                         width: 8
                         height: 8
-                        radius: 4
+                        radius: width / 2
                         color: instRow.up
                           ? Commons.Color.accent
                           : (instRow.pending
@@ -8270,13 +8278,13 @@ Panel {
             // page that already has enough of them.
             ColumnLayout {
               Layout.fillWidth: true
-              spacing: 2
+              spacing: Style.space(2)
 
               Rectangle {
                 id: backendRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 color: backendHover.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
                   : "transparent"
@@ -8343,7 +8351,7 @@ Panel {
                   padding: 8
                   background: Rectangle {
                     color: Commons.Color.menu.background
-                    radius: 6
+                    radius: root.radiusSurface
                     border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
                     border.width: 1
                   }
@@ -8369,7 +8377,7 @@ Panel {
                 id: endpointRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 property bool editing: false
                 color: endpointHover.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -8505,7 +8513,7 @@ Panel {
             Rectangle {
               Layout.fillWidth: true
               implicitHeight: root.rowHeight
-              radius: 3
+              radius: root.radiusControl
               visible: Backends.supports(root.backend, "slotKv")
               color: kvPersistenceHover.hovered
                 ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -8538,10 +8546,10 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   text: root.kvPersistence ? "on" : "off"
-                  color: root.kvPersistence ? Commons.Color.accent : root.bar.foreground
+                  color: root.bar.foreground
                   font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSize
-                  opacity: root.kvPersistence ? 1.0 : 0.6
+                  opacity: root.kvPersistence ? 0.85 : 0.45
                 }
               }
 
@@ -8561,7 +8569,7 @@ Panel {
             Rectangle {
               Layout.fillWidth: true
               implicitHeight: root.rowHeight
-              radius: 3
+              radius: root.radiusControl
               color: startOnLoginHover.hovered
                 ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
                 : "transparent"
@@ -8593,10 +8601,10 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   text: root.startOnLogin ? "on" : "off"
-                  color: root.startOnLogin ? Commons.Color.accent : root.bar.foreground
+                  color: root.bar.foreground
                   font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSize
-                  opacity: root.startOnLogin ? 1.0 : 0.6
+                  opacity: root.startOnLogin ? 0.85 : 0.45
                 }
               }
 
@@ -8674,8 +8682,8 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   text: root.decisionEnabled ? "on" : "off"
-                  color: root.decisionEnabled ? Commons.Color.accent : root.bar.foreground
-                  opacity: root.decisionEnabled ? 1.0 : 0.5
+                  color: root.bar.foreground
+                  opacity: root.decisionEnabled ? 0.85 : 0.45
                   font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSizeSmall
                   MouseArea {
@@ -8736,7 +8744,7 @@ Panel {
               id: modelRow
               Layout.fillWidth: true
               implicitHeight: root.rowHeight
-              radius: 3
+              radius: root.radiusControl
               color: "transparent"
 
               RowLayout {
@@ -8809,7 +8817,7 @@ Panel {
             ColumnLayout {
               Layout.fillWidth: true
               Layout.fillHeight: true
-              spacing: 2
+              spacing: Style.space(2)
 
               Rectangle {
                 Layout.fillWidth: true
@@ -8878,7 +8886,7 @@ Panel {
               Rectangle {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                radius: 4
+                radius: root.radiusSurface
                 color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.035)
 
                 Flickable {
@@ -8910,7 +8918,7 @@ Panel {
 
                         width: modelColumn.width
                         height: root.rowHeight
-                        radius: 3
+                        radius: root.radiusControl
                         color: current
                           ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.10)
                           : (rowHover.hovered
@@ -9038,8 +9046,12 @@ Panel {
               textFormat: Text.PlainText
               Layout.fillWidth: true
               text: {
-                if (root.activeScanning) return "Scanning…"
+                // The Rescan action already says "Scanning…" while it runs; this
+                // line keeps counting, and speaks for the scan only when it has
+                // nothing of its own to report -- "No models available" during a
+                // first scan is a false negative, not a count.
                 var n = root.activeModelOptions.length
+                if (root.activeScanning && n === 0) return "Scanning…"
                 if (n === 0) return "No models available"
                 var shown = root.modelRows.length
                 var capped = root.modelFilter !== "" && shown >= root.modelSearchLimit
@@ -9114,7 +9126,7 @@ Panel {
 
                   implicitWidth: pageNumber.implicitWidth + Style.space(12)
                   implicitHeight: root.rowHeight
-                  radius: 3
+                  radius: root.radiusControl
                   color: pageHover.hovered
                     ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
                     : "transparent"
@@ -9154,7 +9166,7 @@ Panel {
             Rectangle {
               Layout.fillWidth: true
               implicitHeight: root.rowHeight
-              radius: 3
+              radius: root.radiusControl
               visible: !addParamOpen
               color: addHover.hovered && root.addableCount > 0
                 ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -9245,14 +9257,14 @@ Panel {
             ColumnLayout {
               Layout.fillWidth: true
               visible: root.tuningPageHasBuiltins
-              spacing: 2
+              spacing: Style.space(2)
 
               // ---- KV cache k/v ----
               Rectangle {
                 id: cacheRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("cacheType")
                 color: cacheHoverArea.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -9328,7 +9340,7 @@ Panel {
                   padding: 8
                   background: Rectangle {
                     color: Commons.Color.menu.background
-                    radius: 6
+                    radius: root.radiusSurface
                     border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
                     border.width: 1
                   }
@@ -9384,7 +9396,7 @@ Panel {
                 id: flashRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("flashAttn")
                 color: flashHoverArea.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -9475,7 +9487,7 @@ Panel {
                 id: nglRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("ngl")
                 property bool editing: false
                 color: nglHoverArea.containsMouse
@@ -9583,7 +9595,7 @@ Panel {
                 id: moeRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("cpuMoe")
                 color: moeHoverArea.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -9661,7 +9673,7 @@ Panel {
                   padding: 8
                   background: Rectangle {
                     color: Commons.Color.menu.background
-                    radius: 6
+                    radius: root.radiusSurface
                     border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
                     border.width: 1
                   }
@@ -9721,7 +9733,7 @@ Panel {
                 id: ctxRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("ctxSize")
                 property bool editing: false
                 color: ctxHoverArea.containsMouse
@@ -9838,7 +9850,7 @@ Panel {
                 id: threadsRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("threads")
                 property bool editing: false
                 color: threadsHoverArea.containsMouse
@@ -9955,7 +9967,7 @@ Panel {
                 id: batchRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("batchSize")
                 color: batchHoverArea.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -10032,7 +10044,7 @@ Panel {
                   padding: 8
                   background: Rectangle {
                     color: Commons.Color.menu.background
-                    radius: 6
+                    radius: root.radiusSurface
                     border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
                     border.width: 1
                   }
@@ -10088,7 +10100,7 @@ Panel {
                 id: parallelRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("parallel")
                 property bool editing: false
                 color: parallelHoverArea.containsMouse
@@ -10206,7 +10218,7 @@ Panel {
                 id: reasoningRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("reasoning")
                 color: reasoningHoverArea.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -10297,7 +10309,7 @@ Panel {
                 id: specRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("specType")
                 color: specHoverArea.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -10375,7 +10387,7 @@ Panel {
                   padding: 8
                   background: Rectangle {
                     color: Commons.Color.menu.background
-                    radius: 6
+                    radius: root.radiusSurface
                     border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
                     border.width: 1
                   }
@@ -10415,7 +10427,7 @@ Panel {
                 id: visionRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("vision")
                 color: visionHoverArea.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -10496,7 +10508,7 @@ Panel {
                   padding: 8
                   background: Rectangle {
                     color: Commons.Color.menu.background
-                    radius: 6
+                    radius: root.radiusSurface
                     border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
                     border.width: 1
                   }
@@ -10566,7 +10578,7 @@ Panel {
                 id: extraRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("extraArgs")
                 property bool editing: false
                 color: extraHoverArea.containsMouse
@@ -10686,7 +10698,7 @@ Panel {
                 id: envRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("envVars")
                 color: envHoverArea.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
@@ -10797,7 +10809,7 @@ Panel {
 
                   background: Rectangle {
                     color: Commons.Color.menu.background
-                    radius: 6
+                    radius: root.radiusSurface
                     border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
                     border.width: 1
                   }
@@ -10846,7 +10858,7 @@ Panel {
                       Column {
                         id: envList
                         width: envFlick.width
-                        spacing: 2
+                        spacing: Style.space(2)
 
                         Repeater {
                           model: envPopup.draft
@@ -10857,7 +10869,7 @@ Panel {
 
                             width: envList.width
                             height: root.rowHeight
-                            radius: 3
+                            radius: root.radiusControl
                             color: envVarHover.hovered
                               ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
                               : "transparent"
@@ -10973,7 +10985,7 @@ Panel {
                 id: modelAliasRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("modelAlias")
                 property bool editing: false
                 color: modelAliasHoverArea.containsMouse
@@ -11081,7 +11093,7 @@ Panel {
                 id: systemoneCtxRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 visible: root.builtinOnPage("systemoneCtx")
                 property bool editing: false
                 color: systemoneCtxHoverArea.containsMouse
@@ -11206,7 +11218,7 @@ Panel {
                 id: customRow
                 Layout.fillWidth: true
                 implicitHeight: root.rowHeight
-                radius: 3
+                radius: root.radiusControl
                 color: customHover.containsMouse
                   ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
                   : "transparent"
@@ -11296,7 +11308,7 @@ Panel {
                   padding: 8
                   background: Rectangle {
                     color: Commons.Color.menu.background
-                    radius: 6
+                    radius: root.radiusSurface
                     border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
                     border.width: 1
                   }
@@ -11456,7 +11468,7 @@ Panel {
               Layout.fillWidth: true
               visible: root.decisionEnabled
               implicitHeight: decisionCol.implicitHeight + Style.space(8)
-              radius: 4
+              radius: root.radiusSurface
               readonly property var snap: root.decisionState
               readonly property bool up: !!(decisionCard.snap && decisionCard.snap.running)
               readonly property bool pending:
@@ -11481,7 +11493,7 @@ Panel {
                   Rectangle {
                     width: 8
                     height: 8
-                    radius: 4
+                    radius: width / 2
                     color: decisionCard.up
                       ? Commons.Color.accent
                       : (decisionCard.pending
@@ -11716,7 +11728,7 @@ Panel {
           Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            radius: 4
+            radius: root.radiusSurface
             color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.035)
 
             ListView {
@@ -11725,7 +11737,7 @@ Panel {
               anchors.margins: Style.space(6)
               clip: true
               model: logModel
-              spacing: 1
+              spacing: Style.space(1)
               // Cheap for a 400-line cap, and it keeps positionViewAtEnd exact
               // with variable-height wrapped delegates instead of estimated.
               cacheBuffer: 4000
@@ -11812,7 +11824,7 @@ Panel {
               visible: !logView.stickToBottom && logModel.count > 0
               implicitWidth: followLabel.implicitWidth + Style.space(16)
               implicitHeight: 24
-              radius: 12
+              radius: root.radiusSurface
               color: Commons.Color.menu.background
               border.width: 1
               border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
