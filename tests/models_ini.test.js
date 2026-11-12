@@ -88,3 +88,25 @@ test("fromProfiles converts legacy profiles store", () => {
   assert.strictEqual(iniObj.models["/m/model.gguf"].common.preferredBuild, "/bin/turbo")
   assert.strictEqual(iniObj.models["/m/model.gguf"].forks["/bin/turbo"].cacheTypeK, "turbo4")
 })
+
+test("toRouterIni cleans an alias set by hand", () => {
+  // models.ini is documented as editable by hand, so the alias arrives
+  // unchecked. It becomes an INI section name: "[my model]" and "[a]b]" are
+  // read differently or rejected, and the model answers to no name at all.
+  const ini = ModelsIni.toRouterIni({
+    models: {
+      "/m/one.gguf": { common: { alias: "my model" } },
+      "/m/two.gguf": { common: { alias: "gemma[v2]" } }
+    }
+  })
+  assert.ok(ini.includes("[my-model]"), ini)
+  assert.ok(ini.includes("[gemma-v2]"), ini)
+  assert.ok(!/\[[^\]\n]*[ \[]/.test(ini), "a section name still carries a space or a bracket: " + ini)
+})
+
+test("a file name that cleans to nothing still gets a usable alias", () => {
+  // The fallback used to hand back the raw name, which is exactly the
+  // characters the cleaning exists to remove.
+  const ini = ModelsIni.toRouterIni({ models: { "/m/[[[.gguf": { common: {} } } })
+  assert.ok(ini.includes("[model]"), ini)
+})

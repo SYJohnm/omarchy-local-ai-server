@@ -260,7 +260,10 @@ function ollamaLaunch(cfg) {
 function envPrefix(env, quote) {
   var out = []
   // Names go into the script unquoted, so anything that is not a plain
-  // variable name is dropped rather than trusted.
+  // variable name is dropped rather than trusted. Model.isEnvName holds the
+  // same rule; it is duplicated rather than imported for the reason given
+  // above plain(), that both files are QML JS libraries and cannot require()
+  // each other. Changing one means changing the other.
   for (var key in env)
     if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) out.push(key + "=" + quote(String(env[key])))
   return out.join(" ")

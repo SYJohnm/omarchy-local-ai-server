@@ -5299,7 +5299,11 @@ Panel {
 
   Timer {
     id: slotsPollTimer
-    interval: 250
+    // 250 ms is what the panel's live sweep needs; the bar's one-line readout
+    // does not. Polling at four curl spawns a second with the panel shut was
+    // about 115 000 processes over an eight-hour session, for a number nobody
+    // was watching closely.
+    interval: root.opened ? 250 : 1000
     repeat: true
     onTriggered: if (root.running && !slotsProc.running) slotsProc.running = true
   }

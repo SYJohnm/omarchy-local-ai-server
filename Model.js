@@ -134,6 +134,14 @@ function barSwitchTooltip(switchState, inflight) {
 // quotes understand backslash escapes so a value can contain spaces, quotes
 // or a literal backslash. The tokenizer is deliberately small: this is a
 // settings field, not a shell.
+// What a shell accepts as a variable name. The launch script puts names in
+// unquoted, so anything else is dropped rather than trusted -- and the rule
+// lives here alone, because a second copy is one that can be loosened without
+// the first one noticing.
+function isEnvName(name) {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(name))
+}
+
 function parseEnvAssignments(text) {
   var env = [], invalid = []
   var src = String(text || "")
@@ -179,7 +187,7 @@ function parseEnvAssignments(text) {
       while (i < src.length && !isSpace(src[i])) i++
       value = src.slice(vstart, i)
     }
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    if (!isEnvName(name)) {
       invalid.push(src.slice(start, i))
       continue
     }
@@ -194,7 +202,7 @@ function formatEnvAssignments(env) {
   var parts = []
   for (var i = 0; i < (env || []).length; i++) {
     var name = String(env[i].name || "")
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue
+    if (!isEnvName(name)) continue
     var value = String(env[i].value == null ? "" : env[i].value)
     if (value !== "" && !/[\s"'\\]/.test(value)) parts.push(name + "=" + value)
     else parts.push(name + '="' + value.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"')
@@ -816,6 +824,7 @@ if (typeof module !== "undefined") {
     metricText: metricText,
     BAR_ICON: BAR_ICON,
     barSwitchText: barSwitchText,
+    isEnvName: isEnvName,
     parseEnvAssignments: parseEnvAssignments,
     formatEnvAssignments: formatEnvAssignments,
     barSwitchTooltip: barSwitchTooltip,

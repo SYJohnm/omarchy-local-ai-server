@@ -31,10 +31,19 @@ function deriveDefaultAlias(pathOrName) {
   // Strip common quantization suffixes
   str = str.replace(/[-_](?:(?:Q[0-9]_[K0-9A-Z_]+)|(?:IQ[0-9]_[A-Z0-9_]+)|(?:BF16)|(?:F16)|(?:F32))$/i, "")
   // Convert to clean lower-case identifier
-  var cleaned = str.toLowerCase()
+  // The fallback used to be the raw name, which handed back exactly the
+  // characters the cleaning exists to remove -- a file called "[[[.gguf"
+  // cleans to nothing and came back as "[[[".
+  return safeAlias(str) || "model"
+}
+
+// An alias becomes an INI section name and the route a client asks for, so it
+// cannot carry characters the INI parser reads as structure. Returns "" when
+// nothing usable is left, so the caller can fall back.
+function safeAlias(alias) {
+  return String(alias || "").trim().toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "")
-  return cleaned || str
 }
 
 // Convert camelCase key to snake_case for INI
@@ -365,7 +374,11 @@ function toRouterIni(iniData) {
   for (var modelPath in iniData.models) {
     var entry = iniData.models[modelPath]
     var tuning = entry.common || {}
-    var alias = String(tuning.alias || "").trim() || deriveDefaultAlias(modelPath)
+    // An alias set by hand in models.ini -- which the README invites -- went
+    // in untouched, so "my model" or "gemma[v2]" produced a section an INI
+    // parser reads differently or rejects, and that model answered to no name
+    // at all in router mode.
+    var alias = safeAlias(tuning.alias) || deriveDefaultAlias(modelPath)
     // The default alias is the file's base name, so two real models with the
     // same name in different folders collide. Skipping the second dropped it
     // from the preset entirely -- it became unreachable by any name in router
@@ -456,6 +469,7 @@ function toRouterIni(iniData) {
 if (typeof module !== "undefined") {
   module.exports = {
     deriveDefaultAlias: deriveDefaultAlias,
+  safeAlias: safeAlias,
     toSnakeCase: toSnakeCase,
     toCamelCase: toCamelCase,
     parse: parse,
