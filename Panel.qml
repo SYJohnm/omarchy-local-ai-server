@@ -123,7 +123,12 @@ Panel {
   // args and its own profile namespace. Only the exclusive `backend` choice
   // stood in the way.
   property bool decisionEnabled: false
-  onDecisionEnabledChanged: if (root.settingsLoaded) root.scheduleSettingsSave()
+  onDecisionEnabledChanged: {
+    if (root.settingsLoaded) root.scheduleSettingsSave()
+    // Turning it off takes its tab away; without this the panel would be left
+    // on a page that no longer renders, which reads as the panel going blank.
+    if (!root.decisionEnabled && root.currentPage >= 3) root.currentPage = 0
+  }
   // Which llama.cpp build serves it, "" meaning the configured binary or the
   // preferred llama-server. Separate from the chat build on purpose: this is
   // the whole point of running it alongside an older fork.
@@ -1244,6 +1249,50 @@ Panel {
 
   // Build choices for an extra instance, in the same shape and order as the
   // primary's picker.
+  // The companion's own tuning, in the "systemone" profile namespace that
+  // InstanceRunner already resolves for it. Kept apart from the chat side on
+  // purpose: the point of the companion is that it runs alongside, so its
+  // layers and context cannot be the chat model's.
+  readonly property var decisionTuning:
+    Profiles.resolveFor(root.profiles, "systemone", root.systemoneModel, root.systemoneBuild)
+
+  function setDecisionField(field, value) {
+    if (root.systemoneModel === "") return
+    root.profiles = Profiles.setField(root.profiles, "systemone", root.systemoneModel, field, value)
+    root.scheduleSettingsSave()
+  }
+
+  // Builds that carry the /v1/systemone route, for the companion's picker.
+  // The route is a string in the binary, so this is known without running it;
+  // a build without it answers 404 to every decision, which looked like the
+  // model being wrong rather than the build being too old.
+  //
+  // If nothing qualifies the whole list is offered instead: being unable to
+  // pick any build at all is worse than offering one that may not work, and
+  // the detection can only prove the route is present, never that it is not.
+  function decisionBuildOptions() {
+    var out = []
+    for (var i = 0; i < root.llamaBuilds.length; i++) {
+      var b = root.llamaBuilds[i]
+      if (b && b.decision === true && b.missing !== true)
+        out.push({ value: b.path, label: Backends.buildLabel(b) })
+    }
+    if (out.length === 0) return root.instanceBuildOptions()
+    var auto = root.decisionAutoBuild
+    out.unshift({ value: "", label: auto ? "Auto · " + Backends.buildLabel(auto) : "Auto" })
+    return out
+  }
+
+  // What Auto resolves to for the companion: the first build that both serves
+  // decisions and is allowed to run.
+  readonly property var decisionAutoBuild: {
+    for (var i = 0; i < root.llamaBuilds.length; i++) {
+      var b = root.llamaBuilds[i]
+      if (b && b.decision === true && b.missing !== true) return b
+    }
+    return null
+  }
+
   function instanceBuildOptions() {
     var out = [{ value: "", label: root.autoBuild
                    ? "Auto · " + Backends.buildLabel(root.autoBuild) : "Auto" }]
@@ -1605,7 +1654,11 @@ Panel {
   property bool showingLogs: false
 
   property int currentPage: 0
-  readonly property var pageNames: ["Server", "Model", "Tuning"]
+  // The companion gets a tab only while it is on, so a user who never enables
+  // it never pays a tab for it.
+  readonly property var pageNames: root.decisionEnabled
+    ? ["Server", "Model", "Tuning", "Decision"]
+    : ["Server", "Model", "Tuning"]
 
   // ---- First-run setup ----
   //
@@ -8232,160 +8285,6 @@ Panel {
                 }
               }
 
-              Rectangle {
-                id: decisionCard
-                Layout.fillWidth: true
-                visible: root.decisionEnabled
-                implicitHeight: decisionCol.implicitHeight + Style.space(8)
-                radius: 4
-                readonly property var snap: root.decisionState
-                readonly property bool up: !!(decisionCard.snap && decisionCard.snap.running)
-                readonly property bool pending:
-                  !!(decisionCard.snap && (decisionCard.snap.starting || decisionCard.snap.stopping))
-                readonly property bool starting: !!(decisionCard.snap && decisionCard.snap.starting)
-                color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.03)
-                border.color: decisionCard.up
-                  ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.25)
-                  : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
-                border.width: 1
-
-                ColumnLayout {
-                  id: decisionCol
-                  anchors.fill: parent
-                  anchors.margins: Style.space(6)
-                  spacing: Style.space(4)
-
-                  RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Style.space(6)
-
-                    Rectangle {
-                      width: 8
-                      height: 8
-                      radius: 4
-                      color: decisionCard.up
-                        ? Commons.Color.accent
-                        : (decisionCard.pending
-                            ? Commons.Color.urgent
-                            : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.25))
-                    }
-
-                    Text {
-                      textFormat: Text.PlainText
-                      text: "System One"
-                      color: root.bar.foreground
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSize
-                      font.bold: true
-                    }
-
-                    Text {
-                      textFormat: Text.PlainText
-                      text: ":" + root.systemonePort
-                      color: root.bar.foreground
-                      opacity: 0.5
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSizeSmall
-                    }
-
-                    Item { Layout.fillWidth: true }
-
-                    Text {
-                      textFormat: Text.PlainText
-                      text: root.decisionState ? Instances.stateLabel(root.decisionState) : "stopped"
-                      color: decisionCard.up ? Commons.Color.accent : root.bar.foreground
-                      opacity: decisionCard.up ? 0.9 : 0.45
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSizeSmall
-                      font.features: root.tabularFigures
-                    }
-                  }
-
-                  RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Style.space(4)
-
-                    SearchableDropdown {
-                      Layout.fillWidth: true
-                      showLabel: false
-                      enabled: !decisionCard.up && !decisionCard.pending
-                      opacity: enabled ? 1.0 : 0.5
-                      options: root.systemoneModelOptions
-                      value: root.systemoneModel
-                      placeholderText: "Search decision models…"
-                      emptyText: root.systemoneScanning ? "Scanning…" : "No models found"
-                      triggerLabel: root.systemoneModel === "" ? "Pick a decision model" : ""
-                      onChanged: function(v) { root.systemoneModel = v }
-                    }
-
-                    Button {
-                      text: root.icons.refresh
-                      tooltipText: root.systemoneScanning ? "Scanning…" : "Rescan for decision models"
-                      enabled: !root.systemoneScanning
-                      onClicked: root.refreshSystemoneModels()
-                    }
-                  }
-
-                  // Its own build. The chat side can stay on an old fork.
-                  Dropdown {
-                    Layout.fillWidth: true
-                    showLabel: false
-                    enabled: !decisionCard.up && !decisionCard.pending
-                    opacity: enabled ? 1.0 : 0.5
-                    options: root.instanceBuildOptions()
-                    value: root.systemoneBuild
-                    onChanged: function(v) { root.setSystemoneBuild(v) }
-                  }
-
-                  RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Style.space(6)
-                    Item { Layout.fillWidth: true }
-
-                    Button {
-                      text: decisionCard.up || decisionCard.starting ? "Unload" : "Start"
-                      tooltipText: root.decisionState && root.decisionState.launchable
-                        ? ""
-                        : "Needs a decision model, a llama.cpp build, a free port and a systemd user session"
-                      enabled: root.decisionState
-                        ? (root.decisionState.running || root.decisionState.starting
-                            ? !!root.decisionState.ownsUnit && !root.decisionState.stopping
-                            : !!root.decisionState.launchable)
-                        : false
-                      onClicked: root.toggleDecision()
-                    }
-                  }
-
-                  Text {
-                    textFormat: Text.PlainText
-                    Layout.fillWidth: true
-                    visible: !!(root.decisionState && String(root.decisionState.lastError || "") !== "")
-                    text: root.decisionState ? String(root.decisionState.lastError || "") : ""
-                    color: root.bar.urgent
-                    wrapMode: Text.WordWrap
-                    maximumLineCount: 2
-                    elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSizeSmall
-                  }
-                }
-              }
-
-              TextField {
-                Layout.fillWidth: true
-                visible: root.decisionEnabled
-                text: root.configuredSystemoneBinary
-                placeholderText: "Binary override (blank = the build picked above)"
-                onEditingFinished: root.setSystemoneBinary(text)
-              }
-
-              TextField {
-                Layout.fillWidth: true
-                visible: root.decisionEnabled
-                text: root.configuredSystemoneModelsDir
-                placeholderText: "Decision models directory (blank = main model scan)"
-                onEditingFinished: root.setSystemoneModelsDir(text)
-              }
             }
 
             Item { Layout.fillHeight: true }
@@ -11091,6 +10990,224 @@ Panel {
             Item { Layout.fillHeight: true }
 
 
+          }
+
+          // Decision ----------------------------------------------------
+          // Its own page, and only while the companion is enabled. It has
+          // a model, a build and a lifecycle of its own -- a page's worth
+          // -- and on the Server page it sat under everything else, off
+          // the bottom of the panel, where it could not be reached.
+          ColumnLayout {
+            anchors.fill: parent
+            spacing: Style.space(6)
+            visible: root.currentPage === 3
+
+            Rectangle {
+              id: decisionCard
+              Layout.fillWidth: true
+              visible: root.decisionEnabled
+              implicitHeight: decisionCol.implicitHeight + Style.space(8)
+              radius: 4
+              readonly property var snap: root.decisionState
+              readonly property bool up: !!(decisionCard.snap && decisionCard.snap.running)
+              readonly property bool pending:
+                !!(decisionCard.snap && (decisionCard.snap.starting || decisionCard.snap.stopping))
+              readonly property bool starting: !!(decisionCard.snap && decisionCard.snap.starting)
+              color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.03)
+              border.color: decisionCard.up
+                ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.25)
+                : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
+              border.width: 1
+
+              ColumnLayout {
+                id: decisionCol
+                anchors.fill: parent
+                anchors.margins: Style.space(6)
+                spacing: Style.space(4)
+
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(6)
+
+                  Rectangle {
+                    width: 8
+                    height: 8
+                    radius: 4
+                    color: decisionCard.up
+                      ? Commons.Color.accent
+                      : (decisionCard.pending
+                          ? Commons.Color.urgent
+                          : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.25))
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: "System One"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSize
+                    font.bold: true
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: ":" + root.systemonePort
+                    color: root.bar.foreground
+                    opacity: 0.5
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSizeSmall
+                  }
+
+                  Item { Layout.fillWidth: true }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: root.decisionState ? Instances.stateLabel(root.decisionState) : "stopped"
+                    color: decisionCard.up ? Commons.Color.accent : root.bar.foreground
+                    opacity: decisionCard.up ? 0.9 : 0.45
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSizeSmall
+                    font.features: root.tabularFigures
+                  }
+                }
+
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(4)
+
+                  SearchableDropdown {
+                    Layout.fillWidth: true
+                    showLabel: false
+                    enabled: !decisionCard.up && !decisionCard.pending
+                    opacity: enabled ? 1.0 : 0.5
+                    options: root.systemoneModelOptions
+                    value: root.systemoneModel
+                    placeholderText: "Search decision models…"
+                    emptyText: root.systemoneScanning ? "Scanning…" : "No models found"
+                    triggerLabel: root.systemoneModel === "" ? "Pick a decision model" : ""
+                    onChanged: function(v) { root.systemoneModel = v }
+                  }
+
+                  Button {
+                    text: root.icons.refresh
+                    tooltipText: root.systemoneScanning ? "Scanning…" : "Rescan for decision models"
+                    enabled: !root.systemoneScanning
+                    onClicked: root.refreshSystemoneModels()
+                  }
+                }
+
+                // Its own build, and only the ones that carry the route. The
+                // chat side can stay on an old fork that has no endpoint.
+                Dropdown {
+                  Layout.fillWidth: true
+                  showLabel: false
+                  enabled: !decisionCard.up && !decisionCard.pending
+                  opacity: enabled ? 1.0 : 0.5
+                  options: root.decisionBuildOptions()
+                  value: root.systemoneBuild
+                  onChanged: function(v) { root.setSystemoneBuild(v) }
+                }
+
+                // A decision model emits no tokens -- it reads logits at the
+                // last prompt token -- so temperature, top-p and the rest of
+                // the sampling page mean nothing here. What decides whether it
+                // runs at all beside a chat model is how much of it sits on
+                // the card and how long a prompt it must hold.
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(4)
+                  enabled: !decisionCard.up && !decisionCard.pending
+                  opacity: enabled ? 1.0 : 0.5
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: "GPU layers"
+                    color: root.bar.foreground
+                    opacity: 0.85
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSize
+                  }
+                  NumField {
+                    Layout.preferredWidth: Style.space(44)
+                    text: String(root.decisionTuning.gpuLayers === undefined
+                      ? "" : root.decisionTuning.gpuLayers)
+                    // The registry owns what "unset" means for a field;
+                    // repeating the number here would be a second source.
+                    placeholderText: String(root.builtinDefaults.gpuLayers)
+                    validator: IntValidator { bottom: -1; top: 999 }
+                    onEditingFinished: root.setDecisionField("gpuLayers", text)
+                  }
+
+                  Item { Layout.fillWidth: true }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: "Context"
+                    color: root.bar.foreground
+                    opacity: 0.85
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: root.fontSize
+                  }
+                  NumField {
+                    Layout.preferredWidth: Style.space(56)
+                    text: root.systemoneCtx
+                    placeholderText: String(root.builtinDefaults.systemoneCtx)
+                    validator: IntValidator { bottom: 0; top: 1048576 }
+                    onEditingFinished: root.systemoneCtx = text
+                  }
+                }
+
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(6)
+                  Item { Layout.fillWidth: true }
+
+                  Button {
+                    text: decisionCard.up || decisionCard.starting ? "Unload" : "Start"
+                    tooltipText: root.decisionState && root.decisionState.launchable
+                      ? ""
+                      : "Needs a decision model, a llama.cpp build, a free port and a systemd user session"
+                    enabled: root.decisionState
+                      ? (root.decisionState.running || root.decisionState.starting
+                          ? !!root.decisionState.ownsUnit && !root.decisionState.stopping
+                          : !!root.decisionState.launchable)
+                      : false
+                    onClicked: root.toggleDecision()
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  Layout.fillWidth: true
+                  visible: !!(root.decisionState && String(root.decisionState.lastError || "") !== "")
+                  text: root.decisionState ? String(root.decisionState.lastError || "") : ""
+                  color: root.bar.urgent
+                  wrapMode: Text.WordWrap
+                  maximumLineCount: 2
+                  elide: Text.ElideRight
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: root.fontSizeSmall
+                }
+              }
+            }
+
+            TextField {
+              Layout.fillWidth: true
+              visible: root.decisionEnabled
+              text: root.configuredSystemoneBinary
+              placeholderText: "Binary override (blank = the build picked above)"
+              onEditingFinished: root.setSystemoneBinary(text)
+            }
+
+            TextField {
+              Layout.fillWidth: true
+              visible: root.decisionEnabled
+              text: root.configuredSystemoneModelsDir
+              placeholderText: "Decision models directory (blank = main model scan)"
+              onEditingFinished: root.setSystemoneModelsDir(text)
+            }
+
+            Item { Layout.fillHeight: true }
           }
         }
 

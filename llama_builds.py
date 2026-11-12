@@ -318,6 +318,51 @@ def cache_types(help_text):
     return []
 
 
+# The decision endpoint is a route, not a flag: --help says nothing about it,
+# and the same binary serves chat either way. But the route's own path is a
+# string literal in whatever object defines it, so looking for it is reading
+# bytes -- no execution, no sandbox needed, and it works on a build for
+# another architecture that could not be run here at all.
+DECISION_ROUTE = b"/v1/systemone"
+
+# Observed in both layouts: linked into llama-server (static), or left in
+# libllama-server-impl.so beside it (shared). Only files named for the server
+# are read, so a 400 MB CUDA backend is never scanned.
+def serves_decisions(path):
+    real = os.path.realpath(path)
+    d = os.path.dirname(real)
+    names = [real]
+    try:
+        for n in sorted(os.listdir(d)):
+            if "server" in n and n != os.path.basename(real):
+                names.append(os.path.join(d, n))
+    except OSError:
+        pass
+    for f in names[:12]:
+        if contains(f, DECISION_ROUTE):
+            return True
+    return False
+
+
+def contains(path, needle, cap=512 * 1024 * 1024):
+    # Chunked with an overlap, so a match spanning a boundary is still found.
+    try:
+        read = 0
+        tail = b""
+        with open(path, "rb") as fh:
+            while read < cap:
+                chunk = fh.read(1 << 20)
+                if not chunk:
+                    return False
+                if needle in tail + chunk:
+                    return True
+                tail = chunk[-len(needle):]
+                read += len(chunk)
+    except OSError:
+        return False
+    return False
+
+
 def dir_fork(path):
     # A build with no checkout: name it after the directory it was built or
     # extracted in, which is usually the project's.
@@ -366,6 +411,7 @@ def describe(path, confine=True):
         "gpu": gpu_backend(path),
         "cacheTypes": cache_types(help_out),
         "flags": flag_list,
+        "decision": serves_decisions(path),
     }
 
 
@@ -446,6 +492,9 @@ def main():
             "gpu": "",
             "cacheTypes": [],
             "flags": [],
+            # Reading bytes needs no run, so this is known even for a build
+            # that could not be identified at all.
+            "decision": serves_decisions(h["path"]),
             # Rides `missing`, which is already how a build is kept out of Auto
             # and out of a launch (Backends.isUsableBuild / pickBuild).
             "missing": True,
@@ -472,6 +521,7 @@ def main():
             "gpu": "",
             "cacheTypes": [],
             "flags": [],
+            "decision": False,
             "missing": True,
         })
     print(json.dumps(builds))
