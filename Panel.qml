@@ -1711,6 +1711,12 @@ Panel {
   // "none" foreign server whose output no journal holds.
   property string logsSource: ""
   property bool showingLogs: false
+  // Which unit the log view is reading. The view could only ever follow the
+  // chat server, so a companion or a second instance that failed to start had
+  // its journal nowhere in the panel -- the one place a failed start explains
+  // itself. Empty means the chat server.
+  property string logUnit: ""
+  property string logTitle: "Log"
 
   property int currentPage: 0
   // The companion gets a tab only while it is on, so a user who never enables
@@ -4640,9 +4646,63 @@ Panel {
       return
     }
     root.logsSource = root.ownsUnit ? "user" : "system"
+    // Following the chat server again takes the view back with it.
+    root.logUnit = ""
+    root.logTitle = "Log"
     journalProc.command = command
     journalProc.running = false
     journalProc.running = true
+  }
+
+  // Every journal the widget can show: the chat server, each extra instance,
+  // and the decision companion. A function rather than a binding -- the
+  // runners come from Instantiators, which a property binding does not track.
+  function logSources() {
+    var out = [{ title: "Log", unit: root.activeUnitName, owns: root.ownsUnit }]
+    for (var i = 1; i < root.instanceCount; i++) {
+      var r = root.runnerFor(i)
+      if (r && r.unitName !== "") out.push({ title: r.title, unit: r.unitName, owns: true })
+    }
+    var d = root.decisionRunner()
+    if (d && d.unitName !== "") out.push({ title: d.title, unit: d.unitName, owns: true })
+    return out
+  }
+
+  function showLogFor(source) {
+    root.logUnit = source.unit === root.activeUnitName ? "" : source.unit
+    root.logTitle = source.title
+    logModel.clear()
+    root.logRevision++
+    // The companion always runs llama.cpp, whatever the chat backend is; only
+    // the chat server can be the one a distribution package manages.
+    var backendId = root.logUnit === "" ? root.backend : "llamacpp"
+    var command = Backends.journalCommand(backendId, source.unit, source.owns, 200)
+    if (!command) {
+      root.logsSource = "none"
+      journalProc.running = false
+      return
+    }
+    root.logsSource = source.owns ? "user" : "system"
+    journalProc.command = command
+    journalProc.running = false
+    journalProc.running = true
+  }
+
+  function cycleLogSource() {
+    var list = root.logSources()
+    if (list.length < 2) return
+    var at = 0
+    for (var i = 0; i < list.length; i++)
+      if (list[i].unit === (root.logUnit === "" ? root.activeUnitName : root.logUnit)) at = i
+    root.showLogFor(list[(at + 1) % list.length])
+  }
+
+  // Lines from a companion or a second instance are logged but not measured:
+  // the bar's rate readout belongs to the chat server, and feeding another
+  // server's timings into it would make the bar report the wrong number.
+  function handleJournalLine(line) {
+    if (root.logUnit === "") root.handleServerLine(line)
+    else root.appendLogLine(line)
   }
 
   // systemd-run returns as soon as the unit is queued, so serverProc exiting
@@ -5293,8 +5353,8 @@ Panel {
 
   Process {
     id: journalProc
-    stdout: SplitParser { onRead: function(line) { root.handleServerLine(line) } }
-    stderr: SplitParser { onRead: function(line) { root.handleServerLine(line) } }
+    stdout: SplitParser { onRead: function(line) { root.handleJournalLine(line) } }
+    stderr: SplitParser { onRead: function(line) { root.handleJournalLine(line) } }
   }
 
   function handleSlotsResponse(text) {
@@ -5369,15 +5429,19 @@ Panel {
     }
   }
 
-  function handleServerLine(line) {
+  function appendLogLine(line) {
     var text = String(line).trim()
-    if (text !== "") {
-      root.lastLogLine = text
-      logModel.append({ line: text })
-      if (logModel.count > root.logLinesMax)
-        logModel.remove(0, logModel.count - root.logLinesMax)
-      root.logRevision++
-    }
+    if (text === "") return ""
+    root.lastLogLine = text
+    logModel.append({ line: text })
+    if (logModel.count > root.logLinesMax)
+      logModel.remove(0, logModel.count - root.logLinesMax)
+    root.logRevision++
+    return text
+  }
+
+  function handleServerLine(line) {
+    var text = root.appendLogLine(line)
 
     // Live ingestion progress, when the build logs it. Both numbers come
     // measured, so they win over the /slots derivation, which reports a
@@ -11566,13 +11630,14 @@ Panel {
             Layout.fillWidth: true
             spacing: Style.space(8)
 
-            Text {
-              textFormat: Text.PlainText
-              text: "Log"
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
+            // The title doubles as the source switch: with a companion or a
+            // second instance running there is more than one journal, and the
+            // header is where the view says which one it is reading.
+            TextAction {
+              text: root.logTitle
+              active: root.logUnit !== ""
               font.pixelSize: root.fontSize
-              opacity: 0.85
+              onClicked: root.cycleLogSource()
             }
 
             Text {
@@ -11680,10 +11745,14 @@ Panel {
               anchors.top: parent.top
               anchors.margins: Style.space(8)
               visible: logModel.count === 0
+              // "the server" is only right while the view follows the chat
+              // server; following a companion it would name the wrong one.
               text: root.logsSource === "none"
                     ? "This server was started outside systemd, so its output is not in any journal. Restart it from here to see its log."
-                    : (root.running ? "Waiting for the server to log something…"
-                                    : "No log yet -- the server is not running.")
+                    : (root.logUnit !== ""
+                       ? "Nothing in the journal for " + root.logTitle + " yet."
+                       : (root.running ? "Waiting for the server to log something…"
+                                       : "No log yet -- the server is not running."))
               color: root.bar.foreground
               opacity: 0.5
               wrapMode: Text.WordWrap
