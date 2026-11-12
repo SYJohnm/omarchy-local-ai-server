@@ -1875,6 +1875,106 @@ Panel {
   // that item did not accept -- a single-line TextInput swallows Home/End/
   // Left/Right and passes Up/Down through, so a panel-level handler catches
   // some keypad digits and never sees the rest.
+  // The row this panel is made of: a label, leader dots, and a value that
+  // turns into a field when clicked. Every page had its own hand-copy of this
+  // shape -- which is most of why the Tuning page runs to two thousand lines
+  // -- and a page that copies it slightly differently stops looking like the
+  // rest of the panel, which is exactly what the Decision page did.
+  component ValueRow: Rectangle {
+    id: vrow
+    property string label: ""
+    property string value: ""
+    // Stands in for an empty value, so a row never reads as blank.
+    property string hint: ""
+    property var inputValidator: null
+    signal committed(string text)
+
+    Layout.fillWidth: true
+    implicitHeight: root.rowHeight
+    radius: 3
+    property bool editing: false
+    color: vrowHover.hovered && !vrow.editing
+      ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+      : "transparent"
+
+    RowLayout {
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(4)
+      anchors.rightMargin: Style.space(4)
+      spacing: Style.space(4)
+      visible: !vrow.editing
+
+      Text {
+        textFormat: Text.PlainText
+        text: vrow.label
+        color: root.bar.foreground
+        opacity: 0.85
+        font.family: root.bar.fontFamily
+        font.pixelSize: root.fontSize
+      }
+      Text {
+        textFormat: Text.PlainText
+        Layout.fillWidth: true
+        text: root.leaderDots
+        color: root.bar.foreground
+        opacity: 0.15
+        elide: Text.ElideRight
+        font.family: root.bar.fontFamily
+        font.pixelSize: root.fontSize
+      }
+      Text {
+        textFormat: Text.PlainText
+        text: vrow.value !== "" ? vrow.value : vrow.hint
+        color: root.bar.foreground
+        opacity: vrow.value !== "" ? 0.45 : 0.25
+        elide: Text.ElideRight
+        Layout.maximumWidth: Style.space(150)
+        font.family: root.bar.fontFamily
+        font.pixelSize: root.fontSizeSmall
+        font.features: root.tabularFigures
+      }
+    }
+
+    RowLayout {
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(4)
+      anchors.rightMargin: Style.space(4)
+      spacing: Style.space(4)
+      visible: vrow.editing
+
+      Text {
+        textFormat: Text.PlainText
+        text: vrow.label
+        color: root.bar.foreground
+        opacity: 0.85
+        font.family: root.bar.fontFamily
+        font.pixelSize: root.fontSize
+      }
+      NumField {
+        id: vrowField
+        Layout.fillWidth: true
+        placeholderText: vrow.hint
+        validator: vrow.inputValidator
+        onEditingFinished: {
+          vrow.committed(text)
+          vrow.editing = false
+        }
+        Keys.onEscapePressed: vrow.editing = false
+      }
+    }
+
+    HoverHandler { id: vrowHover; cursorShape: Qt.PointingHandCursor }
+    MouseArea {
+      anchors.fill: parent
+      enabled: !vrow.editing
+      onClicked: {
+        vrowField.text = vrow.value
+        vrow.editing = true
+        vrowField.forceActiveFocus()
+      }
+    }
+  }
+
   component NumField: TextField {
     Keys.priority: Keys.BeforeItem
     Keys.onPressed: function(event) {
@@ -11025,6 +11125,36 @@ Panel {
             spacing: Style.space(6)
             visible: root.currentPage === 3
 
+            // Every other page leads with one of these, and a page that opens
+            // straight onto a card does not read as part of the set.
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: Style.space(6)
+
+              Text {
+                textFormat: Text.PlainText
+                text: "Companion"
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: root.fontSizeSmall
+                opacity: 0.6
+                font.bold: true
+              }
+
+              Item { Layout.fillWidth: true }
+
+              Text {
+                textFormat: Text.PlainText
+                text: root.decisionState ? Instances.stateLabel(root.decisionState) : "stopped"
+                color: root.decisionState && root.decisionState.running
+                  ? Commons.Color.accent : root.bar.foreground
+                opacity: root.decisionState && root.decisionState.running ? 0.9 : 0.45
+                font.family: root.bar.fontFamily
+                font.pixelSize: root.fontSizeSmall
+                font.features: root.tabularFigures
+              }
+            }
+
             Rectangle {
               id: decisionCard
               Layout.fillWidth: true
@@ -11136,48 +11266,25 @@ Panel {
                 // the sampling page mean nothing here. What decides whether it
                 // runs at all beside a chat model is how much of it sits on
                 // the card and how long a prompt it must hold.
-                RowLayout {
-                  Layout.fillWidth: true
-                  spacing: Style.space(4)
-                  enabled: !decisionCard.up && !decisionCard.pending
-                  opacity: enabled ? 1.0 : 0.5
+                ValueRow {
+                  label: "GPU layers"
+                  // The registry owns what "unset" means for a field;
+                  // repeating the number here would be a second source.
+                  hint: String(root.builtinDefaults.gpuLayers)
+                  value: String(root.decisionTuning.gpuLayers === undefined
+                    ? "" : root.decisionTuning.gpuLayers)
+                  inputValidator: IntValidator { bottom: -1; top: 999 }
+                  onCommitted: function(committedText) {
+                    root.setDecisionField("gpuLayers", committedText)
+                  }
+                }
 
-                  Text {
-                    textFormat: Text.PlainText
-                    text: "GPU layers"
-                    color: root.bar.foreground
-                    opacity: 0.85
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
-                  }
-                  NumField {
-                    Layout.preferredWidth: Style.space(44)
-                    text: String(root.decisionTuning.gpuLayers === undefined
-                      ? "" : root.decisionTuning.gpuLayers)
-                    // The registry owns what "unset" means for a field;
-                    // repeating the number here would be a second source.
-                    placeholderText: String(root.builtinDefaults.gpuLayers)
-                    validator: IntValidator { bottom: -1; top: 999 }
-                    onEditingFinished: root.setDecisionField("gpuLayers", text)
-                  }
-
-                  Item { Layout.fillWidth: true }
-
-                  Text {
-                    textFormat: Text.PlainText
-                    text: "Context"
-                    color: root.bar.foreground
-                    opacity: 0.85
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
-                  }
-                  NumField {
-                    Layout.preferredWidth: Style.space(56)
-                    text: root.systemoneCtx
-                    placeholderText: String(root.builtinDefaults.systemoneCtx)
-                    validator: IntValidator { bottom: 0; top: 1048576 }
-                    onEditingFinished: root.systemoneCtx = text
-                  }
+                ValueRow {
+                  label: "Context"
+                  hint: String(root.builtinDefaults.systemoneCtx)
+                  value: root.systemoneCtx
+                  inputValidator: IntValidator { bottom: 0; top: 1048576 }
+                  onCommitted: function(committedText) { root.systemoneCtx = committedText }
                 }
 
                 RowLayout {
@@ -11214,20 +11321,18 @@ Panel {
               }
             }
 
-            TextField {
-              Layout.fillWidth: true
-              visible: root.decisionEnabled
-              text: root.configuredSystemoneBinary
-              placeholderText: "Binary override (blank = the build picked above)"
-              onEditingFinished: root.setSystemoneBinary(text)
+            ValueRow {
+              label: "Binary override"
+              hint: "the build picked above"
+              value: root.configuredSystemoneBinary
+              onCommitted: function(committedText) { root.setSystemoneBinary(committedText) }
             }
 
-            TextField {
-              Layout.fillWidth: true
-              visible: root.decisionEnabled
-              text: root.configuredSystemoneModelsDir
-              placeholderText: "Decision models directory (blank = main model scan)"
-              onEditingFinished: root.setSystemoneModelsDir(text)
+            ValueRow {
+              label: "Models folder"
+              hint: "the main model scan"
+              value: root.configuredSystemoneModelsDir
+              onCommitted: function(committedText) { root.setSystemoneModelsDir(committedText) }
             }
 
             Item { Layout.fillHeight: true }
