@@ -283,6 +283,39 @@ it. A settings file that had System One selected as its backend turns the
 companion on and leaves chat on llama.cpp, which is what selecting it stood in
 for.
 
+**Calling it.** The endpoint is `POST /v1/systemone`. A `GET` answers `404 File
+Not Found`, which reads like a missing route and is only the wrong method. One
+question, answered from the logits:
+
+```bash
+curl -s http://127.0.0.1:8081/v1/systemone -H 'Content-Type: application/json' -d '{
+  "state": "The user said: what time is it?",
+  "questions": {
+    "needs_tool": {
+      "type": "choice",
+      "instructions": "Does the user need a tool to answer?",
+      "criteria": {
+        "yes": "the answer needs live data such as the clock",
+        "no":  "the model can answer from memory"
+      }
+    }
+  }
+}'
+```
+
+```json
+{"model":"…/Laya-BF16.gguf",
+ "answers":{"needs_tool":{"type":"choice","choice":"yes",
+   "probabilities":{"yes":0.58,"no":0.42},"confidence":0.16}},
+ "usage":{"input_tokens":46,"output_tokens":0}}
+```
+
+`state` is the context, `questions` is a non-empty object, and each question
+needs `type` (`choice`, `score` or `noul`), `instructions` and a non-empty
+`criteria`. `output_tokens` is 0 because nothing is generated: the answer is
+read off the probabilities, which is why it costs almost nothing next to a
+chat turn.
+
 ## When something breaks
 
 `qs -p /usr/share/omarchy/shell ipc call local-ai-server diagnose` returns one
