@@ -336,3 +336,91 @@ test("a configured fork path that disappeared is reported as missing", () => {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// A build with BUILD_SHARED_LIBS=OFF has no libggml-cuda.so beside it, which
+// is not the same as having no GPU backend. Reported as "CPU", it sent people
+// to the wrong build for the exact reason they keep several of them.
+test("llama_builds reads the GPU backend of a statically linked build", () => {
+  const home = tmpdir()
+  try {
+    const dir = path.join(home, "static-build", "build", "bin")
+    fs.mkdirSync(dir, { recursive: true })
+    const fake = path.join(dir, "llama-server")
+    // No sibling ggml libraries; the runtime is named in the file itself, as
+    // a DT_NEEDED entry would be.
+    fs.writeFileSync(fake, SNITCH().replace("#!/bin/sh",
+      "#!/bin/sh\n# NEEDED libcudart.so.13 libcublas.so.13"))
+    fs.chmodSync(fake, 0o755)
+    const build = probe(home, ["--trust", fake]).find((b) => b.path === fake)
+    assert.ok(build, "static build was not listed")
+    assert.strictEqual(build.gpu, "CUDA", "a static CUDA build was reported as " + build.gpu)
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// Most forks rename themselves and the repository name identifies them. One
+// that kept the upstream name does not: unslothai/llama.cpp and
+// ggml-org/llama.cpp both came out "llama.cpp", so the Build picker showed two
+// identical rows for the one thing it exists to tell apart.
+test("llama_builds names a fork that kept the upstream repository name", () => {
+  const home = tmpdir()
+  try {
+    const root = path.join(home, "someones-llamacpp")
+    const dir = path.join(root, "build", "bin")
+    fs.mkdirSync(dir, { recursive: true })
+    execFileSync("git", ["init", "-q", root], { encoding: "utf8" })
+    execFileSync("git", ["-C", root, "remote", "add", "origin",
+      "https://github.com/unslothai/llama.cpp"], { encoding: "utf8" })
+    const fake = path.join(dir, "llama-server")
+    fs.writeFileSync(fake, SNITCH())
+    fs.chmodSync(fake, 0o755)
+    const build = probe(home, ["--trust", fake]).find((b) => b.path === fake)
+    assert.ok(build, "fork build was not listed")
+    assert.strictEqual(build.fork, "unslothai",
+      "a fork of llama.cpp is indistinguishable from upstream: " + build.fork)
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// "bin" names no build. A release unpacked as llamacpp-0.9.0/bin/llama-server
+// has no build/ segment, so the directory holding the binary is plumbing and
+// the one above it is the name.
+test("llama_builds names a build sitting in a plain bin directory", () => {
+  const home = tmpdir()
+  try {
+    // Named as a path to look at as well as trusted: a plain bin directory
+    // is not somewhere the scan looks on its own.
+    const fake = fakeBuild(path.join(home, "llamacpp-0.9.0", "bin"))
+    const build = probe(home, [fake, "--trust", fake]).find((b) => b.path === fake)
+    assert.ok(build, "build was not listed")
+    assert.strictEqual(build.fork, "llamacpp-0.9.0", "named after plumbing: " + build.fork)
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// A build reached through a symlink -- ~/.local/bin/llama-server pointing into
+// an unpacked release -- is the common shape of a hand-installed llama.cpp.
+// The sandbox binds the directory the file really lives in, so invoking it by
+// the link's path finds nothing there, and failing to exec looks exactly like
+// "not a llama-server": the build was listed, unidentified, for no stated
+// reason.
+test("llama_builds identifies a build reached through a symlink", () => {
+  const home = tmpdir()
+  try {
+    const real = fakeBuild(path.join(home, "llamacpp-9.9.9", "bin"))
+    const linkDir = path.join(home, ".local", "bin")
+    fs.mkdirSync(linkDir, { recursive: true })
+    const link = path.join(linkDir, "llama-server")
+    fs.symlinkSync(real, link)
+
+    const build = probe(home, ["--trust", link]).find((b) => b.path === link)
+    assert.ok(build, "symlinked build was not listed")
+    assert.strictEqual(build.version, "9.9", "not identified through the link")
+    assert.strictEqual(build.real, real, "the link's target was not recorded")
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})

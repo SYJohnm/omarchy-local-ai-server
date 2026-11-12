@@ -93,6 +93,12 @@ for _name in SERVER_NAMES:
 INSTALL_DIRS = tuple(os.path.realpath(d) + os.sep
                      for d in ("/usr", "/opt", HOME + "/.local/bin"))
 
+# DT_NEEDED entries, as they appear in .dynstr. Order matters: a CUDA build
+# also links libstdc++ and friends, so the most specific runtime wins.
+GPU_SONAMES = [(b"libcudart.so", "CUDA"), (b"libamdhip64.so", "ROCm"),
+               (b"libhipblas.so", "ROCm"), (b"libvulkan.so", "Vulkan"),
+               (b"libsycl.so", "SYCL"), (b"libOpenCL.so", "OpenCL")]
+
 GPU_LIBS = [("cuda", "CUDA"), ("hip", "ROCm"), ("vulkan", "Vulkan"),
             ("sycl", "SYCL"), ("metal", "Metal"), ("opencl", "OpenCL")]
 
@@ -283,7 +289,19 @@ def gpu_backend(path):
         except OSError:
             pass
     found = [label for key, label in GPU_LIBS if any("ggml-" + key in n for n in names)]
-    return " + ".join(found) if found else "CPU"
+    if found:
+        return " + ".join(found)
+
+    # No ggml library beside it means either a CPU build or a static one, and
+    # those are not the same thing: a build with BUILD_SHARED_LIBS=OFF carries
+    # its backends inside the executable. The runtime it needs is named in the
+    # ELF's own string table, so reading the file answers it -- reporting CUDA
+    # as "CPU" sent people to the wrong build for the one reason they keep
+    # several.
+    for needle, label in GPU_SONAMES:
+        if contains(os.path.realpath(path), needle):
+            return label
+    return "CPU"
 
 
 def flags(help_text):
@@ -363,24 +381,38 @@ def contains(path, needle, cap=512 * 1024 * 1024):
     return False
 
 
+# Directories a binary conventionally sits in, which say nothing about which
+# build it is.
+PLUMBING_DIRS = ("bin", "build", "release", "debug", "lib", "lib64", "x64", "sbin")
+
+
 def dir_fork(path):
     # A build with no checkout: name it after the directory it was built or
-    # extracted in, which is usually the project's.
+    # extracted in, which is usually the project's. Walking past the plumbing
+    # matters -- llamacpp-0.9.0/bin/llama-server was being called "bin".
     parts = os.path.realpath(path).split(os.sep)
     if "build" in parts[1:]:
         return parts[parts.index("build") - 1]
-    return parts[-2] if len(parts) >= 2 else "llama-server"
+    i = len(parts) - 2
+    while i > 0 and parts[i].lower() in PLUMBING_DIRS:
+        i -= 1
+    return parts[i] if i > 0 else "llama-server"
 
 
 def describe(path, confine=True):
     # confine=False is for a build that cleared the gate on a machine with no
     # bwrap: an install location, where a package manager put the binary.
     box = os.path.dirname(os.path.realpath(path)) if confine else None
-    version_out = run([path, "--version"], confine=box)
+    # The sandbox binds the directory the binary really lives in, so it has to
+    # be invoked by that path too: ~/.local/bin/llama-server pointing into
+    # ~/llamacpp-0.9.0/bin does not exist inside, and the failure to exec is
+    # indistinguishable from "not a llama-server".
+    exe = os.path.realpath(path) if box else path
+    version_out = run([exe, "--version"], confine=box)
     if version_out is None:
         return None
     m = re.search(r"version:\s*(\S+)\s*\(build\s+(\d+),\s*commit\s+([0-9a-f]+)\)", version_out)
-    help_out = run([path, "--help"], confine=box) or ""
+    help_out = run([exe, "--help"], confine=box) or ""
     flag_list = flags(help_out)
     # A wrong-architecture binary can be run through a binfmt handler that
     # prints its own error and still exits 0. It has no llama.cpp version and
@@ -392,7 +424,12 @@ def describe(path, confine=True):
     if remote.lower() in ("ggml-org/llama.cpp", "ggerganov/llama.cpp"):
         fork = "llama.cpp"
     elif remote:
-        fork = remote.split("/")[1]
+        owner, name = remote.split("/", 1)
+        # Most forks rename themselves, and the repository name is the useful
+        # half. A fork that kept the upstream name does not: unslothai's
+        # llama.cpp and ggml-org's both came out "llama.cpp", so the picker
+        # showed two identical rows for the one thing it exists to tell apart.
+        fork = owner if name.lower() in ("llama.cpp", "llama-cpp") else name
     elif path.startswith("/usr/"):
         fork = "llama.cpp (system package)"
     else:
