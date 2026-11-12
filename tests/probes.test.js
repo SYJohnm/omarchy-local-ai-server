@@ -513,3 +513,20 @@ test("llama_builds reads a whole real-sized --help", () => {
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
+
+test("adoption refuses anything that is not the backend answering", () => {
+  // Burp Suite listens on 127.0.0.1:8080 and answers /health with 200 and a
+  // page of HTML. The panel adopted it as the chat server: it showed a model
+  // and a build read from its own settings, and could neither stop nor
+  // restart what was actually running.
+  const B = require("../Backends.js")
+  const html = "<html><body>Burp Suite</body></html>\n200"
+  assert.strictEqual(B.isOwnServerReply("llamacpp", html), false)
+  assert.strictEqual(B.isOwnServerReply("llamacpp", '{"status":"ok"}\n200'), true)
+  assert.strictEqual(B.isOwnServerReply("ollama", '{"version":"0.1.0"}\n200'), true)
+  // Right shape, wrong backend: ollama's reply carries no "status".
+  assert.strictEqual(B.isOwnServerReply("llamacpp", '{"version":"0.1.0"}\n200'), false)
+  // A server that is up but not ready still answers 503; not an adoption.
+  assert.strictEqual(B.isOwnServerReply("llamacpp", '{"status":"loading"}\n503'), false)
+  assert.strictEqual(B.isOwnServerReply("llamacpp", ""), false)
+})

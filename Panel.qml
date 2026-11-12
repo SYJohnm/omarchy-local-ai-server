@@ -4232,10 +4232,7 @@ Panel {
   function adoptRunningServer() {
     if (root.running || root.starting) return
     if (!root.host || !root.port) return
-    adoptHealthProc.command = [
-      "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "1",
-      Backends.healthUrl(root.backend, root.host, root.port)
-    ]
+    adoptHealthProc.command = Backends.adoptProbeCommand(root.backend, root.host, root.port)
     adoptHealthProc.running = false
     adoptHealthProc.running = true
   }
@@ -4250,7 +4247,10 @@ Panel {
         // what the answer was.
         root.adoptProbed = true
         if (root.running || root.starting) return
-        if (text.trim() !== "200") return
+        // Not merely "something answered": something that answered the way
+        // this backend does. Anything else on the port is not ours to adopt,
+        // stop or restart.
+        if (!Backends.isOwnServerReply(root.backend, text)) return
         root.running = true
         root.adopted = true
         root.healthUrl = Backends.healthUrl(root.backend, root.host, root.port)
@@ -5974,12 +5974,14 @@ Panel {
     property Process ownLaunch: Process { }
 
     property Process ownAdopt: Process {
-      command: ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "1", inst.healthUrl]
+      command: Backends.adoptProbeCommand(inst.backendId, root.host, inst.port)
       stdout: StdioCollector {
         waitForEnd: true
         onStreamFinished: {
           if (inst.running || inst.starting) return
-          if (String(text).trim() !== "200") return
+          // Same rule as the primary: a 200 on the port is not proof that
+          // what answered is one of ours.
+          if (!Backends.isOwnServerReply(inst.backendId, text)) return
           inst.running = true
           inst.adopted = true
           inst.failed = false

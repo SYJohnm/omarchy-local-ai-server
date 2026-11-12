@@ -96,6 +96,8 @@ var LLAMA_CPP = {
   // llama-server's own default port.
   defaultPort: 8080,
   healthPath: "/health",
+  // The field its /health JSON carries; see isOwnServerReply.
+  healthKey: "status",
   // Live per-slot telemetry: pp% sweep and running tg, polled over HTTP.
   metricsMode: "slots",
   // We always spawn llama-server ourselves, so stopping it is always ours.
@@ -119,6 +121,8 @@ var OLLAMA = {
   defaultPort: 11434,
   // ollama has no /health; /api/version is the cheapest liveness probe.
   healthPath: "/api/version",
+  // The field its /health JSON carries; see isOwnServerReply.
+  healthKey: "version",
   // No /slots equivalent is exposed over HTTP, and no progress lines are
   // logged at default verbosity, so throughput is read from the timing lines
   // the embedded llama.cpp writes when each request completes. That yields
@@ -167,6 +171,8 @@ var SYSTEMONE = {
   defaultPort: 8081,
   // llama.cpp's health endpoint.
   healthPath: "/health",
+  // The field its /health JSON carries; see isOwnServerReply.
+  healthKey: "status",
   // Slot-based metrics: same /slots endpoint, same pp% sweep.
   metricsMode: "slots",
   // Model selection is a file path chosen from the gguf tree.
@@ -206,6 +212,31 @@ function baseUrl(host, port) {
 
 function healthUrl(backendId, host, port) {
   return baseUrl(host, port) + get(backendId).healthPath
+}
+
+// Adoption asks "is one of ours already running on this port?". Asking only
+// for a 200 on the health path answers "is anything there?" -- Burp Suite
+// listens on 8080 and answers /health with 200 and a page of HTML, and the
+// panel adopted it as the chat server: it then showed a model and a build it
+// had read from its own settings, and could neither stop it nor restart it.
+//
+// Both backends answer with JSON carrying a field of their own, which nothing
+// else on a port happens to produce. The liveness poll keeps reading the
+// status code alone: by then the server is one we launched.
+function adoptProbeCommand(backendId, host, port) {
+  return ["curl", "-s", "--max-time", "2", "-w", "\n%{http_code}",
+          healthUrl(backendId, host, port)]
+}
+
+function isOwnServerReply(backendId, text) {
+  var lines = String(text || "").split("\n")
+  var code = String(lines.pop() || "").trim()
+  if (code !== "200") return false
+  var body
+  try { body = JSON.parse(lines.join("\n").trim()) } catch (e) { return false }
+  if (!body || typeof body !== "object") return false
+  var key = get(backendId).healthKey
+  return key ? body[key] !== undefined : true
 }
 
 // Endpoint listing whatever the running server currently has loaded.
@@ -643,6 +674,8 @@ if (typeof module !== "undefined") {
     supports: supports,
     baseUrl: baseUrl,
     healthUrl: healthUrl,
+    adoptProbeCommand: adoptProbeCommand,
+    isOwnServerReply: isOwnServerReply,
     loadedModelsUrl: loadedModelsUrl,
     tagsUrl: tagsUrl,
     llamaBinaryCandidates: llamaBinaryCandidates,
