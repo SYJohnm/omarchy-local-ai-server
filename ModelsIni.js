@@ -469,9 +469,6 @@ function toRouterIni(iniData) {
 if (typeof module !== "undefined") {
   module.exports = {
     deriveDefaultAlias: deriveDefaultAlias,
-  safeAlias: safeAlias,
-    toSnakeCase: toSnakeCase,
-    toCamelCase: toCamelCase,
     parse: parse,
     serialize: serialize,
     fromProfiles: fromProfiles,

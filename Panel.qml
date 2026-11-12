@@ -546,7 +546,6 @@ Panel {
   readonly property string detectedMtp: root.mtpDraftFor(root.launchModel)
   // Loaded only when the spec type will use it -- --model-draft alone loads the
   // draft weights and decodes nothing with them.
-  readonly property bool mtpDraftActive: root.detectedMtp !== "" && root.specType === "draft-mtp"
 
   property string extraArgs: ""
   // Environment for the server process, "NAME=value ..." -- for knobs llama.cpp
@@ -968,11 +967,6 @@ Panel {
     return out
   }
 
-  function customParamValue(key) {
-    for (var i = 0; i < root.customParams.length; i++)
-      if (root.customParams[i].key === key) return root.customParams[i].value
-    return ""
-  }
 
   // `value` and `type` are given only when the parameter came from a parsed
   // command line, where both are already known. From the picker they are
@@ -1151,7 +1145,6 @@ Panel {
                                       root.backendSpec.systemUnit !== undefined
 
   property bool hasSystemdRun: false
-  readonly property string unitDir: expandPath("~/.config/systemd/user/")
   readonly property string unitName: Backends.unitName(root.moduleName, root.backend)
   readonly property string activeUnitName: root.unitName
   readonly property string procMarker: Backends.procMarker(root.moduleName, root.backend)
@@ -1954,6 +1947,18 @@ Panel {
   // shape -- which is most of why the Tuning page runs to two thousand lines
   // -- and a page that copies it slightly differently stops looking like the
   // rest of the panel, which is exactly what the Decision page did.
+  // Every label, value and caption in the panel was a Text repeating the same
+  // four lines: plain text (never AutoText, which interprets markup -- a model
+  // path containing <img src="http://..."> would make the shell fetch it), the
+  // bar's font, the bar's foreground, and the panel's body size. Said once
+  // here, overridden where a line genuinely differs.
+  component PanelText: Text {
+    textFormat: Text.PlainText
+    color: root.bar.foreground
+    font.family: root.bar.fontFamily
+    font.pixelSize: root.fontSize
+  }
+
   component ValueRow: Rectangle {
     id: vrow
     property string label: ""
@@ -1983,32 +1988,21 @@ Panel {
       spacing: Style.space(4)
       visible: !vrow.editing
 
-      Text {
-        textFormat: Text.PlainText
+      PanelText {
         text: vrow.label
-        color: root.bar.foreground
         opacity: 0.85
-        font.family: root.bar.fontFamily
-        font.pixelSize: root.fontSize
       }
-      Text {
-        textFormat: Text.PlainText
+      PanelText {
         Layout.fillWidth: true
         text: root.leaderDots
-        color: root.bar.foreground
         opacity: 0.15
         elide: Text.ElideRight
-        font.family: root.bar.fontFamily
-        font.pixelSize: root.fontSize
       }
-      Text {
-        textFormat: Text.PlainText
+      PanelText {
         text: vrow.value !== "" ? vrow.value : vrow.hint
-        color: root.bar.foreground
         opacity: vrow.value !== "" ? 0.45 : 0.25
         elide: Text.ElideRight
         Layout.maximumWidth: Style.space(150)
-        font.family: root.bar.fontFamily
         font.pixelSize: root.fontSizeSmall
         font.features: root.tabularFigures
       }
@@ -2021,13 +2015,9 @@ Panel {
       spacing: Style.space(4)
       visible: vrow.editing
 
-      Text {
-        textFormat: Text.PlainText
+      PanelText {
         text: vrow.label
-        color: root.bar.foreground
         opacity: 0.85
-        font.family: root.bar.fontFamily
-        font.pixelSize: root.fontSize
       }
       NumField {
         id: vrowField
@@ -2166,28 +2156,19 @@ Panel {
       anchors.rightMargin: Style.space(4)
       spacing: Style.space(4)
 
-      Text {
-        textFormat: Text.PlainText
+      PanelText {
         text: "Build"
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: root.fontSize
         opacity: 0.85
       }
 
-      Text {
-        textFormat: Text.PlainText
+      PanelText {
         Layout.fillWidth: true
         text: root.leaderDots
-        color: root.bar.foreground
         opacity: 0.15
         elide: Text.ElideRight
-        font.family: root.bar.fontFamily
-        font.pixelSize: root.fontSize
       }
 
-      Text {
-        textFormat: Text.PlainText
+      PanelText {
         Layout.fillWidth: true
         text: {
           if (root.llamaBuild !== "") {
@@ -2196,19 +2177,13 @@ Panel {
           }
           return root.autoBuild ? "Auto · " + Backends.buildLabel(root.autoBuild) : "Auto"
         }
-        color: root.bar.foreground
         opacity: row.readOnly ? 0.45 : 0.85
         elide: Text.ElideRight
-        font.family: root.bar.fontFamily
-        font.pixelSize: root.fontSize
       }
 
-      Text {
-        textFormat: Text.PlainText
+      PanelText {
         text: root.icons.chevron
-        color: root.bar.foreground
         opacity: 0.5
-        font.family: root.bar.fontFamily
         font.pixelSize: root.iconSize
       }
     }
@@ -2278,22 +2253,16 @@ Panel {
               anchors.rightMargin: Style.space(4)
               spacing: Style.space(4)
 
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: "•"
                 color: Commons.Color.accent
                 visible: parent.parent.chosen
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 text: modelData.label
                 color: parent.parent.chosen ? Commons.Color.accent : root.bar.foreground
                 elide: Text.ElideRight
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
             }
 
@@ -3652,19 +3621,6 @@ Panel {
     return path === d || String(path).indexOf(prefix) === 0
   }
 
-  // Nerd Font glyphs, monochrome and already in the bar font. Anything not
-  // listed here (quantisation, size) stays as text.
-  function capabilityGlyph(label) {
-    switch (label) {
-      case "vision": return "\uf06e"
-      case "tools": return "\uf0ad"
-      case "thinking":
-      case "reasoning": return "\uf0eb"
-      case "mtp": return "\uf0e7"
-      case "shared with ollama": return "\uf1c0"
-    }
-    return ""
-  }
 
   function modelRootFor(path) {
     var best = ""
@@ -6428,22 +6384,16 @@ Panel {
           color: root.running ? Commons.Color.accent : (root.starting ? Commons.Color.warning : Commons.Color.muted)
         }
 
-        Text {
-          textFormat: Text.PlainText
+        PanelText {
           text: root.backendSpec.label
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
-          font.pixelSize: root.fontSize
           font.bold: true
         }
 
         Item { Layout.fillWidth: true }
 
-        Text {
-          textFormat: Text.PlainText
+        PanelText {
           text: root.starting ? "Starting…" : (root.running ? (root.tokensPerSec > 0 ? root.tokensPerSec.toFixed(1) + " t/s" : "Active") : "Stopped")
           color: root.running ? Commons.Color.accent : root.bar.foreground
-          font.family: root.bar.fontFamily
           font.pixelSize: root.fontSizeSmall
           font.features: root.tabularFigures
           opacity: 0.8
@@ -6455,21 +6405,17 @@ Panel {
         Layout.fillWidth: true
         spacing: Style.space(4)
 
-        Text {
-          textFormat: Text.PlainText
+        PanelText {
           // The card reports what the server is doing, so while it is up the
           // label has to be about what is loaded. Stopped, naming the model
           // that Start would load is useful -- as long as it does not claim
           // to be loaded already.
           text: root.running ? "Model:" : "Will load:"
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
           font.pixelSize: root.fontSizeSmall
           opacity: 0.6
         }
 
-        Text {
-          textFormat: Text.PlainText
+        PanelText {
           Layout.fillWidth: true
           // It used to fall back to the model that would be launched whenever
           // none was loaded, which in router mode is always: the router loads
@@ -6486,8 +6432,6 @@ Panel {
             var al = String(root.modelAlias).trim() || ModelsIni.deriveDefaultAlias(m)
             return al || m
           }
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
           font.pixelSize: root.fontSizeSmall
           font.bold: true
           elide: Text.ElideRight
@@ -6499,21 +6443,15 @@ Panel {
         Layout.fillWidth: true
         spacing: Style.space(4)
 
-        Text {
-          textFormat: Text.PlainText
+        PanelText {
           text: "Endpoint:"
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
           font.pixelSize: root.fontSizeSmall
           opacity: 0.6
         }
 
-        Text {
-          textFormat: Text.PlainText
+        PanelText {
           Layout.fillWidth: true
           text: root.host + ":" + root.port
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
           font.pixelSize: root.fontSizeSmall
           opacity: 0.85
         }
@@ -6525,21 +6463,15 @@ Panel {
         visible: root.backend === "llamacpp" && root.resolvedBuild !== null
         spacing: Style.space(4)
 
-        Text {
-          textFormat: Text.PlainText
+        PanelText {
           text: "Fork:"
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
           font.pixelSize: root.fontSizeSmall
           opacity: 0.6
         }
 
-        Text {
-          textFormat: Text.PlainText
+        PanelText {
           Layout.fillWidth: true
           text: root.resolvedBuild ? Backends.buildLabel(root.resolvedBuild) : ""
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
           font.pixelSize: root.fontSizeSmall
           elide: Text.ElideRight
           opacity: 0.85
@@ -6558,20 +6490,14 @@ Panel {
 
           ColumnLayout {
             spacing: Style.space(1)
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               text: "Generation"
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
               font.pixelSize: root.fontSizeSmall
               opacity: 0.6
             }
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               text: root.tokensPerSec > 0 ? root.tokensPerSec.toFixed(1) + " tk/s" : "idle"
               color: root.tokensPerSec > 0 ? Commons.Color.accent : root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
               font.features: root.tabularFigures
               font.bold: root.tokensPerSec > 0
             }
@@ -6581,17 +6507,13 @@ Panel {
 
           ColumnLayout {
             spacing: Style.space(1)
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.alignment: Qt.AlignRight
               text: "Prompt eval"
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
               font.pixelSize: root.fontSizeSmall
               opacity: 0.6
             }
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.alignment: Qt.AlignRight
               // The rate and how far along it is are two different facts; this
               // used to drop one to show the other, so during ingestion the
@@ -6601,8 +6523,6 @@ Panel {
                 ? root.ppTokensPerSec.toFixed(1) + " tk/s"
                 : (root.ppActive ? "evaluating…" : "idle")
               color: (root.ppActive || root.ppTokensPerSec > 0) ? Commons.Color.accent : root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
               font.features: root.tabularFigures
               font.bold: root.ppActive || root.ppTokensPerSec > 0
             }
@@ -6616,14 +6536,12 @@ Panel {
           implicitHeight: Style.space(10)
           visible: root.ppActive
 
-          Text {
-            textFormat: Text.PlainText
+          PanelText {
             id: ppPctLabel
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             text: root.ppPercent.toFixed(0) + "%"
             color: Commons.Color.accent
-            font.family: root.bar.fontFamily
             font.pixelSize: root.fontSizeSmall
             font.features: root.tabularFigures
             font.bold: true
@@ -6655,13 +6573,10 @@ Panel {
       }
 
       // The sparkline plots generation only, which nothing on the card said.
-      Text {
-        textFormat: Text.PlainText
+      PanelText {
         Layout.fillWidth: true
         visible: root.running && root.rateHistory.length > 1
         text: "Recent generation"
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
         font.pixelSize: root.fontSizeSmall
         opacity: 0.6
       }
@@ -6721,15 +6636,12 @@ Panel {
 
       // Discoverability: the bar's click actions are otherwise only in the
       // README. A faint hint keeps the hover card the single source of truth.
-      Text {
-        textFormat: Text.PlainText
+      PanelText {
         Layout.fillWidth: true
         Layout.topMargin: Style.space(2)
         text: root.running
           ? "Click to open · right-click to " + (root.showMetric ? "hide the rate" : "show the rate")
           : "Click to open"
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
         font.pixelSize: root.fontSizeSmall
         opacity: 0.45
         // Elided, this read "right-click …", which is the half that says what
@@ -6789,30 +6701,23 @@ Panel {
           ColumnLayout {
             Layout.fillWidth: true
             spacing: 0
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               text: Model.statusLabel(root.running, root.starting, root.startingElapsed,
                                       root.switchPhase,
                                       root.slotsProcessing) +
                     " · " + root.backendSpec.label +
                     (root.adopted && !root.ownsUnit ? " · external" : "")
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
               font.pixelSize: root.fontSizeSubtitle
               elide: Text.ElideRight
               Layout.fillWidth: true
             }
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               text: {
                 var m = Model.metricText(true, root.ppActive, root.ppPercent,
                                          root.tokensPerSec, root.ppTokensPerSec)
                 return m !== "" ? m : (root.running ? root.host + ":" + root.port : "")
               }
-              color: root.bar.foreground
               opacity: 0.65
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
               font.features: root.tabularFigures
               elide: Text.ElideRight
               Layout.fillWidth: true
@@ -6881,15 +6786,12 @@ Panel {
               Layout.fillWidth: true
               implicitHeight: root.rowHeight
 
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 id: tabText
                 anchors.centerIn: parent
                 text: modelData
                 color: parent.current ? Commons.Color.accent : root.bar.foreground
                 opacity: parent.current ? 1.0 : (tabMouse.containsMouse ? 0.85 : 0.55)
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
                 font.bold: parent.current
               }
 
@@ -6938,31 +6840,21 @@ Panel {
             Layout.fillWidth: true
             spacing: Style.space(8)
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               text: root.showingSetup ? "Setup" : "Settings"
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
               font.pixelSize: root.fontSizeSubtitle
             }
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               text: root.leaderDots
-              color: root.bar.foreground
               opacity: 0.15
               elide: Text.ElideRight
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
             }
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               text: root.backendSpec.label
-              color: root.bar.foreground
               opacity: 0.45
-              font.family: root.bar.fontFamily
               font.pixelSize: root.fontSizeSmall
             }
           }
@@ -6982,40 +6874,24 @@ Panel {
               anchors.rightMargin: Style.space(4)
               spacing: Style.space(4)
 
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: "Backend"
-                color: root.bar.foreground
                 opacity: 0.85
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 text: root.leaderDots
-                color: root.bar.foreground
                 opacity: 0.15
                 elide: Text.ElideRight
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: root.backendSpec.label
-                color: root.bar.foreground
                 opacity: 0.85
                 elide: Text.ElideRight
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: root.settingsSection === "backend" ? "-" : "+"
-                color: root.bar.foreground
                 opacity: 0.5
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
             }
 
@@ -7050,31 +6926,19 @@ Panel {
                 anchors.rightMargin: Style.space(4)
                 spacing: Style.space(4)
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: "Server"
-                  color: root.bar.foreground
                   opacity: 0.8
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   Layout.fillWidth: true
                   text: root.leaderDots
-                  color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: root.backendSpec.label
-                  color: root.bar.foreground
                   opacity: (root.running || root.starting) ? 0.45 : 0.85
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
               }
 
@@ -7132,22 +6996,16 @@ Panel {
                         anchors.rightMargin: Style.space(4)
                         spacing: Style.space(4)
 
-                        Text {
-                          textFormat: Text.PlainText
+                        PanelText {
                           text: "•"
                           visible: parent.parent.chosen
                           color: Commons.Color.accent
-                          font.family: root.bar.fontFamily
-                          font.pixelSize: root.fontSize
                         }
-                        Text {
-                          textFormat: Text.PlainText
+                        PanelText {
                           Layout.fillWidth: true
                           text: modelData.label
                           color: parent.parent.chosen ? Commons.Color.accent : root.bar.foreground
                           elide: Text.ElideRight
-                          font.family: root.bar.fontFamily
-                          font.pixelSize: root.fontSize
                         }
                       }
 
@@ -7185,35 +7043,23 @@ Panel {
                 spacing: Style.space(4)
                 visible: !settingsBinaryRow.editing
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: "Binary"
-                  color: root.bar.foreground
                   opacity: 0.8
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   Layout.fillWidth: true
                   text: root.leaderDots
-                  color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   Layout.maximumWidth: settingsBinaryRow.width * 0.55
                   text: root.activeBinary !== ""
                         ? root.activeBinary.replace(Quickshell.env("HOME"), "~")
                         : "auto"
-                  color: root.bar.foreground
                   opacity: root.activeBinary !== "" ? 0.85 : 0.45
                   elide: Text.ElideMiddle
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
               }
 
@@ -7282,43 +7128,28 @@ Panel {
               anchors.rightMargin: Style.space(4)
               spacing: Style.space(4)
 
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: "Model folders"
-                color: root.bar.foreground
                 opacity: 0.85
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 text: root.leaderDots
-                color: root.bar.foreground
                 opacity: 0.15
                 elide: Text.ElideRight
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: root.configuredModelsDir !== ""
                       ? root.configuredModelsDir.replace(Quickshell.env("HOME"), "~")
                       : "auto"
-                color: root.bar.foreground
                 opacity: 0.65
                 elide: Text.ElideMiddle
                 Layout.maximumWidth: parent.width * 0.45
-                font.family: root.bar.fontFamily
                 font.pixelSize: root.fontSizeSmall
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: root.settingsSection === "models" ? "-" : "+"
-                color: root.bar.foreground
                 opacity: 0.5
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
             }
 
@@ -7351,29 +7182,20 @@ Panel {
                 anchors.rightMargin: Style.space(4)
                 spacing: Style.space(4)
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: root.configuredModelsDir === "" ? "•" : "·"
                   color: Commons.Color.accent
                   opacity: root.configuredModelsDir === "" ? 1.0 : 0.3
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   Layout.fillWidth: true
                   text: "All detected folders"
                   color: root.configuredModelsDir === "" ? Commons.Color.accent : root.bar.foreground
                   opacity: 0.85
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: root.detectedModelDirs.length + " folder" + (root.detectedModelDirs.length === 1 ? "" : "s")
-                  color: root.bar.foreground
                   opacity: 0.42
-                  font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSizeSmall
                 }
               }
@@ -7409,41 +7231,29 @@ Panel {
                   anchors.rightMargin: Style.space(4)
                   spacing: Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: chosen ? "•" : "·"
                     color: Commons.Color.accent
                     opacity: chosen ? 1.0 : 0.3
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: modelData.replace(Quickshell.env("HOME"), "~")
                     color: chosen ? Commons.Color.accent : root.bar.foreground
                     opacity: 0.85
                     elide: Text.ElideMiddle
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: count === undefined
                           ? "…"
                           : count + " model" + (count === 1 ? "" : "s")
-                    color: root.bar.foreground
                     opacity: 0.42
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSizeSmall
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     visible: root.extraModelDirs.indexOf(modelData) !== -1
-                    color: root.bar.foreground
                     opacity: 0.45
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSizeSmall
                     MouseArea {
                       anchors.fill: parent
@@ -7479,30 +7289,19 @@ Panel {
                 spacing: Style.space(4)
                 visible: !settingsAddFolderRow.editing
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: "Add folder"
-                  color: root.bar.foreground
                   opacity: 0.8
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   Layout.fillWidth: true
                   text: root.leaderDots
-                  color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: "click to add"
-                  color: root.bar.foreground
                   opacity: 0.42
-                  font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSizeSmall
                 }
               }
@@ -7559,39 +7358,24 @@ Panel {
               anchors.rightMargin: Style.space(4)
               spacing: Style.space(4)
 
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: "Builds"
-                color: root.bar.foreground
                 opacity: 0.85
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 text: root.leaderDots
-                color: root.bar.foreground
                 opacity: 0.15
                 elide: Text.ElideRight
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: root.llamaBuilds.length + " found"
-                color: root.bar.foreground
                 opacity: 0.45
-                font.family: root.bar.fontFamily
                 font.pixelSize: root.fontSizeSmall
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: root.settingsSection === "builds" ? "-" : "+"
-                color: root.bar.foreground
                 opacity: 0.5
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
             }
 
@@ -7645,18 +7429,13 @@ Panel {
                   anchors.rightMargin: Style.space(4)
                   spacing: Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: modelData.fork || "llama-server"
-                    color: root.bar.foreground
                     opacity: 0.8
                     elide: Text.ElideRight
                     Layout.fillWidth: true
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     // What is worth knowing about this build: its commit and
                     // backend when it can be used, and otherwise why it
                     // cannot. A held build also carries `missing`, which is
@@ -7677,7 +7456,6 @@ Panel {
                       || modelData.missing === true ? 0.8 : 0.42
                     elide: Text.ElideRight
                     Layout.maximumWidth: Style.space(150)
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSizeSmall
                   }
                   // A glyph was too quiet for the one action that decides
@@ -7694,24 +7472,19 @@ Panel {
 
                   // Once trusted, say so where the reason used to be, so the
                   // row reads as settled rather than as one that lost its link.
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     visible: root.approvedBuilds.indexOf(modelData.path) !== -1
                     text: root.icons.check + " trusted"
                     color: Commons.Color.accent
                     opacity: 0.75
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSizeSmall
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     visible: root.extraBuildPaths.indexOf(modelData.path) !== -1
                       || (root.altBinary !== "" && root.expandPath(root.altBinary) === modelData.path)
                       || root.approvedBuilds.indexOf(modelData.path) !== -1
-                    color: root.bar.foreground
                     opacity: 0.45
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSizeSmall
                     MouseArea {
                       anchors.fill: parent
@@ -7723,19 +7496,15 @@ Panel {
               }
             }
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               visible: root.llamaBuilds.length === 0
               text: "No llama.cpp build detected yet"
-              color: root.bar.foreground
               opacity: 0.45
-              font.family: root.bar.fontFamily
               font.pixelSize: root.fontSizeSmall
             }
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               Layout.topMargin: Style.space(2)
               visible: root.trustNote !== "" || root.hoveredBuildPath !== ""
@@ -7746,9 +7515,7 @@ Panel {
                 ? Model.shortenPath(root.hoveredBuildPath, 64)
                 : root.trustNote
               wrapMode: Text.WordWrap
-              color: root.bar.foreground
               opacity: 0.45
-              font.family: root.bar.fontFamily
               font.pixelSize: root.fontSizeSmall
             }
 
@@ -7769,30 +7536,19 @@ Panel {
                 spacing: Style.space(4)
                 visible: !settingsAddForkRow.editing
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: "Add fork"
-                  color: root.bar.foreground
                   opacity: 0.8
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   Layout.fillWidth: true
                   text: root.leaderDots
-                  color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: "click to add"
-                  color: root.bar.foreground
                   opacity: 0.42
-                  font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSizeSmall
                 }
               }
@@ -7855,30 +7611,19 @@ Panel {
               Layout.rightMargin: Style.space(4)
               spacing: Style.space(4)
 
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: "Prompt cache"
-                color: root.bar.foreground
                 opacity: 0.85
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 text: root.leaderDots
-                color: root.bar.foreground
                 opacity: 0.15
                 elide: Text.ElideRight
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: root.slotCacheProbed ? Model.formatBytes(root.slotCacheBytes) : "…"
-                color: root.bar.foreground
                 opacity: 0.65
-                font.family: root.bar.fontFamily
                 font.pixelSize: root.fontSizeSmall
                 font.features: root.tabularFigures
               }
@@ -7966,24 +7711,19 @@ Panel {
                 Layout.fillWidth: true
                 spacing: Style.space(6)
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: "Instances"
-                  color: root.bar.foreground
-                  font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSizeSmall
                   opacity: 0.6
                   font.bold: true
                 }
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   visible: root.multiInstance
                   text: root.instancesRunning + "/" + root.instanceCount + " up" +
                         (root.aggregateRate > 0 ? " · " + root.aggregateRate.toFixed(1) + " t/s" : "")
                   color: root.anyInstanceRunning ? Commons.Color.accent : root.bar.foreground
                   opacity: root.anyInstanceRunning ? 0.9 : 0.45
-                  font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSizeSmall
                   font.features: root.tabularFigures
                 }
@@ -7992,13 +7732,10 @@ Panel {
 
                 // The count lives in the widget's manifest settings, so it is
                 // written through omarchy-bar and applied to the live widget.
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   visible: root.canAddInstances
                   text: root.icons.minus
-                  color: root.bar.foreground
                   opacity: root.instanceCount > 1 ? 0.8 : 0.2
-                  font.family: root.bar.fontFamily
                   font.pixelSize: root.iconSize
                   MouseArea {
                     anchors.fill: parent
@@ -8008,22 +7745,16 @@ Panel {
                     onClicked: root.setWidgetSetting("instanceCount", root.instanceCount - 1)
                   }
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   visible: root.canAddInstances
                   text: String(root.instanceCount)
-                  color: root.bar.foreground
                   opacity: 0.7
-                  font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSizeSmall
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   visible: root.canAddInstances
                   text: root.icons.plus
-                  color: root.bar.foreground
                   opacity: root.instanceCount < Instances.MAX_INSTANCES ? 0.8 : 0.2
-                  font.family: root.bar.fontFamily
                   font.pixelSize: root.iconSize
                   MouseArea {
                     anchors.fill: parent
@@ -8092,44 +7823,32 @@ Panel {
                                   : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.25)))
                       }
 
-                      Text {
-                        textFormat: Text.PlainText
+                      PanelText {
                         text: root.multiInstance ? "Instance " + instRow.index : "Server"
-                        color: root.bar.foreground
-                        font.family: root.bar.fontFamily
-                        font.pixelSize: root.fontSize
                         font.bold: true
                       }
 
-                      Text {
-                        textFormat: Text.PlainText
+                      PanelText {
                         text: instRow.snap.port > 0 ? ":" + instRow.snap.port : "no port"
-                        color: root.bar.foreground
                         opacity: 0.5
-                        font.family: root.bar.fontFamily
                         font.pixelSize: root.fontSizeSmall
                       }
 
-                      Text {
-                        textFormat: Text.PlainText
+                      PanelText {
                         visible: text !== "" && text !== "this widget"
                         text: Instances.ownerLabel(instRow.snap)
-                        color: root.bar.foreground
                         opacity: 0.45
-                        font.family: root.bar.fontFamily
                         font.pixelSize: root.fontSizeSmall
                       }
 
                       Item { Layout.fillWidth: true }
 
-                      Text {
-                        textFormat: Text.PlainText
+                      PanelText {
                         text: Instances.stateLabel(instRow.snap)
                         color: instRow.snap.failed
                           ? root.bar.urgent
                           : (instRow.up ? Commons.Color.accent : root.bar.foreground)
                         opacity: instRow.up ? 0.9 : (instRow.snap.failed ? 0.9 : 0.45)
-                        font.family: root.bar.fontFamily
                         font.pixelSize: root.fontSizeSmall
                         font.features: root.tabularFigures
                       }
@@ -8138,8 +7857,7 @@ Panel {
                     // What this instance serves. The primary follows the Model
                     // page; an extra index is assigned here, because it is the
                     // only place that knows the index exists.
-                    Text {
-                      textFormat: Text.PlainText
+                    PanelText {
                       Layout.fillWidth: true
                       visible: instRow.isPrimary
                       text: root.routerMode && root.backend === "llamacpp"
@@ -8149,10 +7867,8 @@ Panel {
                         : (instRow.modelPath !== ""
                             ? (instRow.up ? "Loaded: " : "Ready: ") + Model.baseName(instRow.modelPath)
                             : "No model selected")
-                      color: root.bar.foreground
                       opacity: instRow.up ? 0.85 : 0.5
                       elide: Text.ElideRight
-                      font.family: root.bar.fontFamily
                       font.pixelSize: root.fontSizeSmall
                     }
 
@@ -8249,8 +7965,7 @@ Panel {
                       }
                     }
 
-                    Text {
-                      textFormat: Text.PlainText
+                    PanelText {
                       Layout.fillWidth: true
                       visible: !instRow.isPrimary && String(instRow.snap.lastError || "") !== ""
                       text: String(instRow.snap.lastError || "")
@@ -8258,21 +7973,18 @@ Panel {
                       wrapMode: Text.WordWrap
                       maximumLineCount: 2
                       elide: Text.ElideRight
-                      font.family: root.bar.fontFamily
                       font.pixelSize: root.fontSizeSmall
                     }
                   }
                 }
               }
 
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 visible: root.multiInstance && !root.hasSystemdRun
                 text: root.icons.warning + " Extra instances need a systemd user session; only the first server can be managed here."
                 color: root.bar.urgent
                 wrapMode: Text.WordWrap
-                font.family: root.bar.fontFamily
                 font.pixelSize: root.fontSizeSmall
               }
             }
@@ -8301,32 +8013,20 @@ Panel {
                   anchors.rightMargin: Style.space(4)
                   spacing: Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Backend"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.backendSpec.label
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
                 }
@@ -8396,32 +8096,20 @@ Panel {
                   spacing: Style.space(4)
                   visible: !endpointRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "host:port"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.host + ":" + root.port
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: (root.anyInstanceRunning || root.starting) ? 0.45 : 0.85
                   }
                 }
@@ -8483,16 +8171,13 @@ Panel {
             // llama-server runs without an API key here, so an endpoint off
             // loopback serves the model -- and its slot save/restore API -- to
             // anyone who can reach the port.
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               visible: !/^(127\.|localhost$|\[::1\]$|::1$)/.test(String(root.host).trim())
               text: root.icons.warning + " " + root.host + " is reachable from other machines, and the server has no API key. " +
                     "Use 127.0.0.1 unless you mean to share it."
               color: root.bar.urgent
               wrapMode: Text.WordWrap
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
             }
 
             // What is actually locked while a server runs. Switching backend
@@ -8500,17 +8185,13 @@ Panel {
             // prompt cache, and starts the new one once its model resolves.
             // The page used to say "stop the server to change backend, build
             // or endpoint", which had been wrong since that path landed.
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               visible: root.running || root.starting
               text: "Build and endpoint change on the next start. Switching backend " +
                     "stops this server first, then starts the new one."
-              color: root.bar.foreground
               opacity: 0.5
               wrapMode: Text.WordWrap
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
             }
 
 
@@ -8531,30 +8212,18 @@ Panel {
                 anchors.rightMargin: Style.space(4)
                 spacing: Style.space(4)
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: "Keep prompt cache"
-                  color: root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                   opacity: 0.85
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   Layout.fillWidth: true
                   text: root.leaderDots
-                  color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: root.kvPersistence ? "on" : "off"
-                  color: root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                   opacity: root.kvPersistence ? 0.85 : 0.45
                 }
               }
@@ -8586,30 +8255,18 @@ Panel {
                 anchors.rightMargin: Style.space(4)
                 spacing: Style.space(4)
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: "Start on login"
-                  color: root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                   opacity: 0.85
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   Layout.fillWidth: true
                   text: root.leaderDots
-                  color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: root.startOnLogin ? "on" : "off"
-                  color: root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                   opacity: root.startOnLogin ? 0.85 : 0.45
                 }
               }
@@ -8629,31 +8286,23 @@ Panel {
               }
             }
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               visible: root.canTakeOver
               text: "Watching the " + root.backendSpec.systemUnit + " system service. " +
                     "Take over to stop it and run an instance this widget controls " +
                     "(asks for authentication)."
-              color: root.bar.foreground
               opacity: 0.65
               wrapMode: Text.WordWrap
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
             }
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               visible: root.ownsUnit && root.backend === "ollama" && root.systemModelsDir !== ""
               text: "Serving models from " + root.systemModelsDir +
                     " — read-only, so `ollama pull` needs the system service."
-              color: root.bar.foreground
               opacity: 0.5
               wrapMode: Text.WordWrap
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
             }
             // Decision model (System One) --------------------------------
             //
@@ -8673,11 +8322,8 @@ Panel {
                 Layout.fillWidth: true
                 spacing: Style.space(6)
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: "Decision model"
-                  color: root.bar.foreground
-                  font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSizeSmall
                   opacity: 0.6
                   font.bold: true
@@ -8685,12 +8331,9 @@ Panel {
 
                 Item { Layout.fillWidth: true }
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: root.decisionEnabled ? "on" : "off"
-                  color: root.bar.foreground
                   opacity: root.decisionEnabled ? 0.85 : 0.45
-                  font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSizeSmall
                   MouseArea {
                     anchors.fill: parent
@@ -8711,20 +8354,15 @@ Panel {
 
             Item { Layout.fillHeight: true }
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               text: root.hardwareSummary !== "" ? root.hardwareSummary : "Detecting hardware…"
-              color: root.bar.foreground
               opacity: 0.6
               wrapMode: Text.WordWrap
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
               font.features: root.tabularFigures
             }
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               visible: root.lastError !== ""
               text: root.lastError
@@ -8732,8 +8370,6 @@ Panel {
               wrapMode: Text.WordWrap
               maximumLineCount: 3
               elide: Text.ElideRight
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
             }
           }
 
@@ -8759,37 +8395,25 @@ Panel {
                 anchors.rightMargin: Style.space(4)
                 spacing: Style.space(4)
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   text: "Model"
-                  color: root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                   opacity: 0.85
                 }
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   Layout.fillWidth: true
                   text: root.leaderDots
-                  color: root.bar.foreground
                   opacity: 0.15
                   elide: Text.ElideRight
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   Layout.maximumWidth: modelRow.width * 0.72
                   text: root.selectedModelLabel !== ""
                         ? root.selectedModelLabel
                         : (root.activeScanning ? "Scanning…" : "Select a model")
-                  color: root.bar.foreground
                   opacity: root.selectedModelLabel !== "" ? 0.85 : 0.45
                   elide: Text.ElideRight
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
 
               }
@@ -8836,24 +8460,16 @@ Panel {
                   anchors.rightMargin: Style.space(4)
                   spacing: Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Filter"
-                    color: root.bar.foreground
                     opacity: 0.7
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
 
                   TextField {
@@ -8867,14 +8483,11 @@ Panel {
                     onTextEdited: root.modelFilter = text
                   }
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     visible: root.modelFilter !== ""
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
-                    color: root.bar.foreground
                     opacity: filterClearHover.hovered ? 0.9 : 0.45
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     HoverHandler { id: filterClearHover; cursorShape: Qt.PointingHandCursor }
                     MouseArea {
@@ -8937,38 +8550,29 @@ Panel {
                           anchors.rightMargin: Style.space(4)
                           spacing: Style.space(4)
 
-                          Text {
-                            textFormat: Text.PlainText
+                          PanelText {
                             text: isDir ? (open ? "-" : "+") : "·"
                             color: current ? Commons.Color.accent : root.bar.foreground
                             opacity: current ? 1.0 : 0.45
-                            font.family: root.bar.fontFamily
-                            font.pixelSize: root.fontSize
                           }
 
-                          Text {
-                            textFormat: Text.PlainText
+                          PanelText {
                             Layout.fillWidth: true
                             text: isDir ? node.name : node.label
                             color: current ? Commons.Color.accent : root.bar.foreground
                             opacity: isDir ? 0.9 : (current ? 1.0 : 0.85)
                             elide: Text.ElideRight
-                            font.family: root.bar.fontFamily
-                            font.pixelSize: root.fontSize
                           }
 
                           RowLayout {
                             Layout.maximumWidth: modelColumn.width * 0.45
                             spacing: Style.space(4)
 
-                            Text {
-                              textFormat: Text.PlainText
+                            PanelText {
                               visible: isDir
                               text: isDir ? String(node.count) : ""
                               color: current ? Commons.Color.accent : root.bar.foreground
                               opacity: current ? 0.75 : 0.42
-                              font.family: root.bar.fontFamily
-                              font.pixelSize: root.fontSize
                             }
 
                             TextAction {
@@ -9007,8 +8611,7 @@ Panel {
                   }
                 }
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   anchors.centerIn: parent
                   visible: root.modelRows.length === 0
                   text: root.activeScanning
@@ -9018,13 +8621,10 @@ Panel {
                             : (root.backend === "ollama"
                                 ? "No models pulled. Run: ollama pull <model>"
                                 : "No .gguf files found. Set a models directory in plugin settings."))
-                  color: root.bar.foreground
                   opacity: 0.5
                   width: parent.width - Style.space(24)
                   horizontalAlignment: Text.AlignHCenter
                   wrapMode: Text.WordWrap
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
               }
             }
@@ -9034,22 +8634,17 @@ Panel {
             // named here, so it is never a mystery which binary will launch.
             BuildPickerRow { }
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               visible: root.running && !root.routerMode && root.runningModel !== "" &&
                        root.launchModel !== root.runningModel &&
                        Backends.supports(root.backend, "slotKv")
               text: "Running " + Model.baseName(root.runningModel) + " — press Restart to load this one."
-              color: root.bar.foreground
               opacity: 0.6
               wrapMode: Text.WordWrap
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
             }
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               text: {
                 // The Rescan action already says "Scanning…" while it runs; this
@@ -9065,10 +8660,8 @@ Panel {
                   ? shown + (capped ? "+" : "") + " match" + (shown === 1 ? "" : "es") + " of " + n
                   : n + " model" + (n === 1 ? "" : "s") + " available"
               }
-              color: root.bar.foreground
               opacity: 0.5
               wrapMode: Text.WordWrap
-              font.family: root.bar.fontFamily
               font.pixelSize: root.fontSizeSmall
             }
 
@@ -9087,8 +8680,7 @@ Panel {
               Layout.fillWidth: true
               spacing: Style.space(6)
 
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 text: {
                   if (root.launchModel === "")
@@ -9096,11 +8688,8 @@ Panel {
                   var name = Model.baseName(root.launchModel).replace(/\.gguf$/i, "")
                   return root.hasProfile ? "Profile · " + name : "Tuning · " + name
                 }
-                color: root.bar.foreground
                 opacity: root.launchModel === "" ? 0.45 : 0.7
                 elide: Text.ElideMiddle
-                font.family: root.bar.fontFamily
-                font.pixelSize: root.fontSize
               }
 
               Button {
@@ -9137,15 +8726,12 @@ Panel {
                     ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
                     : "transparent"
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     id: pageNumber
                     anchors.centerIn: parent
                     text: modelData
                     color: index === root.effectiveTuningPage ? Commons.Color.accent : root.bar.foreground
                     opacity: index === root.effectiveTuningPage ? 1.0 : 0.55
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     font.bold: index === root.effectiveTuningPage
                   }
 
@@ -9183,8 +8769,7 @@ Panel {
                 anchors.leftMargin: Style.space(4)
                 anchors.rightMargin: Style.space(4)
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   // "Reading parameters…" only while there is nothing to
                   // offer: a removed row can be restored without any
                   // catalogue at all, and a refresh in the background should
@@ -9194,8 +8779,6 @@ Panel {
                     : "+  Add parameter" + (root.addableCount > 0 ? "  (" + root.addableCount + ")" : "")
                   color: root.addableCount > 0 ? Commons.Color.accent : root.bar.foreground
                   opacity: root.addableCount > 0 ? 1.0 : 0.45
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: root.fontSize
                 }
 
                 Item { Layout.fillWidth: true }
@@ -9282,39 +8865,25 @@ Panel {
                   anchors.rightMargin: Style.space(4)
                   spacing: Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "KV cache k/v"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.cacheTypeK + " / " + root.cacheTypeV
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: cacheHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: cacheHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -9354,13 +8923,9 @@ Panel {
                     id: cachePopupCol
                     width: parent.width
                     spacing: 6
-                    Text {
-                      textFormat: Text.PlainText
+                    PanelText {
                       text: "Cache type K"
-                      color: root.bar.foreground
                       opacity: 0.7
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSize
                     }
                     Dropdown {
                       Layout.fillWidth: true
@@ -9369,13 +8934,9 @@ Panel {
                       value: root.cacheTypeK
                       onChanged: function(v) { root.cacheTypeK = v }
                     }
-                    Text {
-                      textFormat: Text.PlainText
+                    PanelText {
                       text: "Cache type V"
-                      color: root.bar.foreground
                       opacity: 0.7
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSize
                     }
                     Dropdown {
                       Layout.fillWidth: true
@@ -9387,8 +8948,7 @@ Panel {
                   }
                 }
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("cacheType") && root.rowHasIgnoredFlag("cacheType")
@@ -9414,39 +8974,25 @@ Panel {
                   anchors.rightMargin: Style.space(4)
                   spacing: Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Flash attn"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.flashAttn
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: flashHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: flashHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -9478,8 +9024,7 @@ Panel {
                   text: "--flash-attn — fused attention kernel. Faster and lighter on VRAM; auto leaves the backend to decide, off falls back to the unfused path. Click to cycle."
                 }
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("flashAttn") && root.rowHasIgnoredFlag("flashAttn")
@@ -9507,39 +9052,25 @@ Panel {
                   spacing: Style.space(4)
                   visible: !nglRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "GPU layers"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.gpuLayers
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: nglHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: nglHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -9556,12 +9087,8 @@ Panel {
                   spacing: Style.space(4)
                   visible: nglRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "GPU layers"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
                   NumField {
@@ -9613,39 +9140,26 @@ Panel {
                   anchors.rightMargin: Style.space(4)
                   spacing: Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "MoE on CPU"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.cpuMoe ? "all" : (root.nCpuMoe !== "" ? root.nCpuMoe : "off")
                     color: root.cpuMoe ? Commons.Color.accent : root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: moeHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: moeHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -9687,13 +9201,9 @@ Panel {
                     id: moePopupCol
                     width: parent.width
                     spacing: 6
-                    Text {
-                      textFormat: Text.PlainText
+                    PanelText {
                       text: "Layers whose experts stay on CPU"
-                      color: root.bar.foreground
                       opacity: 0.7
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSize
                     }
                     NumField {
                       Layout.fillWidth: true
@@ -9704,14 +9214,11 @@ Panel {
                       validator: IntValidator { bottom: 0; top: 999 }
                       onEditingFinished: root.nCpuMoe = text
                     }
-                    Text {
-                      textFormat: Text.PlainText
+                    PanelText {
                       Layout.fillWidth: true
                       text: (root.cpuMoe ? root.icons.check + " " : "") + "All layers (--cpu-moe)"
                       color: root.cpuMoe ? Commons.Color.accent : root.bar.foreground
                       opacity: root.cpuMoe ? 1.0 : 0.7
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSize
                       MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
@@ -9724,8 +9231,7 @@ Panel {
                   }
                 }
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("cpuMoe") && root.rowHasIgnoredFlag("cpuMoe")
@@ -9753,39 +9259,25 @@ Panel {
                   spacing: Style.space(4)
                   visible: !ctxRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Context"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.contextSize !== "" ? root.contextSize : "0"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: ctxHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: ctxHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -9802,12 +9294,8 @@ Panel {
                   spacing: Style.space(4)
                   visible: ctxRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Context"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
                   NumField {
@@ -9841,8 +9329,7 @@ Panel {
                   text: "--ctx-size — the context window in tokens, shared across every slot. 0 uses the model's own trained context. Click to edit."
                 }
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("ctxSize") && root.rowHasIgnoredFlag("ctxSize")
@@ -9870,39 +9357,25 @@ Panel {
                   spacing: Style.space(4)
                   visible: !threadsRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Threads"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.threads !== "" ? root.threads : "auto"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: threadsHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: threadsHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -9919,12 +9392,8 @@ Panel {
                   spacing: Style.space(4)
                   visible: threadsRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Threads"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
                   NumField {
@@ -9958,8 +9427,7 @@ Panel {
                   text: "--threads — CPU threads for generation. Only matters for work not offloaded to the GPU, so it does little on a fully-offloaded model. Click to edit."
                 }
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("threads") && root.rowHasIgnoredFlag("threads")
@@ -9985,40 +9453,26 @@ Panel {
                   anchors.rightMargin: Style.space(4)
                   spacing: Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Batch / ubatch"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: (root.batchSize !== "" ? root.batchSize : "auto") + " / " +
                           (root.ubatchSize !== "" ? root.ubatchSize : "auto")
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: batchHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: batchHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -10058,13 +9512,9 @@ Panel {
                     id: batchPopupCol
                     width: parent.width
                     spacing: 6
-                    Text {
-                      textFormat: Text.PlainText
+                    PanelText {
                       text: "Batch"
-                      color: root.bar.foreground
                       opacity: 0.7
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSize
                     }
                     NumField {
                       Layout.fillWidth: true
@@ -10073,13 +9523,9 @@ Panel {
                       validator: IntValidator { bottom: 0; top: 1000000 }
                       onEditingFinished: root.batchSize = text
                     }
-                    Text {
-                      textFormat: Text.PlainText
+                    PanelText {
                       text: "Ubatch"
-                      color: root.bar.foreground
                       opacity: 0.7
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSize
                     }
                     NumField {
                       Layout.fillWidth: true
@@ -10091,8 +9537,7 @@ Panel {
                   }
                 }
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("batchSize") && root.rowHasIgnoredFlag("batchSize")
@@ -10120,39 +9565,25 @@ Panel {
                   spacing: Style.space(4)
                   visible: !parallelRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Slots (-np)"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.parallel !== "" ? root.parallel : "auto"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: parallelHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: parallelHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -10169,12 +9600,8 @@ Panel {
                   spacing: Style.space(4)
                   visible: parallelRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Slots (-np)"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
                   NumField {
@@ -10209,8 +9636,7 @@ Panel {
                   text: "Number of server slots. Blank leaves the backend on auto.\nEach slot holds its own KV cache, so the context above is divided between them."
                 }
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("parallel") && root.rowHasIgnoredFlag("parallel")
@@ -10236,39 +9662,25 @@ Panel {
                   anchors.rightMargin: Style.space(4)
                   spacing: Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Reasoning trace"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.reasoningPreserve
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: reasoningHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: reasoningHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -10300,8 +9712,7 @@ Panel {
                   text: "--reasoning-preserve: keep the thinking trace across the whole history rather than only the last reply.\n\"default\" passes neither the flag nor its negation, leaving the chat template's own choice — which is the only safe setting for a template that does not support it. Click to cycle."
                 }
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("reasoning") && root.rowHasIgnoredFlag("reasoning")
@@ -10327,39 +9738,25 @@ Panel {
                   anchors.rightMargin: Style.space(4)
                   spacing: Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Speculative"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.specType
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: specHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: specHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -10418,8 +9815,7 @@ Panel {
                   }
                 }
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("specType") && root.rowHasIgnoredFlag("specType")
@@ -10445,39 +9841,25 @@ Panel {
                   anchors.rightMargin: Style.space(4)
                   spacing: Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Vision projector"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.mmprojMode + (root.mmprojActive ? " · offload " + root.mmprojOffload : "")
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: visionHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: visionHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -10522,13 +9904,9 @@ Panel {
                     id: visionPopupCol
                     width: parent.width
                     spacing: 6
-                    Text {
-                      textFormat: Text.PlainText
+                    PanelText {
                       text: "Projector mode"
-                      color: root.bar.foreground
                       opacity: 0.7
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSize
                     }
                     Dropdown {
                       Layout.fillWidth: true
@@ -10537,13 +9915,9 @@ Panel {
                       value: root.mmprojMode
                       onChanged: function(v) { root.mmprojMode = v }
                     }
-                    Text {
-                      textFormat: Text.PlainText
+                    PanelText {
                       text: "Offload"
-                      color: root.bar.foreground
                       opacity: root.mmprojActive ? 0.7 : 0.3
-                      font.family: root.bar.fontFamily
-                      font.pixelSize: root.fontSize
                     }
                     Dropdown {
                       Layout.fillWidth: true
@@ -10569,8 +9943,7 @@ Panel {
                   }
                 }
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("vision") && root.rowHasIgnoredFlag("vision")
@@ -10598,39 +9971,25 @@ Panel {
                   spacing: Style.space(4)
                   visible: !extraRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Paste args"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.extraArgs !== "" ? "..." : "—"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.5
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: extraHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: extraHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -10647,12 +10006,8 @@ Panel {
                   spacing: Style.space(4)
                   visible: extraRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Paste args"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
                   TextField {
@@ -10686,8 +10041,7 @@ Panel {
                   text: "Paste a command line here and it splits into rows — one per flag, filling the controls above where a flag has one.\nThe field empties as it is consumed; it stores nothing of its own."
                 }
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("extraArgs") && root.rowHasIgnoredFlag("extraArgs")
@@ -10727,26 +10081,17 @@ Panel {
                   anchors.rightMargin: Style.space(4)
                   spacing: Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Environment"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.maximumWidth: envRow.width * 0.5
                     text: {
                       var n = root.parsedEnv.env.length
@@ -10754,27 +10099,19 @@ Panel {
                       if (n === 1) return root.parsedEnv.env[0].name + "=" + root.parsedEnv.env[0].value
                       return n + " variables"
                     }
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.5
                     elide: Text.ElideRight
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.chevron
-                    color: root.bar.foreground
                     opacity: 0.5
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: envHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: envHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -10886,15 +10223,11 @@ Panel {
                               anchors.rightMargin: Style.space(4)
                               spacing: Style.space(4)
 
-                              Text {
-                                textFormat: Text.PlainText
+                              PanelText {
                                 Layout.preferredWidth: Style.space(110)
                                 text: modelData.name
-                                color: root.bar.foreground
                                 opacity: 0.85
                                 elide: Text.ElideRight
-                                font.family: root.bar.fontFamily
-                                font.pixelSize: root.fontSize
                               }
                               TextField {
                                 Layout.fillWidth: true
@@ -10904,13 +10237,11 @@ Panel {
                                 font.pixelSize: root.fontSize
                                 onTextEdited: { envPopup.draft[index].value = text; envPopup.dirty = true }
                               }
-                              Text {
-                                textFormat: Text.PlainText
+                              PanelText {
                                 text: root.icons.remove
                                 Layout.leftMargin: Style.space(8)
                                 color: envVarHover.hovered ? Commons.Color.urgent : root.bar.foreground
                                 opacity: envVarHover.hovered ? 0.8 : 0.3
-                                font.family: root.bar.fontFamily
                                 font.pixelSize: root.iconSize
                                 MouseArea {
                                   anchors.fill: parent
@@ -10926,14 +10257,12 @@ Panel {
                       }
                     }
 
-                    Text {
-                      textFormat: Text.PlainText
+                    PanelText {
                       Layout.fillWidth: true
                       visible: root.parsedEnv.invalid.length > 0
                       text: "Ignored: " + root.parsedEnv.invalid.join(" ")
                       color: Commons.Color.urgent
                       wrapMode: Text.WordWrap
-                      font.family: root.bar.fontFamily
                       font.pixelSize: root.fontSizeSmall
                     }
 
@@ -10963,14 +10292,12 @@ Panel {
                       }
                     }
 
-                    Text {
-                      textFormat: Text.PlainText
+                    PanelText {
                       Layout.fillWidth: true
                       visible: envPopup.error !== ""
                       text: envPopup.error
                       color: Commons.Color.urgent
                       wrapMode: Text.WordWrap
-                      font.family: root.bar.fontFamily
                       font.pixelSize: root.fontSizeSmall
                     }
 
@@ -11005,39 +10332,25 @@ Panel {
                   spacing: Style.space(4)
                   visible: !modelAliasRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Model alias"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.modelAlias !== "" ? root.modelAlias : (ModelsIni.deriveDefaultAlias(root.currentModel()) || "auto")
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: root.modelAlias !== "" ? 0.85 : 0.45
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: modelAliasHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: modelAliasHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -11054,12 +10367,8 @@ Panel {
                   spacing: Style.space(4)
                   visible: modelAliasRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "Model alias"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
                   TextField {
@@ -11113,39 +10422,25 @@ Panel {
                   spacing: Style.space(4)
                   visible: !systemoneCtxRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "System One context"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.systemoneCtx !== "" ? root.systemoneCtx : "0"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: systemoneCtxHoverArea.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: systemoneCtxHoverArea.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -11162,12 +10457,8 @@ Panel {
                   spacing: Style.space(4)
                   visible: systemoneCtxRow.editing
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "System One context"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                   }
                   NumField {
@@ -11201,8 +10492,7 @@ Panel {
                   text: "Context window for the System One backend, in tokens"
                 }
               }
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(4)
                 visible: root.builtinOnPage("systemoneCtx") && root.rowHasIgnoredFlag("systemoneCtx")
@@ -11241,44 +10531,30 @@ Panel {
                   anchors.rightMargin: Style.space(4)
                   spacing: Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: spec ? spec.label : modelData.key
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                     elide: Text.ElideRight
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     Layout.fillWidth: true
                     text: root.leaderDots
-                    color: root.bar.foreground
                     opacity: 0.15
                     elide: Text.ElideRight
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: customRow.ptype === "bool"
                       ? (modelData.value === "true" ? "on" : "off")
                       : (String(modelData.value) !== "" ? modelData.value : "—")
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     opacity: 0.85
                     elide: Text.ElideRight
                     Layout.maximumWidth: Style.space(140)
                   }
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.icons.remove
                     Layout.leftMargin: Style.space(8)
                     color: customHover.containsMouse ? Commons.Color.urgent : root.bar.foreground
                     opacity: customHover.containsMouse ? 0.8 : 0.3
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.iconSize
                     MouseArea {
                       anchors.fill: parent
@@ -11381,46 +10657,36 @@ Panel {
             // ollama only understands OLLAMA_* variables. A row left over from
             // a llama.cpp profile is not passed; name it instead of letting
             // envPrefix drop it silently.
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               visible: root.backend === "ollama" && root.ollamaInvalidParams.length > 0
               text: "Ignored by ollama (not OLLAMA_* variables): " +
                     root.ollamaInvalidParams.join(", ")
               color: Commons.Color.urgent
               wrapMode: Text.WordWrap
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
             }
 
             // What the splitter could not attribute to a flag. Still passed
             // verbatim at launch, so it has to be visible: a stray token that
             // reaches the server unannounced is the invisible state splitting
             // was meant to end.
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               visible: root.effectiveTuningPage === 0 &&
                        String(root.extraArgs).trim() !== "" && root.paramCatalogue.length > 0
               text: "Not recognised as flags, passed through as typed: " + root.extraArgs
-              color: root.bar.foreground
               opacity: 0.7
               wrapMode: Text.WordWrap
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
             }
 
             // Unlike stray args, these are dropped: a token that is not
             // NAME=value has no safe meaning in front of the server command.
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               visible: root.builtinOnPage("envVars") && root.parsedEnv.invalid.length > 0
               text: "Ignored in Environment (not NAME=value): " + root.parsedEnv.invalid.join(" ")
               color: root.bar.urgent
               wrapMode: Text.WordWrap
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
             }
 
             // Footer: the parameter list takes the rest of the page.
@@ -11445,11 +10711,8 @@ Panel {
               Layout.fillWidth: true
               spacing: Style.space(6)
 
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: "Companion"
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
                 font.pixelSize: root.fontSizeSmall
                 opacity: 0.6
                 font.bold: true
@@ -11457,13 +10720,11 @@ Panel {
 
               Item { Layout.fillWidth: true }
 
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 text: root.decisionState ? Instances.stateLabel(root.decisionState) : "stopped"
                 color: root.decisionState && root.decisionState.running
                   ? Commons.Color.accent : root.bar.foreground
                 opacity: root.decisionState && root.decisionState.running ? 0.9 : 0.45
-                font.family: root.bar.fontFamily
                 font.pixelSize: root.fontSizeSmall
                 font.features: root.tabularFigures
               }
@@ -11507,32 +10768,23 @@ Panel {
                           : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.25))
                   }
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: "System One"
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: root.fontSize
                     font.bold: true
                   }
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: ":" + root.systemonePort
-                    color: root.bar.foreground
                     opacity: 0.5
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSizeSmall
                   }
 
                   Item { Layout.fillWidth: true }
 
-                  Text {
-                    textFormat: Text.PlainText
+                  PanelText {
                     text: root.decisionState ? Instances.stateLabel(root.decisionState) : "stopped"
                     color: decisionCard.up ? Commons.Color.accent : root.bar.foreground
                     opacity: decisionCard.up ? 0.9 : 0.45
-                    font.family: root.bar.fontFamily
                     font.pixelSize: root.fontSizeSmall
                     font.features: root.tabularFigures
                   }
@@ -11637,8 +10889,7 @@ Panel {
                   }
                 }
 
-                Text {
-                  textFormat: Text.PlainText
+                PanelText {
                   Layout.fillWidth: true
                   visible: !!(root.decisionState && String(root.decisionState.lastError || "") !== "")
                   text: root.decisionState ? String(root.decisionState.lastError || "") : ""
@@ -11646,7 +10897,6 @@ Panel {
                   wrapMode: Text.WordWrap
                   maximumLineCount: 2
                   elide: Text.ElideRight
-                  font.family: root.bar.fontFamily
                   font.pixelSize: root.fontSizeSmall
                 }
               }
@@ -11701,32 +10951,23 @@ Panel {
               onClicked: root.cycleLogSource()
             }
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               Layout.fillWidth: true
               text: root.leaderDots
-              color: root.bar.foreground
               opacity: 0.15
               elide: Text.ElideRight
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
             }
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               text: logView.stickToBottom ? "live" : "paused"
               color: logView.stickToBottom ? Commons.Color.accent : root.bar.foreground
               opacity: logView.stickToBottom ? 1.0 : 0.5
-              font.family: root.bar.fontFamily
               font.pixelSize: root.fontSizeSmall
             }
 
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               text: logModel.count + " line" + (logModel.count === 1 ? "" : "s")
-              color: root.bar.foreground
               opacity: 0.45
-              font.family: root.bar.fontFamily
               font.pixelSize: root.fontSizeSmall
             }
           }
@@ -11799,8 +11040,7 @@ Panel {
             // An empty log used to be indistinguishable from a broken one.
             // Say which it is: no journal for this server, or one attached
             // and simply quiet so far.
-            Text {
-              textFormat: Text.PlainText
+            PanelText {
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.top: parent.top
@@ -11814,11 +11054,8 @@ Panel {
                        ? "Nothing in the journal for " + root.logTitle + " yet."
                        : (root.running ? "Waiting for the server to log something…"
                                        : "No log yet -- the server is not running."))
-              color: root.bar.foreground
               opacity: 0.5
               wrapMode: Text.WordWrap
-              font.family: root.bar.fontFamily
-              font.pixelSize: root.fontSize
             }
 
             // A small floating pill, not a button: it is a state hint that
@@ -11835,15 +11072,13 @@ Panel {
               border.width: 1
               border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
 
-              Text {
-                textFormat: Text.PlainText
+              PanelText {
                 id: followLabel
                 anchors.centerIn: parent
                 text: logView.missedLines > 0
                       ? "\u2193 " + logView.missedLines + " new"
                       : "\u2193 Latest"
                 color: Commons.Color.accent
-                font.family: root.bar.fontFamily
                 font.pixelSize: root.fontSizeSmall
               }
 

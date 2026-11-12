@@ -120,11 +120,6 @@ function barSwitchText(base, switchState, pending) {
   return pending ? base + " •" : base
 }
 
-function barSwitchTooltip(switchState, inflight) {
-  if (switchState === "draining")
-    return "Restarting: waiting for " + (inflight || 0) + " running request" + (inflight === 1 ? "" : "s")
-  return ""
-}
 
 // Parses the environment assignment string stored in `extraEnv`:
 // "NAME=value NAME2='with spaces'" into [{name, value}], plus the tokens that
@@ -802,11 +797,9 @@ function plainText(value, limit) {
 
 if (typeof module !== "undefined") {
   module.exports = {
-    RESTARTS_BEFORE_LOOP: RESTARTS_BEFORE_LOOP,
     parseUnitState: parseUnitState,
     isCrashLooping: isCrashLooping,
     readSettings: readSettings,
-    PLAIN_TEXT_LIMIT: PLAIN_TEXT_LIMIT,
     plainText: plainText,
     statusLabel: statusLabel,
     slotFilePrefix: slotFilePrefix,
@@ -827,13 +820,11 @@ if (typeof module !== "undefined") {
     isEnvName: isEnvName,
     parseEnvAssignments: parseEnvAssignments,
     formatEnvAssignments: formatEnvAssignments,
-    barSwitchTooltip: barSwitchTooltip,
     barText: barText,
     dirName: dirName,
     ancestorDirs: ancestorDirs,
     baseName: baseName,
     baseModelName: baseModelName,
-    isMmprojName: isMmprojName,
     isMtpName: isMtpName,
     classifyModelFiles: classifyModelFiles,
     parseFindOutput: parseFindOutput,

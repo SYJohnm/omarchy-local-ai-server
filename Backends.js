@@ -101,7 +101,6 @@ var LLAMA_CPP = {
   // Live per-slot telemetry: pp% sweep and running tg, polled over HTTP.
   metricsMode: "slots",
   // We always spawn llama-server ourselves, so stopping it is always ours.
-  externallyManaged: false,
   // Model selection is a file path chosen from the gguf tree.
   modelKind: "file",
   // Features that only exist on this backend; Panel.qml hides the

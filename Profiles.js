@@ -272,7 +272,6 @@ if (typeof module !== "undefined") {
   module.exports = {
     FIELDS: FIELDS,
     key: key,
-    keyFor: keyFor,
     snapshot: snapshot,
     resolve: resolve,
     get: get,
