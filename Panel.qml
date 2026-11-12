@@ -6195,8 +6195,12 @@ Panel {
       anchors.right: parent.right
       anchors.topMargin: Style.space(3)
       anchors.rightMargin: Style.space(3)
-      color: root.starting ? Commons.Color.warning
-        : (root.tokensPerSec > 0 || root.ppActive ? Commons.Color.accent : Commons.Color.muted)
+      // Three states, three readings. Idle used to be muted grey, which next
+      // to no dot at all -- which is what a stopped server shows -- was not a
+      // difference anyone could see at bar size.
+      color: root.starting ? Commons.Color.warning : Commons.Color.accent
+      opacity: root.starting ? 0.9
+        : (root.tokensPerSec > 0 || root.ppActive ? 1.0 : 0.5)
     }
   }
 
@@ -6519,7 +6523,9 @@ Panel {
         font.family: root.bar.fontFamily
         font.pixelSize: root.fontSizeSmall
         opacity: 0.45
-        elide: Text.ElideRight
+        // Elided, this read "right-click …", which is the half that says what
+        // the other button does. The card is free to be one line taller.
+        wrapMode: Text.WordWrap
       }
     }
   }
@@ -8584,6 +8590,15 @@ Panel {
                       ? Model.plainText(root.launchModel.replace(Quickshell.env("HOME"), "~"), 300)
                       : "Pick the model this server loads."
               }
+            }
+
+            // Scanning is triggered by the things that change what is on
+            // disk -- a folder added, the backend switched -- so a model
+            // copied in while the panel was open had no way to appear.
+            TextAction {
+              Layout.fillWidth: true
+              text: root.activeScanning ? "Scanning…" : "Rescan models"
+              onClicked: if (!root.activeScanning) root.refreshModels()
             }
 
             // Accordion -------------------------------------------------
