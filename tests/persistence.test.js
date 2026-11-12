@@ -127,3 +127,10 @@ test("mergeBuilds does not prune a build this scan only just lost", () => {
   assert.strictEqual(merged.length, 1)
   assert.strictEqual(merged[0].missing, true)
 })
+
+test("mergeBuilds does not prune when the scan reported nothing", () => {
+  // A probe that fails (no python3, bad JSON) hands in an empty list. Treating
+  // that as "every build is gone" would empty the panel's list on a hiccup.
+  const stale = { path: "/home/u/gone/llama-server", real: "/home/u/gone/llama-server", missing: true }
+  assert.strictEqual(B.mergeBuilds([stale], [], []).length, 1)
+})

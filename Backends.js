@@ -549,7 +549,9 @@ function mergeBuilds(previous, fresh, configured) {
     // lists a configured path itself, present or not, so those are kept here.
     // No `configured` means the caller cannot tell (the startup restore runs
     // before the probe): prune nothing.
-    if (configured && prev && prev.missing === true
+    // A scan that reported nothing is a scan that failed (no python3, a
+    // parse error): it is not evidence that a build is gone.
+    if (configured && (fresh || []).length > 0 && prev && prev.missing === true
         && configured.indexOf(String(prev.path || "")) === -1) continue
     add(prev, true)
   }

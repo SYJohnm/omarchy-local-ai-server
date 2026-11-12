@@ -2241,6 +2241,16 @@ Panel {
     }
   }
 
+  // The build paths a setting names, expanded. A build that is gone is kept
+  // in the list while one of these still names it, because the probe reports a
+  // configured path itself, present or not.
+  function configuredBuildPaths() {
+    var out = root.approvedBuilds.slice()
+    for (var i = 0; i < root.extraBuildPaths.length; i++)
+      out.push(root.expandPath(root.extraBuildPaths[i]))
+    return out
+  }
+
   function expandPath(p) {
     var s = String(p || "")
     if (s.indexOf("~") === 0) return Quickshell.env("HOME") + s.slice(1)
@@ -2694,7 +2704,12 @@ Panel {
           }
           savedBuilds.push(build)
         }
-        root.llamaBuilds = Backends.mergeBuilds(savedBuilds, root.llamaBuilds)
+        // The probe can answer before this file is read, and then this merge
+        // is what lands in the panel: pruning only in the probe's own handler
+        // let a deleted build come back here. Before the probe has spoken
+        // nothing may be pruned, since absence is not yet evidence.
+        root.llamaBuilds = Backends.mergeBuilds(savedBuilds, root.llamaBuilds,
+          root.buildsProbed ? root.configuredBuildPaths() : null)
       }
     }
     // Profiles are read after the flat values, which double as the migration
@@ -3129,6 +3144,13 @@ Panel {
     for (var i = 0; i < root.extraBuildPaths.length; i++)
       if (root.extraBuildPaths[i] !== path) next.push(root.extraBuildPaths[i])
     root.extraBuildPaths = next
+    // altBinary is the single-path setting extraBuildPaths replaced. Nothing
+    // writes it any more, but one left over from before still names a build,
+    // so removing that build has to clear it -- the same way removeModelDir
+    // clears the modelsDir setting it matches. Without this the row came back
+    // on every probe with no way to get rid of it.
+    if (root.altBinary !== "" && expandPath(root.altBinary) === path)
+      root.setWidgetSetting("altBinary", "")
     // Forgetting a build withdraws the approval too, so re-adding the same
     // path later asks again rather than inheriting a decision made about
     // whatever used to be at it.
@@ -3497,10 +3519,8 @@ Panel {
       onStreamFinished: {
         var builds = []
         try { builds = JSON.parse(String(text || "").trim() || "[]") } catch (e) { builds = [] }
-        var named = root.approvedBuilds.slice()
-        for (var cb = 0; cb < root.extraBuildPaths.length; cb++)
-          named.push(root.expandPath(root.extraBuildPaths[cb]))
-        root.llamaBuilds = Backends.mergeBuilds(root.llamaBuilds, Array.isArray(builds) ? builds : [], named)
+        root.llamaBuilds = Backends.mergeBuilds(root.llamaBuilds,
+          Array.isArray(builds) ? builds : [], root.configuredBuildPaths())
         root.buildsProbed = true
         root.scheduleSettingsSave()
         if (root.settingsLoaded) root.sanitizeSettings()
@@ -7530,6 +7550,7 @@ Panel {
                     textFormat: Text.PlainText
                     text: root.icons.remove
                     visible: root.extraBuildPaths.indexOf(modelData.path) !== -1
+                      || (root.altBinary !== "" && root.expandPath(root.altBinary) === modelData.path)
                       || root.approvedBuilds.indexOf(modelData.path) !== -1
                     color: root.bar.foreground
                     opacity: 0.45
