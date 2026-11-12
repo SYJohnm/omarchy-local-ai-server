@@ -1733,7 +1733,15 @@ Panel {
   property var modelDirCounts: ({})
   // Waits for detection so the first step never flashes "not installed" for
   // a binary the probe simply has not reported yet.
-  readonly property bool showingSetup: root.settingsLoaded && root.capabilitiesProbed && !root.setupDone
+  // A re-run of setup, as against a first run. Deliberately not setupDone:
+  // that flag is the record that setup was completed once, and clearing it to
+  // show the pages again meant dismissing the panel mid-way left the install
+  // looking unconfigured for ever -- setup then came back on every open and
+  // every shell restart until Finish or Skip was pressed. This is view state
+  // and is not saved, so closing the panel ends the re-run.
+  property bool showingSetupAgain: false
+  readonly property bool showingSetup: root.settingsLoaded && root.capabilitiesProbed
+    && (!root.setupDone || root.showingSetupAgain)
   // Reuses the setup overlay after first run, so folders and forks can be
   // added later without hand-editing shell.json. Kept separate from
   // `setupDone` so closing settings does not bring first-run setup back.
@@ -3064,7 +3072,7 @@ Panel {
   }
 
   function startSetup() {
-    root.setupDone = false
+    root.showingSetupAgain = true
     root.showingSettings = false
     root.settingsSection = "backend"
     root.showingLogs = false
@@ -3081,10 +3089,12 @@ Panel {
 
   function closeSettings() {
     root.showingSettings = false
+    root.showingSetupAgain = false
   }
 
   function finishSetup() {
     root.setupDone = true
+    root.showingSetupAgain = false
     root.showingSettings = false
     root.currentPage = 0
     root.scheduleSettingsSave()
@@ -3092,6 +3102,7 @@ Panel {
 
   function skipSetup() {
     root.setupDone = true
+    root.showingSetupAgain = false
     root.showingSettings = false
     root.currentPage = 0
     root.scheduleSettingsSave()
@@ -5455,7 +5466,11 @@ Panel {
     }
   }
 
-  onOpenedChanged: if (opened) {
+  onOpenedChanged: if (!opened) {
+    // Clicking away ends a setup re-run, the same as Skip: a dismissed wizard
+    // must not be waiting on the next open.
+    root.showingSetupAgain = false
+  } else {
     root.showingLogs = false
     // shortcut: a full scan at most once a minute, refreshed by any explicit
     // rescan; upgrade to a watch if new models must appear immediately.
